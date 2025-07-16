@@ -185,7 +185,7 @@ def clean_car_data(df: pd.DataFrame):
 @op
 def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
-    pk_column = 'quotation_num'
+    pk_column = 'car_id'
 
     insp = inspect(target_engine)
     columns = [col['name'] for col in insp.get_columns(table_name)]
