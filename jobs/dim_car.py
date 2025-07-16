@@ -20,7 +20,7 @@ source_port = os.getenv('DB_PORT')
 source_db = 'fininsurance'
 
 source_engine = create_engine(
-    f"mariadb+mariadbconnector://{source_user}:{source_password}@{source_host}:{source_port}/{source_db}"
+    f"mysql+pymysql://{source_user}:{source_password}@{source_host}:{source_port}/{source_db}"
 )
 
 # ✅ DB target (PostgreSQL)
