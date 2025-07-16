@@ -184,6 +184,9 @@ def clean_car_data(df: pd.DataFrame):
         if pd.isnull(value):
             return None
         value = str(value).strip()
+        # ลบจุดซ้ำ เช่น "1..2" → "1.2"
+        value = re.sub(r'\.{2,}', '.', value)
+        # พยายามแปลงเป็น float
         try:
             float_val = float(value)
             return float_val
