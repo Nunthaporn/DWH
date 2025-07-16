@@ -39,7 +39,7 @@ def extract_car_data():
     query_pay = """
         SELECT quo_num, id_motor1, id_motor2, datestart
         FROM fin_system_pay
-        WHERE datestart >= '2025-05-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query_pay, source_engine)
@@ -49,7 +49,7 @@ def extract_car_data():
                yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
                weight_car, cc_car, color_car, datestart
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-05-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_plan = pd.read_sql(query_plan, source_engine)
@@ -139,9 +139,46 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
     df_cleaned['seat_count'] = df_cleaned['seat_count'].astype('Int64')
 
-    # ✅ เพิ่ม: ถ้าข้อมูลเป็น "-", ".", "...", "none" → แปลงเป็น None
-    pattern_to_none = r'^[-\.]+$|^(?i:none)$'
+    # ✅ ปรับ pattern ใหม่: รองรับ "-", ".", "none", "NaN", "UNDEFINE", "undefined"
+    pattern_to_none = r'^[-\.]+$|^(?i:none|nan|undefine|undefined)$'
     df_cleaned = df_cleaned.replace(pattern_to_none, np.nan, regex=True)
+
+    # ✅ ทำความสะอาด engine_number ให้มีเฉพาะ A-Z, a-z, 0-9
+    def clean_engine_number(value):
+        if pd.isnull(value):
+            return None
+        cleaned = re.sub(r'[^A-Za-z0-9]', '', str(value))
+        return cleaned if cleaned else None
+
+    df_cleaned['engine_number'] = df_cleaned['engine_number'].apply(clean_engine_number)
+
+    # ✅ ทำความสะอาด car_province ให้มีเฉพาะจังหวัด
+    def clean_province(value):
+        if pd.isnull(value):
+            return None
+        value = str(value).strip()
+        if value in province_list:
+            return value
+        return None
+
+    df_cleaned['car_province'] = df_cleaned['car_province'].apply(clean_province)
+    df_cleaned = df_cleaned.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
+    df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
+    
+    series_noise_pattern = r"^[-–_\.\/\+].*|^<=200CC$|^>250CC$|^‘NQR 75$"
+
+    df_cleaned['car_series'] = df_cleaned['car_series'].replace(series_noise_pattern, np.nan, regex=True)
+    df_cleaned['car_subseries'] = df_cleaned['car_subseries'].replace(series_noise_pattern, np.nan, regex=True)
+
+    def remove_leading_vowels(value):
+        if pd.isnull(value):
+            return value
+        # ลบสระและเครื่องหมายกำกับไทยต้นข้อความ
+        return re.sub(r"^[\u0E30-\u0E39\u0E47-\u0E4E\u0E3A]+", "", value.strip())
+
+    df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
+    df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
 
     return df_cleaned
 
@@ -195,5 +232,5 @@ if __name__ == "__main__":
     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
     # print(f"💾 Saved to {output_path}")
 
-    # load_car_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_car.")
+    load_car_data(df_clean)
+    print("🎉 Test completed! Data upserted to dim_car.")
