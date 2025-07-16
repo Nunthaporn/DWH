@@ -180,6 +180,18 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
     df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
 
+    def clean_engine_capacity(value):
+        if pd.isnull(value):
+            return None
+        value = str(value).strip()
+        try:
+            float_val = float(value)
+            return float_val
+        except ValueError:
+            return None
+
+    df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_engine_capacity)
+
     return df_cleaned
 
 @op
