@@ -77,7 +77,7 @@ def clean_car_data(df: pd.DataFrame):
         "yearplan": "car_year",
         "detail_car": "car_detail",
         "vehGroup": "vehicle_group",
-        "vehBodyTypeDesc": "veh_body_type_desc",
+        "vehBodyTypeDesc": "vehbodytypedesc",
         "seatingCapacity": "seat_count",
         "weight_car": "vehicle_weight",
         "cc_car": "engine_capacity",
