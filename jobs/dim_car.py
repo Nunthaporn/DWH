@@ -261,12 +261,12 @@ def dim_car_etl():
 if __name__ == "__main__":
     df_raw = extract_car_data()
     print("✅ Extracted:", df_raw.shape)
-    print(df_raw.head(3))
+    # print(df_raw.head(3))
 
     df_clean = clean_car_data(df_raw)
     print("✅ Cleaned columns:", df_clean.columns)
 
-    print(df_clean.head(10))
+    # print(df_clean.head(10))
 
     # output_path = "cleaned_dim_car.xlsx"
     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
