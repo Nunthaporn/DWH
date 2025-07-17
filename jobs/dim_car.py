@@ -136,8 +136,6 @@ def clean_car_data(df: pd.DataFrame):
             return None
 
     df_cleaned['car_registration'] = df_cleaned['car_registration'].apply(extract_clean_plate)
-    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
-    df_cleaned['seat_count'] = df_cleaned['seat_count'].astype('Int64')
 
     # ✅ ปรับ pattern ใหม่: รองรับ "-", ".", "none", "NaN", "UNDEFINE", "undefined"
     pattern_to_none = r'^[-\.]+$|^(?i:none|nan|undefine|undefined)$'
@@ -165,6 +163,13 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned = df_cleaned.applymap(lambda x: x.strip() if isinstance(x, str) else x)
     df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
     df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
+
+    def has_thai_chars(value):
+        if pd.isnull(value):
+            return False
+        return bool(re.search(r'[ก-๙]', str(value)))
+
+    df_cleaned = df_cleaned[~df_cleaned['car_id'].apply(has_thai_chars)]
     
     series_noise_pattern = r"^[-–_\.\/\+].*|^<=200CC$|^>250CC$|^‘NQR 75$"
 
@@ -211,6 +216,9 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned['vehicle_weight'] = df_cleaned['vehicle_weight'].apply(clean_float_only)
     df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
     df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+
+    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
+    df_cleaned['seat_count'] = df_cleaned['seat_count'].astype('Int64')
 
     return df_cleaned
 
