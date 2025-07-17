@@ -217,8 +217,8 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
     df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
 
-    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
-    df_cleaned['seat_count'] = df_cleaned['seat_count'].astype('Int64')
+    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce').astype('Int64')
+    df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
 
     return df_cleaned
 
