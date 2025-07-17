@@ -195,6 +195,23 @@ def clean_car_data(df: pd.DataFrame):
 
     df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_engine_capacity)
 
+    def clean_float_only(value):
+        if pd.isnull(value):
+            return None
+        value = str(value).strip()
+        value = re.sub(r'\.{2,}', '.', value)
+        if value in ['', '.', '-']:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_float_only)
+    df_cleaned['vehicle_weight'] = df_cleaned['vehicle_weight'].apply(clean_float_only)
+    df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+    df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+
     return df_cleaned
 
 @op
@@ -243,9 +260,9 @@ if __name__ == "__main__":
 
     print(df_clean.head(10))
 
-    # output_path = "cleaned_dim_car.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+    output_path = "cleaned_dim_car.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
 
-    load_car_data(df_clean)
-    print("🎉 Test completed! Data upserted to dim_car.")
+    # load_car_data(df_clean)
+    # print("🎉 Test completed! Data upserted to dim_car.")
