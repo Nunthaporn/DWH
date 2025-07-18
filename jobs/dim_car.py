@@ -219,6 +219,8 @@ def clean_car_data(df: pd.DataFrame):
 
     df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce').astype('Int64')
     df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
+    df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True)
+    df_cleaned = df_cleaned.drop_duplicates()
 
     return df_cleaned
 
@@ -237,7 +239,7 @@ def load_car_data(df: pd.DataFrame):
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
     records = df.to_dict(orient='records')
 
-    chunk_size = 5000
+    chunk_size = 50000
     for start in range(0, len(records), chunk_size):
         end = start + chunk_size
         chunk = records[start:end]
