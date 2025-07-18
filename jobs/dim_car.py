@@ -224,37 +224,84 @@ def clean_car_data(df: pd.DataFrame):
 
     return df_cleaned
 
+# @op
+# def load_car_data(df: pd.DataFrame):
+#     table_name = 'dim_car'
+#     pk_column = 'car_id'
+
+#     insp = inspect(target_engine)
+#     columns = [col['name'] for col in insp.get_columns(table_name)]
+#     if 'quotation_num' not in columns:
+#         with target_engine.begin() as conn:
+#             conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN quotation_num varchar;'))
+#         print("✅ Added column 'quotation_num'")
+
+#     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+#     records = df.to_dict(orient='records')
+
+#     chunk_size = 50000
+#     for start in range(0, len(records), chunk_size):
+#         end = start + chunk_size
+#         chunk = records[start:end]
+#         print(f"🔄 Upserting chunk {start // chunk_size + 1}: records {start} to {end - 1}")
+
+#         with target_engine.begin() as conn:
+#             for record in chunk:
+#                 if not record.get('quotation_num'):
+#                     continue
+#                 stmt = pg_insert(metadata).values(**record)
+#                 update_columns = {c.name: stmt.excluded[c.name] for c in metadata.columns if c.name != pk_column}
+#                 stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
+#                 conn.execute(stmt)
+
+#     print("✅ Upsert completed successfully.")
+
 @op
 def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
-    insp = inspect(target_engine)
-    columns = [col['name'] for col in insp.get_columns(table_name)]
-    if 'quotation_num' not in columns:
-        with target_engine.begin() as conn:
-            conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN quotation_num varchar;'))
-        print("✅ Added column 'quotation_num'")
+    # ✅ Load ข้อมูลเดิมจาก DB ทั้งตาราง (หรือเฉพาะคอลัมน์สำคัญ)
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
+    # ✅ กำหนด index เทียบจาก car_id
+    df.set_index(pk_column, inplace=True)
+    df_existing.set_index(pk_column, inplace=True)
+
+    # ✅ Identify: car_id ใหม่ที่ไม่มีใน DB
+    new_ids = df.index.difference(df_existing.index)
+    df_to_insert = df.loc[new_ids].reset_index()
+
+    # ✅ Identify: car_id ที่มีอยู่แล้ว และข้อมูลแตกต่างจาก DB
+    common_ids = df.index.intersection(df_existing.index)
+    df_compare = df.loc[common_ids]
+    df_existing_subset = df_existing.loc[common_ids]
+
+    # ✅ หาเฉพาะแถวที่ข้อมูลแตกต่างกันจริง
+    df_diff = df_compare[df_compare.ne(df_existing_subset).any(axis=1)].reset_index()
+
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_diff)} rows")
+
+    # ✅ Metadata for insert/update
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-    records = df.to_dict(orient='records')
 
-    chunk_size = 50000
-    for start in range(0, len(records), chunk_size):
-        end = start + chunk_size
-        chunk = records[start:end]
-        print(f"🔄 Upserting chunk {start // chunk_size + 1}: records {start} to {end - 1}")
-
+    # ✅ Insert ใหม่
+    if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            for record in chunk:
-                if not record.get('quotation_num'):
-                    continue
+            conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
+
+    # ✅ Update เฉพาะที่เปลี่ยน
+    if not df_diff.empty:
+        with target_engine.begin() as conn:
+            for record in df_diff.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
                 update_columns = {c.name: stmt.excluded[c.name] for c in metadata.columns if c.name != pk_column}
                 stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
                 conn.execute(stmt)
 
-    print("✅ Upsert completed successfully.")
+    print("✅ Insert/update completed.")
 
 @job
 def dim_car_etl():
