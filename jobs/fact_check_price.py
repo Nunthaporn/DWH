@@ -26,6 +26,7 @@ def extract_fact_check_price():
         SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
         FROM fin_customer_logs_B2B
+        WHERE create_at >= '2025-01-01' AND create_at < '2025-04-30'
     """, source_engine, chunksize=10000)
 
     df_checkprice = pd.read_sql("""
