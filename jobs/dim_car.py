@@ -270,31 +270,36 @@ def load_car_data(df: pd.DataFrame):
 
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ กำหนด index จาก car_id
-    df.set_index(pk_column, inplace=True)
-    df_existing.set_index(pk_column, inplace=True)
-
     # ✅ Identify: car_id ใหม่
-    new_ids = df.index.difference(df_existing.index)
-    df_to_insert = df.loc[new_ids].reset_index()
+    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
+    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
-    # ✅ Identify: car_id ที่มีอยู่แล้ว และอาจมีข้อมูลเปลี่ยน
-    common_ids = df.index.intersection(df_existing.index)
-    df_compare = df.loc[common_ids].copy().reset_index()
-    df_existing_subset = df_existing.loc[common_ids].copy().reset_index()
+    # ✅ Identify: car_id ที่มีในทั้งสองชุด
+    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+    df_common_new = df[df[pk_column].isin(common_ids)].copy()
+    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ ตรวจสอบคอลัมน์ให้ตรงกัน
-    df_compare = df_compare[df_existing_subset.columns]
+    # ✅ Merge เพื่อเปรียบเทียบระหว่าง old และ new
+    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ เปรียบเทียบเฉพาะกรณีขนาดตรงกัน
-    if df_compare.shape == df_existing_subset.shape:
-        mask = df_compare.ne(df_existing_subset).any(axis=1)
-        df_diff = df_compare[mask].copy()
-    else:
-        raise ValueError(f"❌ Shape mismatch: df_compare={df_compare.shape}, df_existing_subset={df_existing_subset.shape}")
+    # ✅ หาเฉพาะ column ที่ต้อง compare (exclude primary key)
+    compare_cols = [col for col in df.columns if col != pk_column]
+
+    # ✅ ตรวจหาความแตกต่างในแต่ละ column
+    def is_different(row):
+        for col in compare_cols:
+            if row.get(f"{col}_new") != row.get(f"{col}_old"):
+                return True
+        return False
+
+    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+
+    # ✅ เตรียมเฉพาะ new value สำหรับ update
+    update_records = df_diff[[f"{col}_new" for col in [pk_column] + compare_cols]].copy()
+    update_records.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff)} rows")
+    print(f"🔄 Update: {len(update_records)} rows")
 
     # ✅ Prepare metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
@@ -305,9 +310,9 @@ def load_car_data(df: pd.DataFrame):
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
     # ✅ Update
-    if not df_diff.empty:
+    if not update_records.empty:
         with target_engine.begin() as conn:
-            for record in df_diff.to_dict(orient='records'):
+            for record in update_records.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
                 update_columns = {c.name: stmt.excluded[c.name] for c in metadata.columns if c.name != pk_column}
                 stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
