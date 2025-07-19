@@ -261,51 +261,60 @@ def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
-    # ✅ กรองซ้ำก่อน set_index เพื่อหลีกเลี่ยง duplicated index
+    # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Load ข้อมูลเดิมจาก DB
+    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
-    # ✅ กรองซ้ำจาก DB
+    # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Identify: car_id ใหม่
+    # ✅ Identify car_id ที่ยังไม่มีใน DB
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
-    # ✅ Identify: car_id ที่มีอยู่แล้ว
+    # ✅ Identify car_id ที่มีอยู่แล้ว
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge เพื่อตรวจสอบความแตกต่าง
+    # ✅ Merge ข้อมูลใหม่-เก่า ด้วย suffix
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ เลือกเฉพาะคอลัมน์ที่มีในทั้งสองฝั่ง (ไม่รวม key)
+    # ✅ ระบุคอลัมน์ที่ต้องการเปรียบเทียบ
     exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
-    compare_cols = [col for col in df.columns if col not in exclude_columns and f"{col}_new" in merged.columns and f"{col}_old" in merged.columns]
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
+    ]
 
-    # ✅ ตรวจหาความแตกต่าง
+    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
     def is_different(row):
         for col in compare_cols:
-            if pd.isna(row[f"{col}_new"]) and pd.isna(row[f"{col}_old"]):
+            val_new = row.get(f"{col}_new")
+            val_old = row.get(f"{col}_old")
+
+            if pd.isna(val_new) and pd.isna(val_old):
                 continue
-            if row[f"{col}_new"] != row[f"{col}_old"]:
+            if val_new != val_old:
                 return True
         return False
 
+    # ✅ ตรวจหาข้อมูลที่เปลี่ยนจริง ๆ
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียมเฉพาะข้อมูลใหม่สำหรับ update
+    # ✅ เตรียมข้อมูลใหม่สำหรับ update
     update_records = df_diff[[f"{col}_new" for col in [pk_column] + compare_cols]].copy()
     update_records.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(update_records)} rows")
 
-    # ✅ Metadata
+    # ✅ เตรียม metadata สำหรับ PostgreSQL
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
     # ✅ Insert ใหม่
@@ -313,13 +322,20 @@ def load_car_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
-    # ✅ Update ที่เปลี่ยน
+    # ✅ Update แถวที่แตกต่าง
     if not update_records.empty:
         with target_engine.begin() as conn:
             for record in update_records.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
-                update_columns = {c.name: stmt.excluded[c.name] for c in metadata.columns if c.name != pk_column}
-                stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
+                update_columns = {
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata.columns
+                    if c.name != pk_column
+                }
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[pk_column],
+                    set_=update_columns
+                )
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
