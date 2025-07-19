@@ -26,13 +26,13 @@ def extract_fact_check_price():
         SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
         FROM fin_customer_logs_B2B
-    """, source_engine, chunksize=50000)
+    """, source_engine, chunksize=10000)
 
     df_checkprice = pd.read_sql("""
         SELECT id_cus, datekey, brand, model, submodel, yearcar, idcar, nocar, type_ins,
                company, tunprakan, deduct, status, type_driver, type_camera, type_addon, status_send
         FROM fin_checkprice
-    """, source_engine, chunksize=50000)
+    """, source_engine, chunksize=10000)
 
     return df_logs, df_checkprice
 
