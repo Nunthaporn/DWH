@@ -268,40 +268,44 @@ def load_car_data(df: pd.DataFrame):
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
+    # ✅ กรองซ้ำจาก DB
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
     # ✅ Identify: car_id ใหม่
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
-    # ✅ Identify: car_id ที่มีในทั้งสองชุด
+    # ✅ Identify: car_id ที่มีอยู่แล้ว
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge เพื่อเปรียบเทียบระหว่าง old และ new
+    # ✅ Merge เพื่อตรวจสอบความแตกต่าง
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ หาเฉพาะ column ที่ต้อง compare (exclude primary key)
-    compare_cols = [col for col in df.columns if col != pk_column]
+    # ✅ เลือกเฉพาะคอลัมน์ที่มีในทั้งสองฝั่ง (ไม่รวม key)
+    exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
+    compare_cols = [col for col in df.columns if col not in exclude_columns and f"{col}_new" in merged.columns and f"{col}_old" in merged.columns]
 
-    # ✅ ตรวจหาความแตกต่างในแต่ละ column
+    # ✅ ตรวจหาความแตกต่าง
     def is_different(row):
         for col in compare_cols:
-            if row.get(f"{col}_new") != row.get(f"{col}_old"):
+            if pd.isna(row[f"{col}_new"]) and pd.isna(row[f"{col}_old"]):
+                continue
+            if row[f"{col}_new"] != row[f"{col}_old"]:
                 return True
         return False
 
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียมเฉพาะ new value สำหรับ update
+    # ✅ เตรียมเฉพาะข้อมูลใหม่สำหรับ update
     update_records = df_diff[[f"{col}_new" for col in [pk_column] + compare_cols]].copy()
     update_records.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(update_records)} rows")
 
-    # ✅ Prepare metadata
+    # ✅ Metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
     # ✅ Insert ใหม่
@@ -309,7 +313,7 @@ def load_car_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
-    # ✅ Update
+    # ✅ Update ที่เปลี่ยน
     if not update_records.empty:
         with target_engine.begin() as conn:
             for record in update_records.to_dict(orient='records'):
