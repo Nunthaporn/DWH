@@ -261,30 +261,42 @@ def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
-    # ✅ Load ข้อมูลเดิมจาก DB ทั้งตาราง (หรือเฉพาะคอลัมน์สำคัญ)
+    # ✅ กรองซ้ำก่อน set_index เพื่อหลีกเลี่ยง duplicated index
+    df = df[~df[pk_column].duplicated(keep='first')].copy()
+
+    # ✅ Load ข้อมูลเดิมจาก DB
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
-    # ✅ กำหนด index เทียบจาก car_id
+    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+
+    # ✅ กำหนด index จาก car_id
     df.set_index(pk_column, inplace=True)
     df_existing.set_index(pk_column, inplace=True)
 
-    # ✅ Identify: car_id ใหม่ที่ไม่มีใน DB
+    # ✅ Identify: car_id ใหม่
     new_ids = df.index.difference(df_existing.index)
     df_to_insert = df.loc[new_ids].reset_index()
 
-    # ✅ Identify: car_id ที่มีอยู่แล้ว และข้อมูลแตกต่างจาก DB
+    # ✅ Identify: car_id ที่มีอยู่แล้ว และอาจมีข้อมูลเปลี่ยน
     common_ids = df.index.intersection(df_existing.index)
-    df_compare = df.loc[common_ids]
-    df_existing_subset = df_existing.loc[common_ids]
+    df_compare = df.loc[common_ids].copy().reset_index()
+    df_existing_subset = df_existing.loc[common_ids].copy().reset_index()
 
-    # ✅ หาเฉพาะแถวที่ข้อมูลแตกต่างกันจริง
-    df_diff = df_compare[df_compare.ne(df_existing_subset).any(axis=1)].reset_index()
+    # ✅ ตรวจสอบคอลัมน์ให้ตรงกัน
+    df_compare = df_compare[df_existing_subset.columns]
+
+    # ✅ เปรียบเทียบเฉพาะกรณีขนาดตรงกัน
+    if df_compare.shape == df_existing_subset.shape:
+        mask = df_compare.ne(df_existing_subset).any(axis=1)
+        df_diff = df_compare[mask].copy()
+    else:
+        raise ValueError(f"❌ Shape mismatch: df_compare={df_compare.shape}, df_existing_subset={df_existing_subset.shape}")
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff)} rows")
 
-    # ✅ Metadata for insert/update
+    # ✅ Prepare metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
     # ✅ Insert ใหม่
@@ -292,7 +304,7 @@ def load_car_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
-    # ✅ Update เฉพาะที่เปลี่ยน
+    # ✅ Update
     if not df_diff.empty:
         with target_engine.begin() as conn:
             for record in df_diff.to_dict(orient='records'):
