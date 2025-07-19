@@ -307,10 +307,12 @@ def load_car_data(df: pd.DataFrame):
     # ✅ ตรวจหาความแตกต่างจริง
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียม DataFrame สำหรับ update เฉพาะคอลัมน์ที่เปลี่ยน
+    # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
     update_cols = [f"{col}_new" for col in compare_cols]
-    df_diff_renamed = df_diff[[pk_column] + update_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols
+    all_cols = [pk_column] + update_cols
+
+    df_diff_renamed = df_diff[all_cols].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
