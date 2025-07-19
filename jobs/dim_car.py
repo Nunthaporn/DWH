@@ -297,7 +297,6 @@ def load_car_data(df: pd.DataFrame):
         for col in compare_cols:
             val_new = row.get(f"{col}_new")
             val_old = row.get(f"{col}_old")
-
             if pd.isna(val_new) and pd.isna(val_old):
                 continue
             if val_new != val_old:
@@ -320,10 +319,15 @@ def load_car_data(df: pd.DataFrame):
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert
+    # ✅ Insert (กรอง car_id ที่เป็น NaN)
     if not df_to_insert.empty:
-        with target_engine.begin() as conn:
-            conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
+        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
+        dropped = len(df_to_insert) - len(df_to_insert_valid)
+        if dropped > 0:
+            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
+        if not df_to_insert_valid.empty:
+            with target_engine.begin() as conn:
+                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
     # ✅ Update
     if not df_diff_renamed.empty:
