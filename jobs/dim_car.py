@@ -271,7 +271,7 @@ def load_car_data(df: pd.DataFrame):
     # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Identify car_id ที่ยังไม่มีใน DB
+    # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
@@ -280,10 +280,10 @@ def load_car_data(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge ข้อมูลใหม่-เก่า ด้วย suffix
+    # ✅ Merge ด้วย suffix (_new, _old)
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ ระบุคอลัมน์ที่ต้องการเปรียบเทียบ
+    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
     exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
@@ -304,28 +304,29 @@ def load_car_data(df: pd.DataFrame):
                 return True
         return False
 
-    # ✅ ตรวจหาข้อมูลที่เปลี่ยนจริง ๆ
+    # ✅ ตรวจหาความแตกต่างจริง
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียมข้อมูลใหม่สำหรับ update
-    update_records = df_diff[[f"{col}_new" for col in [pk_column] + compare_cols]].copy()
-    update_records.columns = [pk_column] + compare_cols
+    # ✅ เตรียม DataFrame สำหรับ update เฉพาะคอลัมน์ที่เปลี่ยน
+    update_cols = [f"{col}_new" for col in compare_cols]
+    df_diff_renamed = df_diff[[pk_column] + update_cols].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(update_records)} rows")
+    print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
-    # ✅ เตรียม metadata สำหรับ PostgreSQL
+    # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert ใหม่
+    # ✅ Insert
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
-    # ✅ Update แถวที่แตกต่าง
-    if not update_records.empty:
+    # ✅ Update
+    if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
-            for record in update_records.to_dict(orient='records'):
+            for record in df_diff_renamed.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
                 update_columns = {
                     c.name: stmt.excluded[c.name]
