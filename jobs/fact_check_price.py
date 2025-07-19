@@ -137,95 +137,83 @@ def clean_fact_check_price(data):
 def load_fact_check_price(df: pd.DataFrame):
     table_name = 'fact_check_price'
     pk_column = ['id_cus', 'brand', 'model', 'submodel', 'yearcar', 'car_code',
-                'sum_insured', 'type_camera', 'type_addon', 'transaction_date',
-                'province_car', 'company_name1', 'company_name2', 'company_name3',
-                'company_name4', 'selecteds', 'type_insurance', 'id_car']
+                 'sum_insured', 'type_camera', 'type_addon', 'transaction_date',
+                 'province_car', 'company_name1', 'company_name2', 'company_name3',
+                 'company_name4', 'selecteds', 'type_insurance', 'id_car']
 
-    # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
+    # ✅ กรองซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
     # ✅ Load ข้อมูลเดิมจาก PostgreSQL
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
-    # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+    # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
+    for col in pk_column:
+        if col in df.columns and col in df_existing.columns:
+            try:
+                df[col] = df[col].astype(df_existing[col].dtype)
+            except Exception:
+                df[col] = df[col].astype(str)
+                df_existing[col] = df_existing[col].astype(str)
 
-    # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+    # ✅ สร้าง tuple key สำหรับเปรียบเทียบ
+    df['pk_tuple'] = df[pk_column].apply(lambda row: tuple(row), axis=1)
+    df_existing['pk_tuple'] = df_existing[pk_column].apply(lambda row: tuple(row), axis=1)
 
-    # ✅ Identify car_id ที่มีอยู่แล้ว
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+    # ✅ หาข้อมูลใหม่ที่ยังไม่มีในฐานข้อมูล
+    new_keys = set(df['pk_tuple']) - set(df_existing['pk_tuple'])
+    df_to_insert = df[df['pk_tuple'].isin(new_keys)].copy()
 
-    # ✅ Merge ด้วย suffix (_new, _old)
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+    # ✅ หาข้อมูลที่มีอยู่แล้ว และเปรียบเทียบว่าเปลี่ยนแปลงหรือไม่
+    common_keys = set(df['pk_tuple']) & set(df_existing['pk_tuple'])
+    df_common_new = df[df['pk_tuple'].isin(common_keys)].copy()
+    df_common_old = df_existing[df_existing['pk_tuple'].isin(common_keys)].copy()
 
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'check_price_id', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
-    ]
+    df_common_new.set_index(pk_column, inplace=True)
+    df_common_old.set_index(pk_column, inplace=True)
 
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
-    def is_different(row):
-        for col in compare_cols:
-            val_new = row.get(f"{col}_new")
-            val_old = row.get(f"{col}_old")
-            if pd.isna(val_new) and pd.isna(val_old):
-                continue
-            if val_new != val_old:
-                return True
-        return False
+    df_common_new = df_common_new.sort_index()
+    df_common_old = df_common_old.sort_index()
 
-    # ✅ ตรวจหาความแตกต่างจริง
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-    # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
-
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+    df_diff_mask = ~(df_common_new.eq(df_common_old, axis=1).all(axis=1))
+    df_diff = df_common_new[df_diff_mask].reset_index()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    print(f"🔄 Update: {len(df_diff)} rows")
 
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง car_id ที่เป็น NaN)
+    # ✅ Insert
     if not df_to_insert.empty:
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
+        df_to_insert = df_to_insert.drop(columns=['pk_tuple'])
+        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
+            print(f"⚠️ Skipped {dropped} insert rows with null keys")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
     # ✅ Update
-    if not df_diff_renamed.empty:
+    if not df_diff.empty:
         with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
+            for record in df_diff.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name != pk_column
+                    if c.name not in pk_column
                 }
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
+                    index_elements=pk_column,
                     set_=update_columns
                 )
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
+
 
 @job
 def fact_check_price_etl():
