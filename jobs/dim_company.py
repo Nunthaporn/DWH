@@ -193,13 +193,3 @@ def load_to_wh_company(df: pd.DataFrame):
 def dim_company_etl():
     load_to_wh_company(clean_company_data(extract_company_data()))
 
-
-if __name__ == "__main__":
-    df_raw = extract_company_data()
-    print("✅ Extracted:", df_raw.shape)
-
-    df_clean = clean_company_data(df_raw)
-    print("✅ Cleaned columns:", df_clean.columns)
-
-    upsert_dataframe(df_clean, target_engine, "dim_company", "company_name")
-    print("🎉 Test completed! Data upserted to dim_company.")

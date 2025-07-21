@@ -226,16 +226,4 @@ def load_to_wh(df: pd.DataFrame):
 
     print(f"✅ Upserted to {table_name} successfully!")
 
-@job
-def dim_agent_etl():
-    load_to_wh(clean_agent_data(extract_agent_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_agent_data()
-    print("✅ Extracted:", df_raw.shape)
-
-    df_clean = clean_agent_data(df_raw)
-    print("✅ Cleaned columns:", df_clean.columns)
-
-    load_to_wh(df_clean)
-    print("🎉 Test completed! Data upserted to dim_agent.")

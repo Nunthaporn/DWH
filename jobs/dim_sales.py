@@ -219,21 +219,6 @@ def load_sales_data(df: pd.DataFrame):
 def dim_sales_etl():
     load_sales_data(clean_sales_data(extract_sales_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_sales_data()
-#     print("✅ Extracted:", df_raw.shape)
-#     # print(df_raw.head(3))
 
-#     df_clean = clean_sales_data(df_raw)
-#     print("✅ Cleaned columns:", df_clean.columns)
-
-    # print(df_clean.head(10))
-
-    # output_path = "cleaned_dim_car.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
-
-    # load_car_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_car.")
 
 
