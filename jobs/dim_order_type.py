@@ -98,25 +98,19 @@ def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
     pk_columns = ['type_insurance', 'order_type', 'work_type', 'key_channel', 'check_type']
 
-    with target_engine.begin() as conn:
-        conn.execute(text(f"""
-            ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS quotation_num VARCHAR(255);
-        """))
-
+    # ลบซ้ำจาก source
     df = df.drop_duplicates(subset=pk_columns, keep='first').copy()
 
+    # Load จาก DB
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
     df_existing = df_existing.drop_duplicates(subset=pk_columns, keep='first').copy()
 
-    # ✅ Join key
+    # Merge เพื่อตรวจหาความแตกต่าง
     df_common_new = df.merge(df_existing, on=pk_columns, how='inner', suffixes=('_new', '_old'))
-    df_common_old = df_existing[df_existing[pk_columns].apply(tuple, axis=1).isin(
-        df_common_new[pk_columns].apply(tuple, axis=1)
-    )]
 
-    # ✅ ระบุคอลัมน์เปรียบเทียบที่ต่างจาก PK และ system fields
+    # ระบุคอลัมน์ที่ใช้เปรียบเทียบ (exclude PK และ system fields)
     exclude_columns = pk_columns + ['order_type_id', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
@@ -137,23 +131,30 @@ def load_order_type_data(df: pd.DataFrame):
 
     df_diff = df_common_new[df_common_new.apply(is_different, axis=1)].copy()
 
+    # ✅ ใช้ *_new แทน pk_columns เดิม เพราะ merge มี suffix
+    pk_new_cols = [f"{col}_new" for col in pk_columns if f"{col}_new" in df_diff.columns]
     update_cols = [f"{col}_new" for col in compare_cols if f"{col}_new" in df_diff.columns]
-    df_diff_renamed = df_diff[pk_columns + update_cols].copy()
+
+    # ✅ สร้าง dataframe สำหรับ update และ rename columns กลับ
+    df_diff_renamed = df_diff[pk_new_cols + update_cols].copy()
     df_diff_renamed.columns = pk_columns + [col.replace('_new', '') for col in update_cols]
 
-    # ✅ เตรียม rows ที่ไม่มีใน existing
+    # ✅ หาข้อมูลใหม่ที่ยังไม่มีใน table
     df_new = df.merge(df_existing, on=pk_columns, how='left', indicator=True)
     df_to_insert = df_new[df_new['_merge'] == 'left_only'].drop(columns=['_merge'])
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
+    # ✅ เตรียม metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
+    # ✅ Insert
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
+    # ✅ Update
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
