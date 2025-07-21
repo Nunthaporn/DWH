@@ -96,35 +96,33 @@ def clean_order_type_data(df: pd.DataFrame):
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = 'quotation_num'
+    pk_columns = ['type_insurance', 'order_type', 'work_type', 'key_channel', 'check_type']
 
     with target_engine.begin() as conn:
         conn.execute(text(f"""
             ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS quotation_num VARCHAR(255);
         """))
 
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
+    df = df.drop_duplicates(subset=pk_columns, keep='first').copy()
 
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+    df_existing = df_existing.drop_duplicates(subset=pk_columns, keep='first').copy()
 
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+    # ✅ Join key
+    df_common_new = df.merge(df_existing, on=pk_columns, how='inner', suffixes=('_new', '_old'))
+    df_common_old = df_existing[df_existing[pk_columns].apply(tuple, axis=1).isin(
+        df_common_new[pk_columns].apply(tuple, axis=1)
+    )]
 
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-
-    exclude_columns = [pk_column, 'order_type_id', 'create_at', 'update_at']
+    # ✅ ระบุคอลัมน์เปรียบเทียบที่ต่างจาก PK และ system fields
+    exclude_columns = pk_columns + ['order_type_id', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
         if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
+        and f"{col}_new" in df_common_new.columns
+        and f"{col}_old" in df_common_new.columns
     ]
 
     def is_different(row):
@@ -137,12 +135,15 @@ def load_order_type_data(df: pd.DataFrame):
                 return True
         return False
 
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+    df_diff = df_common_new[df_common_new.apply(is_different, axis=1)].copy()
 
-    # ✅ ปรับให้ปลอดภัยในการเลือก column _new
     update_cols = [f"{col}_new" for col in compare_cols if f"{col}_new" in df_diff.columns]
-    df_diff_renamed = df_diff[[pk_column] + update_cols].copy()
-    df_diff_renamed.columns = [pk_column] + [col.replace('_new', '') for col in update_cols]
+    df_diff_renamed = df_diff[pk_columns + update_cols].copy()
+    df_diff_renamed.columns = pk_columns + [col.replace('_new', '') for col in update_cols]
+
+    # ✅ เตรียม rows ที่ไม่มีใน existing
+    df_new = df.merge(df_existing, on=pk_columns, how='left', indicator=True)
+    df_to_insert = df_new[df_new['_merge'] == 'left_only'].drop(columns=['_merge'])
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
@@ -150,13 +151,8 @@ def load_order_type_data(df: pd.DataFrame):
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
     if not df_to_insert.empty:
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
-        if not df_to_insert_valid.empty:
-            with target_engine.begin() as conn:
-                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+        with target_engine.begin() as conn:
+            conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
@@ -165,10 +161,10 @@ def load_order_type_data(df: pd.DataFrame):
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name != pk_column
+                    if c.name not in pk_columns
                 }
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
+                    index_elements=pk_columns,
                     set_=update_columns
                 )
                 conn.execute(stmt)
