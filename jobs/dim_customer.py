@@ -123,7 +123,7 @@ def clean_customer_data(df: pd.DataFrame):
 @op
 def load_customer_data(df: pd.DataFrame):
     table_name = 'dim_customer'
-    pk_columns = ['customer_card', 'customer_name']  # Composite key
+    pk_columns = ['customer_card', 'customer_name']  
 
     # ✅ Drop duplicates ตาม composite key
     df = df.drop_duplicates(subset=pk_columns).copy()
@@ -170,6 +170,12 @@ def load_customer_data(df: pd.DataFrame):
     df_diff_renamed = df_diff[pk_columns + update_cols].copy()
     df_diff_renamed.columns = pk_columns + compare_cols
 
+    # ✅ แปลง NaT เป็น None (null) ก่อน insert/update
+    for col in df_to_insert.select_dtypes(include=['datetime64[ns]']).columns:
+        df_to_insert[col] = df_to_insert[col].where(df_to_insert[col].notna(), None)
+    for col in df_diff_renamed.select_dtypes(include=['datetime64[ns]']).columns:
+        df_diff_renamed[col] = df_diff_renamed[col].where(df_diff_renamed[col].notna(), None)
+
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
     if not df_to_insert.empty:
@@ -213,4 +219,4 @@ def dim_customer_etl():
 #     print(f"💾 Saved to {output_path}")
 
     # load_customer_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_car.")
+    # print("🎉 Test completed! Data upserted to dim_customer.")
