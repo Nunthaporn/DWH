@@ -96,39 +96,109 @@ def clean_order_type_data(df: pd.DataFrame):
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = 'order_type_id'
+    pk_column = 'quotation_num'
 
     with target_engine.begin() as conn:
         conn.execute(text(f"""
             ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS quotation_num VARCHAR(255);
         """))
 
-    insp = inspect(target_engine)
-    columns = [col['name'] for col in insp.get_columns(table_name)]
+    # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
+    df = df[~df[pk_column].duplicated(keep='first')].copy()
 
+    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+    # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
+    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+
+    # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
+    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
+    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+
+    # ✅ Identify car_id ที่มีอยู่แล้ว
+    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+    df_common_new = df[df[pk_column].isin(common_ids)].copy()
+    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+
+    # ✅ Merge ด้วย suffix (_new, _old)
+    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+
+    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
+    exclude_columns = [pk_column, 'order_type_id', 'create_at', 'update_at']
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
+    ]
+
+    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
+    def is_different(row):
+        for col in compare_cols:
+            val_new = row.get(f"{col}_new")
+            val_old = row.get(f"{col}_old")
+            if pd.isna(val_new) and pd.isna(val_old):
+                continue
+            if val_new != val_old:
+                return True
+        return False
+
+    # ✅ ตรวจหาความแตกต่างจริง
+    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+
+    # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
+    update_cols = [f"{col}_new" for col in compare_cols]
+    all_cols = [pk_column] + update_cols
+
+    df_diff_renamed = df_diff[all_cols].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+
+    # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    with target_engine.begin() as conn:
-        for record in df.to_dict(orient='records'):
-            if not record.get(pk_column):
-                continue
-            stmt = pg_insert(metadata).values(**record)
-            update_columns = {c.name: stmt.excluded[c.name] for c in metadata.columns if c.name != pk_column}
-            stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
-            conn.execute(stmt)
+    # ✅ Insert (กรอง car_id ที่เป็น NaN)
+    if not df_to_insert.empty:
+        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
+        dropped = len(df_to_insert) - len(df_to_insert_valid)
+        if dropped > 0:
+            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
+        if not df_to_insert_valid.empty:
+            with target_engine.begin() as conn:
+                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
-    print(f"✅ Inserted/Updated: {len(df)} rows")
+    # ✅ Update
+    if not df_diff_renamed.empty:
+        with target_engine.begin() as conn:
+            for record in df_diff_renamed.to_dict(orient='records'):
+                stmt = pg_insert(metadata).values(**record)
+                update_columns = {
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata.columns
+                    if c.name != pk_column
+                }
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[pk_column],
+                    set_=update_columns
+                )
+                conn.execute(stmt)
+
+    print("✅ Insert/update completed.")
 
 @job
 def dim_order_type_etl():
     load_order_type_data(clean_order_type_data(extract_order_type_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_order_type_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_order_type_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_order_type_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_order_type_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
     # print(df_clean.head(10))
 
@@ -140,5 +210,5 @@ if __name__ == "__main__":
     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
     # print(f"💾 Saved to {output_path}")
 
-    load_order_type_data(df_clean)
-    print("🎉 Test completed! Data upserted to dim_order_type.")
+    # load_order_type_data(df_clean)
+    # print("🎉 Test completed! Data upserted to dim_order_type.")
