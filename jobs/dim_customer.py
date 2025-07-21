@@ -111,6 +111,7 @@ def clean_customer_data(df: pd.DataFrame):
         return digits if digits else None
 
     df['customer_telnumber'] = df['customer_telnumber'].apply(clean_tel)
+    df = df.replace(r'^\s*$', np.nan, regex=True)
 
     return df
 
