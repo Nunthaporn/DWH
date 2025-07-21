@@ -37,6 +37,7 @@ def extract_order_type_data():
     df_order = pd.read_sql(query_order, source_engine_task)
 
     df_merged = pd.merge(df_plan, df_order, on='quo_num', how='left')
+    df_merged = df_merged.replace(r'NaN', np.nan, regex=True)
     return df_merged
 
 @op
@@ -90,87 +91,118 @@ def clean_order_type_data(df: pd.DataFrame):
     df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
     df.replace("NaN", np.nan, inplace=True)
     df.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
+    df = df.replace(r'NaN', np.nan, regex=True)
 
     return df
+
+# @op
+# def load_order_type_data(df: pd.DataFrame):
+#     table_name = 'dim_order_type'
+#     pk_column = ['type_insurance', 'order_type', 'work_type', 'key_channel', 'check_type']
+
+#     # ✅ กรองซ้ำจาก DataFrame ใหม่
+#     df = df[~df[pk_column].duplicated(keep='first')].copy()
+
+#     # ✅ Load ข้อมูลเดิมจาก PostgreSQL
+#     with target_engine.connect() as conn:
+#         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+#     # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
+#     for col in pk_column:
+#         if col in df.columns and col in df_existing.columns:
+#             try:
+#                 df[col] = df[col].astype(df_existing[col].dtype)
+#             except Exception:
+#                 df[col] = df[col].astype(str)
+#                 df_existing[col] = df_existing[col].astype(str)
+
+#     # ✅ สร้าง tuple key สำหรับเปรียบเทียบ
+#     df['pk_tuple'] = df[pk_column].apply(lambda row: tuple(row), axis=1)
+#     df_existing['pk_tuple'] = df_existing[pk_column].apply(lambda row: tuple(row), axis=1)
+
+#     # ✅ หาข้อมูลใหม่ที่ยังไม่มีในฐานข้อมูล
+#     new_keys = set(df['pk_tuple']) - set(df_existing['pk_tuple'])
+#     df_to_insert = df[df['pk_tuple'].isin(new_keys)].copy()
+
+#     # ✅ หาข้อมูลที่มีอยู่แล้ว และเปรียบเทียบว่าเปลี่ยนแปลงหรือไม่
+#     common_keys = set(df['pk_tuple']) & set(df_existing['pk_tuple'])
+#     df_common_new = df[df['pk_tuple'].isin(common_keys)].copy()
+#     df_common_old = df_existing[df_existing['pk_tuple'].isin(common_keys)].copy()
+
+#     df_common_new.set_index(pk_column, inplace=True)
+#     df_common_old.set_index(pk_column, inplace=True)
+
+#     df_common_new = df_common_new.sort_index()
+#     df_common_old = df_common_old.sort_index()
+
+#     df_diff_mask = ~(df_common_new.eq(df_common_old, axis=1).all(axis=1))
+#     df_diff = df_common_new[df_diff_mask].reset_index()
+
+#     print(f"🆕 Insert: {len(df_to_insert)} rows")
+#     print(f"🔄 Update: {len(df_diff)} rows")
+
+#     # ✅ Load table metadata
+#     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+
+#     # ✅ Insert
+#     if not df_to_insert.empty:
+#         df_to_insert = df_to_insert.drop(columns=['pk_tuple'])
+#         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
+#         dropped = len(df_to_insert) - len(df_to_insert_valid)
+#         if dropped > 0:
+#             print(f"⚠️ Skipped {dropped} insert rows with null keys")
+#         if not df_to_insert_valid.empty:
+#             with target_engine.begin() as conn:
+#                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+
+#     # ✅ Update
+#     if not df_diff.empty:
+#         with target_engine.begin() as conn:
+#             for record in df_diff.to_dict(orient='records'):
+#                 stmt = pg_insert(metadata).values(**record)
+#                 update_columns = {
+#                     c.name: stmt.excluded[c.name]
+#                     for c in metadata.columns
+#                     if c.name not in pk_column
+#                 }
+#                 stmt = stmt.on_conflict_do_update(
+#                     index_elements=pk_column,
+#                     set_=update_columns
+#                 )
+#                 conn.execute(stmt)
+
+#     print("✅ Insert/update completed.")
 
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = ['type_insurance', 'order_type', 'work_type', 'key_channel', 'check_type']
-
-    # ✅ กรองซ้ำจาก DataFrame ใหม่
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
-
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-
-    # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
-    for col in pk_column:
-        if col in df.columns and col in df_existing.columns:
-            try:
-                df[col] = df[col].astype(df_existing[col].dtype)
-            except Exception:
-                df[col] = df[col].astype(str)
-                df_existing[col] = df_existing[col].astype(str)
-
-    # ✅ สร้าง tuple key สำหรับเปรียบเทียบ
-    df['pk_tuple'] = df[pk_column].apply(lambda row: tuple(row), axis=1)
-    df_existing['pk_tuple'] = df_existing[pk_column].apply(lambda row: tuple(row), axis=1)
-
-    # ✅ หาข้อมูลใหม่ที่ยังไม่มีในฐานข้อมูล
-    new_keys = set(df['pk_tuple']) - set(df_existing['pk_tuple'])
-    df_to_insert = df[df['pk_tuple'].isin(new_keys)].copy()
-
-    # ✅ หาข้อมูลที่มีอยู่แล้ว และเปรียบเทียบว่าเปลี่ยนแปลงหรือไม่
-    common_keys = set(df['pk_tuple']) & set(df_existing['pk_tuple'])
-    df_common_new = df[df['pk_tuple'].isin(common_keys)].copy()
-    df_common_old = df_existing[df_existing['pk_tuple'].isin(common_keys)].copy()
-
-    df_common_new.set_index(pk_column, inplace=True)
-    df_common_old.set_index(pk_column, inplace=True)
-
-    df_common_new = df_common_new.sort_index()
-    df_common_old = df_common_old.sort_index()
-
-    df_diff_mask = ~(df_common_new.eq(df_common_old, axis=1).all(axis=1))
-    df_diff = df_common_new[df_diff_mask].reset_index()
-
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff)} rows")
 
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert
-    if not df_to_insert.empty:
-        df_to_insert = df_to_insert.drop(columns=['pk_tuple'])
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null keys")
-        if not df_to_insert_valid.empty:
-            with target_engine.begin() as conn:
-                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
-
-    # ✅ Update
-    if not df_diff.empty:
+    # ✅ Insert data as-is
+    if not df.empty:
         with target_engine.begin() as conn:
-            for record in df_diff.to_dict(orient='records'):
-                stmt = pg_insert(metadata).values(**record)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name not in pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=pk_column,
-                    set_=update_columns
-                )
-                conn.execute(stmt)
+            conn.execute(metadata.insert(), df.to_dict(orient='records'))
 
-    print("✅ Insert/update completed.")
-    
+    print(f"✅ Inserted {len(df)} rows into {table_name}.")
+
 @job
 def dim_order_type_etl():
     load_order_type_data(clean_order_type_data(extract_order_type_data()))
+
+if __name__ == "__main__":
+    df_row = extract_order_type_data()
+    print("✅ Extracted logs:", df_row.shape)
+
+    df_clean = clean_order_type_data((df_row))
+    print("✅ Cleaned columns:", df_clean.columns)
+
+    # print(df_clean.head(10))
+
+    # output_path = "fact_check_price.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
+
+    load_order_type_data(df_clean)
+    print("🎉 Test completed! Data upserted to dim_car.")
