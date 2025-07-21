@@ -4,24 +4,21 @@ import numpy as np
 import os
 import re
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import create_engine, MetaData, text, Table
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # ✅ โหลด env
 load_dotenv()
 
 # ✅ DB Connections
-# Source DB (MariaDB)
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
 )
 
-# Target DB (PostgreSQL)
 target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
-# ✅ Extract
 @op
 def extract_sales_data():
     query_main = text("""
@@ -51,18 +48,16 @@ def extract_sales_data():
     """)
     df_main = pd.read_sql(query_main, source_engine)
     df_main.replace(r'NaN', np.nan, regex=True, inplace=True)
+    
     query_career = text("SELECT cuscode, career FROM policy_register")
     df_career = pd.read_sql(query_career, source_engine)
 
     return pd.merge(df_main, df_career, on='cuscode', how='left')
 
-# ✅ Transform
 @op
 def clean_sales_data(df: pd.DataFrame):
     df['agent_region'] = df.apply(
-        lambda row: f"{row['fin_new_group']} + {row['fin_new_mem']}"
-        if pd.notna(row['fin_new_group']) and pd.notna(row['fin_new_mem'])
-        else row['fin_new_group'] or row['fin_new_mem'],
+        lambda row: f"{row['fin_new_group']} + {row['fin_new_mem']}" if pd.notna(row['fin_new_group']) and pd.notna(row['fin_new_mem']) else row['fin_new_group'] or row['fin_new_mem'],
         axis=1
     )
     df = df[df['agent_region'] != 'TEST']
@@ -77,6 +72,7 @@ def clean_sales_data(df: pd.DataFrame):
         elif pd.notnull(row['date_active']) and row['date_active'] < one_month_ago:
             return 'inactive'
         return 'active'
+    
     df['status_agent'] = df.apply(check_status, axis=1)
     df = df.drop(columns=['status', 'date_active'])
 
@@ -111,10 +107,7 @@ def clean_sales_data(df: pd.DataFrame):
     }
     df.rename(columns=rename_map, inplace=True)
 
-    df['card_ins_type_life'] = df['card_ins_type_life'].apply(
-        lambda x: 'B' if isinstance(x, str) and 'แทน' in x else x
-    )
-
+    df['card_ins_type_life'] = df['card_ins_type_life'].apply(lambda x: 'B' if isinstance(x, str) and 'แทน' in x else x)
     df['is_experienced'] = df['is_experienced'].apply(lambda x: 'เคยขาย' if str(x).strip().lower() == 'ไม่เคยขาย' else 'ไม่เคยขาย')
     df['is_experienced'] = df['is_experienced'].apply(lambda x: 'yes' if str(x).strip().lower() == 'no' else 'no')
 
@@ -124,9 +117,7 @@ def clean_sales_data(df: pd.DataFrame):
     def clean_address(addr):
         if pd.isna(addr):
             return ''
-        
         addr = str(addr).strip()
-
         addr = re.sub(r':undefined\s*::::', '', addr, flags=re.IGNORECASE)
         addr = re.sub(r':undefined', '', addr, flags=re.IGNORECASE)
         addr = re.sub(r':\s*-', '', addr)
@@ -143,7 +134,7 @@ def clean_sales_data(df: pd.DataFrame):
     df['hire_date'] = df['hire_date'].dt.strftime('%Y%m%d').astype('Int64')
     df['hire_date'] = df['hire_date'].where(df['hire_date'].notnull(), None)
 
-    df["zipcode"] = df["zipcode"].where(df["zipcode"].str.len() == 5, np.nan)
+    df["zipcode"] = df["zipcode"].astype(str).where(df["zipcode"].astype(str).str.len() == 5, np.nan)
 
     df.columns = df.columns.str.lower()
     df.replace(r'NaN', np.nan, regex=True, inplace=True)
@@ -152,52 +143,97 @@ def clean_sales_data(df: pd.DataFrame):
 
     return df
 
-# ✅ Load
-def upsert_dataframe(df, engine, table_name, pk_column):
-    meta = MetaData()
-    meta.reflect(bind=engine)
-    table = meta.tables[table_name]
-
-    existing_df = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", engine)
-    existing_keys = set(existing_df[pk_column].unique())
-    incoming_keys = set(df[pk_column].unique())
-
-    new_keys = incoming_keys - existing_keys
-    update_keys = incoming_keys & existing_keys
-
-    print(f"🟢 Insert (new): {len(new_keys)}")
-    print(f"📝 Update (existing): {len(update_keys)}")
-    print(f"✅ Total incoming: {len(incoming_keys)}")
-
-    with engine.begin() as conn:
-        for _, row in df.iterrows():
-            stmt = insert(table).values(row.to_dict())
-            update_dict = {c.name: stmt.excluded[c.name] for c in table.columns if c.name != pk_column}
-            stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_dict)
-            conn.execute(stmt)
-
 @op
-def load_to_wh_sales(df: pd.DataFrame):
-    upsert_dataframe(df, target_engine, "dim_sales", "agent_id")
-    print("✅ Upserted to dim_sales successfully!")
+def load_sales_data(df: pd.DataFrame):
+    table_name = 'dim_sales'
+    pk_column = 'agent_id'
 
-# ✅ Dagster Job
+    df = df[~df[pk_column].duplicated(keep='first')].copy()
+
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+
+    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
+    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+
+    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+    df_common_new = df[df[pk_column].isin(common_ids)].copy()
+    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+
+    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+
+    exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
+    ]
+
+    def is_different(row):
+        for col in compare_cols:
+            val_new = row.get(f"{col}_new")
+            val_old = row.get(f"{col}_old")
+            if pd.isna(val_new) and pd.isna(val_old):
+                continue
+            if val_new != val_old:
+                return True
+        return False
+
+    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+    update_cols = [f"{col}_new" for col in compare_cols]
+    df_diff_renamed = df_diff[[pk_column] + update_cols].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols
+
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+
+    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+
+    if not df_to_insert.empty:
+        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
+        dropped = len(df_to_insert) - len(df_to_insert_valid)
+        if dropped > 0:
+            print(f"⚠️ Skipped {dropped} insert rows with null agent_id")
+        if not df_to_insert_valid.empty:
+            with target_engine.begin() as conn:
+                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+
+    if not df_diff_renamed.empty:
+        with target_engine.begin() as conn:
+            for record in df_diff_renamed.to_dict(orient='records'):
+                stmt = pg_insert(metadata).values(**record)
+                update_columns = {
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata.columns
+                    if c.name != pk_column
+                }
+                stmt = stmt.on_conflict_do_update(index_elements=[pk_column], set_=update_columns)
+                conn.execute(stmt)
+
+    print("✅ Insert/update completed.")
+
 @job
 def dim_sales_etl():
-    load_to_wh_sales(clean_sales_data(extract_sales_data()))
+    load_sales_data(clean_sales_data(extract_sales_data()))
 
-# ✅ Local Execution
-if __name__ == "__main__":
-    df_raw = extract_sales_data()
-    print("✅ Extracted:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_sales_data()
+#     print("✅ Extracted:", df_raw.shape)
+#     # print(df_raw.head(3))
 
-    df_clean = clean_sales_data(df_raw)
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_sales_data(df_raw)
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "cleaned_dim_sales.xlsx"
+    # print(df_clean.head(10))
+
+    # output_path = "cleaned_dim_car.xlsx"
     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
     # print(f"💾 Saved to {output_path}")
 
-    # ✅ Test upsert manually (optional)
-    upsert_dataframe(df_clean, target_engine, "dim_sales", "agent_id")
-    print("🎉 Test completed! Data upserted to dim_sales.")
+    # load_car_data(df_clean)
+    # print("🎉 Test completed! Data upserted to dim_car.")
+
+

@@ -5,7 +5,6 @@ import re
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, inspect
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
