@@ -50,7 +50,7 @@ def extract_sales_data():
             )
     """)
     df_main = pd.read_sql(query_main, source_engine)
-
+    df_main.replace(r'NaN', np.nan, regex=True, inplace=True)
     query_career = text("SELECT cuscode, career FROM policy_register")
     df_career = pd.read_sql(query_career, source_engine)
 
@@ -124,10 +124,18 @@ def clean_sales_data(df: pd.DataFrame):
     def clean_address(addr):
         if pd.isna(addr):
             return ''
-        addr = re.sub(r'(เลขที่|หมู่ที่|หมู่บ้าน|ซอย|ถนน)[\s\-]*', '', addr, flags=re.IGNORECASE)
-        addr = re.sub(r'\s*-\s*', '', addr)
+        
+        addr = str(addr).strip()
+
+        addr = re.sub(r':undefined\s*::::', '', addr, flags=re.IGNORECASE)
+        addr = re.sub(r':undefined', '', addr, flags=re.IGNORECASE)
+        addr = re.sub(r':\s*-', '', addr)
+        addr = re.sub(r':-', '', addr)
+        addr = re.sub(r':', ' ', addr)
+        addr = re.sub(r'\s*-\s*', ' ', addr)
         addr = re.sub(r'\s+', ' ', addr)
         return addr.strip()
+
     df['agent_address'] = df['agent_address'].apply(clean_address)
     df['mobile_number'] = df['mobile_number'].str.replace(r'[^0-9]', '', regex=True)
 
