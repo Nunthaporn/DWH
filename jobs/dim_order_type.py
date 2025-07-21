@@ -149,7 +149,7 @@ def load_order_type_data(df: pd.DataFrame):
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
     # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
-    update_cols = [f"{col}_new" for col in compare_cols]
+    update_cols = [f"{col}" for col in compare_cols]
     all_cols = [pk_column] + update_cols
 
     df_diff_renamed = df_diff[all_cols].copy()
