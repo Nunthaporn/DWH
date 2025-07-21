@@ -84,8 +84,13 @@ def clean_customer_data(df: pd.DataFrame):
         'career': 'job'
     })
 
-    # ✅ ทำความสะอาด
     df['customer_gender'] = df['customer_gender'].map({'M': 'Male', 'F': 'Female'})
+
+    # แปลงค่าที่ไม่ใช่ 'Male', 'Female' ให้เป็น None (NULL จริงใน DB)
+    df['customer_gender'] = df['customer_gender'].where(
+        df['customer_gender'].isin(['Male', 'Female', 'Other']), None
+    )
+
     df = df.replace(to_replace=r'^\s*$|^(?i:none|null|na)$|^[-.]$', value=np.nan, regex=True)
     df['customer_name'] = df['customer_name'].str.replace(r'\s*None$', '', regex=True)
     df['customer_telnumber'] = df['customer_telnumber'].str.replace('-', '', regex=False)
