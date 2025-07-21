@@ -1,10 +1,10 @@
 from dagster import ScheduleDefinition
 from jobs.dim_company import dim_company_etl
 from jobs.dim_sales import dim_sales_etl
-from jobs.dim_agent import dim_agent_etl
 from jobs.dim_car import dim_car_etl
 from jobs.fact_check_price import fact_check_price_etl
 from jobs.dim_customer import dim_customer_etl
+from jobs.dim_agent import dim_agent_etl
 
 dim_company_schedule = ScheduleDefinition(
     job=dim_company_etl,
