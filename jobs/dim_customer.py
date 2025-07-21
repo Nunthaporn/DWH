@@ -172,17 +172,21 @@ def load_customer_data(df: pd.DataFrame):
     df_diff_renamed = df_diff[pk_columns + update_cols].copy()
     df_diff_renamed.columns = pk_columns + compare_cols
 
-    # ✅ แปลง NaT เป็น None (null) ก่อน insert/update
-    for col in df_to_insert.select_dtypes(include=['datetime64[ns]']).columns:
-        df_to_insert[col] = df_to_insert[col].where(df_to_insert[col].notna(), None)
-    for col in df_diff_renamed.select_dtypes(include=['datetime64[ns]']).columns:
+    # ✅ เตรียม insert: drop merge_key + แปลง NaT เป็น None
+    df_insert_records = df_to_insert.drop(columns=['merge_key']).copy()
+    for col in df_insert_records.select_dtypes(include=["datetime64[ns]"]).columns:
+        df_insert_records[col] = df_insert_records[col].where(df_insert_records[col].notna(), None)
+
+    # ✅ เตรียม update: แปลง NaT เป็น None
+    df_diff_renamed = df_diff_renamed.copy()
+    for col in df_diff_renamed.select_dtypes(include=["datetime64[ns]"]).columns:
         df_diff_renamed[col] = df_diff_renamed[col].where(df_diff_renamed[col].notna(), None)
 
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    if not df_to_insert.empty:
+    if not df_insert_records.empty:
         with target_engine.begin() as conn:
-            conn.execute(metadata.insert(), df_to_insert.drop(columns=['merge_key']).to_dict(orient='records'))
+            conn.execute(metadata.insert(), df_insert_records.to_dict(orient='records'))
 
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
@@ -199,7 +203,7 @@ def load_customer_data(df: pd.DataFrame):
                 )
                 conn.execute(stmt)
 
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🆕 Insert: {len(df_insert_records)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
 # ✅ Dagster job
