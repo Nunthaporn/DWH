@@ -50,7 +50,6 @@ def clean_customer_data(df: pd.DataFrame):
     df = df.drop_duplicates(subset=['name', 'lastname'])
     df = df.drop_duplicates(subset=['idcard'])
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
-    df = df.replace(r'NaN', np.nan, regex=True)
 
     df['full_name'] = df.apply(
         lambda row: row['name'] if str(row['name']).strip() == str(row['lastname']).strip()
@@ -61,12 +60,25 @@ def clean_customer_data(df: pd.DataFrame):
     df = df.drop(columns=['name', 'lastname', 'quo_num'])
 
     df['birthDate'] = pd.to_datetime(df['birthDate'], errors='coerce')
+
+    # ✅ ป้องกัน NaT กลายเป็น string "NaT"
+    df['birthDate'] = df['birthDate'].where(df['birthDate'].notna(), None)
+
+    # ✅ คำนวณอายุ
     df['age'] = df['birthDate'].apply(
         lambda x: (
             date.today().year - x.year - ((date.today().month, date.today().day) < (x.month, x.day))
-            if pd.notnull(x) else pd.NA
+            if isinstance(x, pd.Timestamp) else pd.NA
         )
     ).astype('Int64')
+
+    # df['birthDate'] = pd.to_datetime(df['birthDate'], errors='coerce')
+    # df['age'] = df['birthDate'].apply(
+    #     lambda x: (
+    #         date.today().year - x.year - ((date.today().month, date.today().day) < (x.month, x.day))
+    #         if pd.notnull(x) else pd.NA
+    #     )
+    # ).astype('Int64')
 
     df = df.rename(columns={
         'idcard': 'customer_card',
@@ -84,14 +96,21 @@ def clean_customer_data(df: pd.DataFrame):
         'career': 'job'
     })
 
-    df['customer_gender'] = df['customer_gender'].map({'M': 'Male', 'F': 'Female'})
+    df['customer_dob'] = df['customer_dob'].apply(lambda x: x if isinstance(x, pd.Timestamp) else None)
+    df['customer_dob'] = df['customer_dob'].astype(object)
+    df['customer_gender'] = df['customer_gender'].astype(str).str.strip().str.lower()
+    df['customer_gender'] = df['customer_gender'].replace({
+        'M': 'Male',
+        'ชาย': 'Male',
+        'F': 'Female',
+        'หญิง': 'Female',
+        'อื่นๆ': 'Other',
+        'O': 'Other'
+    })
 
-    # แปลงค่าที่ไม่ใช่ 'Male', 'Female' ให้เป็น None (NULL จริงใน DB)
-    df['customer_gender'] = df['customer_gender'].where(
-        df['customer_gender'].isin(['Male', 'Female', 'Other']), None
-    )
+    valid_genders = ['Male', 'Female', 'Other']
+    df['customer_gender'] = df['customer_gender'].where(df['customer_gender'].isin(valid_genders), None)
 
-    df = df.replace(to_replace=r'^\s*$|^(?i:none|null|na)$|^[-.]$', value=np.nan, regex=True)
     df['customer_name'] = df['customer_name'].str.replace(r'\s*None$', '', regex=True)
     df['customer_telnumber'] = df['customer_telnumber'].str.replace('-', '', regex=False)
     df['address'] = df['address'].str.replace('-', '', regex=False).str.strip()
@@ -116,16 +135,14 @@ def clean_customer_data(df: pd.DataFrame):
         return digits if digits else None
 
     df['customer_telnumber'] = df['customer_telnumber'].apply(clean_tel)
-    # แปลง NaT ใน customer_dob เป็น None
-    df['customer_dob'] = df['customer_dob'].where(pd.notnull(df['customer_dob']), None)
-    df = df.replace(r'^\s*$', np.nan, regex=True)
+    df = df.replace(r'NaN', np.nan, regex=True)
 
     return df
 
 @op
 def load_customer_data(df: pd.DataFrame):
     table_name = 'dim_customer'
-    pk_columns = ['customer_card', 'customer_name']  
+    pk_columns = ['customer_card', 'customer_name']  # Composite key
 
     # ✅ Drop duplicates ตาม composite key
     df = df.drop_duplicates(subset=pk_columns).copy()
@@ -148,6 +165,10 @@ def load_customer_data(df: pd.DataFrame):
     df_to_insert = df[df['merge_key'].isin(new_keys)].copy()
     df_common_new = df[df['merge_key'].isin(common_keys)].copy()
     df_common_old = df_existing[df_existing['merge_key'].isin(common_keys)].copy()
+
+    # ✅ 🔥 แปลง NaT → None สำหรับทุก datetime column ก่อน insert
+    for col in df_to_insert.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
+        df_to_insert[col] = df_to_insert[col].apply(lambda x: x if pd.notna(x) else None)
 
     merged = df_common_new.merge(df_common_old, on=pk_columns, suffixes=('_new', '_old'))
 
@@ -172,21 +193,11 @@ def load_customer_data(df: pd.DataFrame):
     df_diff_renamed = df_diff[pk_columns + update_cols].copy()
     df_diff_renamed.columns = pk_columns + compare_cols
 
-    # ✅ เตรียม insert: drop merge_key + แปลง NaT เป็น None
-    df_insert_records = df_to_insert.drop(columns=['merge_key']).copy()
-    for col in df_insert_records.select_dtypes(include=["datetime64[ns]"]).columns:
-        df_insert_records[col] = df_insert_records[col].where(df_insert_records[col].notna(), None)
-
-    # ✅ เตรียม update: แปลง NaT เป็น None
-    df_diff_renamed = df_diff_renamed.copy()
-    for col in df_diff_renamed.select_dtypes(include=["datetime64[ns]"]).columns:
-        df_diff_renamed[col] = df_diff_renamed[col].where(df_diff_renamed[col].notna(), None)
-
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    if not df_insert_records.empty:
+    if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            conn.execute(metadata.insert(), df_insert_records.to_dict(orient='records'))
+            conn.execute(metadata.insert(), df_to_insert.drop(columns=['merge_key']).to_dict(orient='records'))
 
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
@@ -203,7 +214,7 @@ def load_customer_data(df: pd.DataFrame):
                 )
                 conn.execute(stmt)
 
-    print(f"🆕 Insert: {len(df_insert_records)} rows")
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
 # ✅ Dagster job
@@ -211,18 +222,18 @@ def load_customer_data(df: pd.DataFrame):
 def dim_customer_etl():
     load_customer_data(clean_customer_data(extract_customer_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_customer_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_customer_data()
+    print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_customer_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_customer_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # print(df_clean.head(10))
+    # print(df_clean.head(10))
 
-#     output_path = "dim_customer.xlsx"
-#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     print(f"💾 Saved to {output_path}")
+    output_path = "dim_customer.csv"
+    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    print(f"💾 Saved to {output_path}")
 
     # load_customer_data(df_clean)
     # print("🎉 Test completed! Data upserted to dim_customer.")

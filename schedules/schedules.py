@@ -5,19 +5,20 @@ from jobs.dim_car import dim_car_etl
 from jobs.fact_check_price import fact_check_price_etl
 from jobs.dim_customer import dim_customer_etl
 from jobs.dim_agent import dim_agent_etl
+from jobs.dim_order_type import dim_order_type_etl
+from jobs.dim_payment_plan import dim_payment_plan_etl
 
 dim_company_schedule = ScheduleDefinition(
     job=dim_company_etl,
-    cron_schedule="0 * * * *",  # ทุกชั่วโมง
-    
+    cron_schedule="0 * * * *", 
 )
 dim_sales_schedule = ScheduleDefinition(
     job=dim_sales_etl,
-    cron_schedule="0 * * * *",  # ทุกชั่วโมง
+    cron_schedule="0 * * * *", 
 )
 dim_agent_schedule = ScheduleDefinition(
     job=dim_agent_etl,
-    cron_schedule="0 * * * *",  # ทุกชั่วโมง
+    cron_schedule="0 * * * *", 
 )
 dim_car_schedule = ScheduleDefinition(
     job=dim_car_etl,
@@ -29,5 +30,13 @@ fact_check_price_schedule = ScheduleDefinition(
 )
 dim_customer_schedule = ScheduleDefinition(
     job=dim_customer_etl,
+    cron_schedule="0 * * * *", 
+)
+dim_order_type_schedule = ScheduleDefinition(
+    job=dim_order_type_etl,
+    cron_schedule="0 * * * *", 
+)
+dim_payment_plan_schedule = ScheduleDefinition(
+    job=dim_payment_plan_etl,
     cron_schedule="0 * * * *", 
 )
