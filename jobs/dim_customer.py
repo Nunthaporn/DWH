@@ -40,6 +40,7 @@ def extract_customer_data():
     df_plan = pd.read_sql(query_plan, source_engine)
 
     df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='right')
+    df_merged = df_merged.replace(r'NaN', np.nan, regex=True)
     return df_merged
 
 # ✅ Clean
@@ -49,6 +50,7 @@ def clean_customer_data(df: pd.DataFrame):
     df = df.drop_duplicates(subset=['name', 'lastname'])
     df = df.drop_duplicates(subset=['idcard'])
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
+    df = df.replace(r'NaN', np.nan, regex=True)
 
     df['full_name'] = df.apply(
         lambda row: row['name'] if str(row['name']).strip() == str(row['lastname']).strip()
