@@ -96,7 +96,7 @@ def clean_order_type_data(df: pd.DataFrame):
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = 'quotation_num'
+    pk_column = 'order_type_id'
 
     with target_engine.begin() as conn:
         conn.execute(text(f"""
