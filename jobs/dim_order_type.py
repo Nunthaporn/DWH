@@ -103,29 +103,22 @@ def load_order_type_data(df: pd.DataFrame):
             ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS quotation_num VARCHAR(255);
         """))
 
-    # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
-    # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
-    # ✅ Identify car_id ที่มีอยู่แล้ว
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge ด้วย suffix (_new, _old)
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
     exclude_columns = [pk_column, 'order_type_id', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
@@ -134,7 +127,6 @@ def load_order_type_data(df: pd.DataFrame):
         and f"{col}_old" in merged.columns
     ]
 
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
     def is_different(row):
         for col in compare_cols:
             val_new = row.get(f"{col}_new")
@@ -145,23 +137,18 @@ def load_order_type_data(df: pd.DataFrame):
                 return True
         return False
 
-    # ✅ ตรวจหาความแตกต่างจริง
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
-
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+    # ✅ ปรับให้ปลอดภัยในการเลือก column _new
+    update_cols = [f"{col}_new" for col in compare_cols if f"{col}_new" in df_diff.columns]
+    df_diff_renamed = df_diff[[pk_column] + update_cols].copy()
+    df_diff_renamed.columns = [pk_column] + [col.replace('_new', '') for col in update_cols]
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
-    # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง car_id ที่เป็น NaN)
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
@@ -171,7 +158,6 @@ def load_order_type_data(df: pd.DataFrame):
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
-    # ✅ Update
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
@@ -192,23 +178,3 @@ def load_order_type_data(df: pd.DataFrame):
 @job
 def dim_order_type_etl():
     load_order_type_data(clean_order_type_data(extract_order_type_data()))
-
-# if __name__ == "__main__":
-#     df_raw = extract_order_type_data()
-#     print("✅ Extracted logs:", df_raw.shape)
-
-#     df_clean = clean_order_type_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
-
-    # print(df_clean.head(10))
-
-    # output_path = "dim_order_type.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
-
-    # output_path = "dim_order_type.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
-
-    # load_order_type_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_order_type.")
