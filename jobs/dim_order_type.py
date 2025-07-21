@@ -37,7 +37,9 @@ def extract_order_type_data():
     df_order = pd.read_sql(query_order, source_engine_task)
 
     df_merged = pd.merge(df_plan, df_order, on='quo_num', how='left')
-    df_merged = df_merged.replace(r'NaN', np.nan, regex=True)
+    df_merged = df_merged.replace(to_replace=r'^\s*NaN\s*$', value=np.nan, regex=True, inplace=True)
+
+
     return df_merged
 
 @op
@@ -91,8 +93,8 @@ def clean_order_type_data(df: pd.DataFrame):
     df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
     df.replace("NaN", np.nan, inplace=True)
     df.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
-    df = df.replace(r'NaN', np.nan, regex=True)
-
+    df = df.replace(to_replace=r'^\s*NaN\s*$', value=np.nan, regex=True, inplace=True)
+    
     return df
 
 # @op
