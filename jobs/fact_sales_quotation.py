@@ -27,14 +27,14 @@ target_engine = create_engine(
 def extract_sales_quotation_data():
     df_plan = pd.read_sql("""
         SELECT quo_num, type_insure, type_work, datestart, id_government_officer, status_gpf, quo_num_old,
-               type_status, type_key, app_type, chanel_key
+               status AS status_fssp
         FROM fin_system_select_plan 
         WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
     """, source_engine)
 
     df_order = pd.read_sql("""
-        SELECT quo_num, order_number, worksend, chanel, datekey
+        SELECT quo_num, order_number, chanel, datekey, status AS status_fo
         FROM fin_order
     """, source_engine_task)
 
@@ -43,7 +43,7 @@ def extract_sales_quotation_data():
                show_price_check, show_price_service, show_price_taxcar, show_price_fine,
                show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
                discount_mkt, discount_government, discount_government_fin,
-               discount_government_ins, coupon_addon
+               discount_government_ins, coupon_addon, status AS status_fsp
         FROM fin_system_pay 
         WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
@@ -51,48 +51,14 @@ def extract_sales_quotation_data():
 
     return df_plan, df_order, df_pay
 
+
 @op
 def clean_sales_quotation_data(inputs):
     df, df1, df2 = inputs
     df_merged = pd.merge(df, df1, on='quo_num', how='left')
     df_merged = pd.merge(df_merged, df2, on='quo_num', how='left')
 
-    def fill_chanel_key(row):
-        chanel_key = row['chanel_key']
-        type_key = row['type_key']
-        app_type = row['app_type']
-        type_insure = row['type_insure']
-
-        if pd.notnull(chanel_key) and str(chanel_key).strip():
-            return chanel_key
-        if pd.notnull(type_key) and pd.notnull(app_type):
-            if type_key == app_type:
-                return f"{type_key} VIF" if type_insure == 'ตรอ' else type_key
-            if type_key in app_type:
-                base = app_type.replace(type_key, "").replace("-", "").strip()
-                return f"{type_key} {base}" if base else type_key
-            if app_type in type_key:
-                base = type_key.replace(app_type, "").replace("-", "").strip()
-                return f"{app_type} {base}" if base else app_type
-            return f"{type_key} {app_type}"
-        if pd.notnull(type_key):
-            return f"{type_key} {type_insure}" if type_insure else type_key
-        if pd.notnull(app_type):
-            return f"{app_type} {type_insure}" if type_insure else app_type
-        return None
-
-    df_merged['chanel_key'] = df_merged.apply(fill_chanel_key, axis=1)
-    df_merged['chanel_key'] = df_merged['chanel_key'].replace({
-        'B2B': 'APP B2B',
-        'WEB ตรอ': 'WEB VIF',
-        'TELE': 'APP TELE',
-        'APP-B2C': 'APP B2C',
-        'APP ประกันรถ': 'APP B2B',
-        'WEB ประกันรถ': 'WEB'
-    })
-
-    df_merged.drop(columns=['type_key', 'app_type'], inplace=True)
-
+    # ✅ เปลี่ยนชื่อคอลัมน์
     df_merged.rename(columns={
         "quo_num": "quotation_num",
         "datestart_x": "quotation_date",
@@ -102,7 +68,6 @@ def clean_sales_quotation_data(inputs):
         "type_work": "order_type",
         "id_government_officer": "rights_government",
         "status_gpf": "goverment_type",
-        "type_status": "check_type",
         "quo_num_old": "quotation_num_old",
         "numpay": "installment_number",
         "show_price_ins": "ins_amount",
@@ -122,15 +87,59 @@ def clean_sales_quotation_data(inputs):
         "discount_government_fin": "fin_goverment_discount",
         "discount_government_ins": "ins_goverment_discount",
         "coupon_addon": "discount_addon",
-        "worksend": "work_type",
         "chanel": "contact_channel",
-        "chanel_key": "key_channel"
     }, inplace=True)
 
     df_merged.replace(r'^\s*$', np.nan, regex=True, inplace=True)
     df_merged.replace("NaN", np.nan, inplace=True)
+    df_merged['transaction_date'] = pd.to_datetime(df_merged['transaction_date'], errors='coerce')
+    df_merged['transaction_date'] = df_merged['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
+    df_merged['order_time'] = pd.to_datetime(df_merged['order_time'], errors='coerce')
+    df_merged['order_time'] = df_merged['order_time'].dt.strftime('%Y%m%d').astype('Int64')
+    df_merged['quotation_date'] = pd.to_datetime(df_merged['quotation_date'], errors='coerce')
+    df_merged['quotation_date'] = df_merged['quotation_date'].dt.strftime('%Y%m%d').astype('Int64')
     df_merged['installment_number'] = df_merged['installment_number'].replace({'0': '1', '03': '3', '06': '6', '08': '8'})
+
+    # ✅ เพิ่มการสร้างคอลัมน์ `status`
+    def map_status(row):
+        if pd.notnull(row['status_fo']):
+            if row['status_fo'] == '88':
+                return 'cancel'
+            return row['status_fo']
+        s1 = row.get('status_fssp') or ''
+        s2 = row.get('status_fsp') or ''
+        key = (str(s1).strip(), str(s2).strip())
+        mapping = {
+            ('wait', ''): '1',
+            ('wait-key', ''): '1',
+            ('sendpay', 'sendpay'): '2',
+            ('sendpay', 'verify-wait'): '2',
+            ('tran-succ', 'sendpay'): '2',
+            ('tran-succ', 'verify-wait'): '2',
+            ('cancel', '88'): 'cancel',
+            ('delete', ''): 'delete',
+            ('wait', 'sendpay'): '2',
+            ('delete', 'sendpay'): 'delete',
+            ('delete', 'wait'): 'delete',
+            ('delete', 'wait-key'): 'delete',
+            ('wait', 'wait'): '1',
+            ('wait', 'wait-key'): '1',
+            ('', 'wait'): '1',
+            ('cancel', ''): 'cancel',
+            ('cancel', 'cancel'): 'cancel',
+            ('delete', 'delete'): 'delete',
+            ('active', 'verify'): '6',
+            ('active', 'success'): '8',
+            ('active', ''): '8'
+        }
+        return mapping.get(key, None)
+
+    df_merged['status'] = df_merged.apply(map_status, axis=1)
+    df_merged.drop(columns=['status_fssp', 'status_fsp', 'status_fo'], inplace=True)
+
     df_merged.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
+    df_merged = df_merged.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    df_merged = df_merged.where(pd.notnull(df_merged), None)
 
     return df_merged
 
@@ -162,7 +171,7 @@ def load_sales_quotation_data(df: pd.DataFrame):
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
     # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
+    exclude_columns = [pk_column, 'agent_id', 'customer_id','car_id','sales_id','order_type_id', 'payment_plan_id', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
         if col not in exclude_columns
@@ -229,16 +238,19 @@ def load_sales_quotation_data(df: pd.DataFrame):
 def fact_sales_quotation_etl():
     load_sales_quotation_data(clean_sales_quotation_data(extract_sales_quotation_data()))
 
-if __name__ == "__main__":
-    df_row = extract_sales_quotation_data()
-    print("✅ Extracted logs:", df_row.shape)
+# if __name__ == "__main__":
+#     df_plan, df_order, df_pay = extract_sales_quotation_data()
 
-    df_clean = clean_sales_quotation_data((df_row))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     print(f"- df_plan: {df_plan.shape}")
+#     print(f"- df_order: {df_order.shape}")
+#     print(f"- df_pay: {df_pay.shape}")
 
-    output_path = "fact_sales_quotation.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+#     print("✅ Cleaned columns:", df_clean.columns)
+
+#     output_path = "fact_sales_quotation.xlsx"
+#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     print(f"💾 Saved to {output_path}")
 
     # load_sales_quotation_data(df_clean)
     # print("🎉 completed! Data upserted to fact_sales_quotation.")

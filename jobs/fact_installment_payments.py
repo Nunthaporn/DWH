@@ -195,7 +195,9 @@ def clean_installment_data(inputs):
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d').astype('Int64')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d').astype('Int64')
-    df = df.replace(r'^\s*$', np.nan, regex=True)
+    # df = df.replace(r'^\s*$', np.nan, regex=True)
+    # df = df.where(pd.notnull(df), None)
+    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
     df = df.where(pd.notnull(df), None)
 
     return df
