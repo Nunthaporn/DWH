@@ -6,6 +6,7 @@ import re
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+import datetime
 
 # ✅ Load environment variables
 load_dotenv()
@@ -57,6 +58,8 @@ def clean_sales_quotation_data(inputs):
     df, df1, df2 = inputs
     df_merged = pd.merge(df, df1, on='quo_num', how='left')
     df_merged = pd.merge(df_merged, df2, on='quo_num', how='left')
+    df_merged = df_merged.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    df_merged = df_merged.where(pd.notnull(df_merged), None)
 
     # ✅ เปลี่ยนชื่อคอลัมน์
     df_merged.rename(columns={
@@ -93,11 +96,11 @@ def clean_sales_quotation_data(inputs):
     df_merged.replace(r'^\s*$', np.nan, regex=True, inplace=True)
     df_merged.replace("NaN", np.nan, inplace=True)
     df_merged['transaction_date'] = pd.to_datetime(df_merged['transaction_date'], errors='coerce')
-    df_merged['transaction_date'] = df_merged['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
+    df_merged['transaction_date'] = df_merged['transaction_date'].dt.strftime('%Y%m%d')
     df_merged['order_time'] = pd.to_datetime(df_merged['order_time'], errors='coerce')
-    df_merged['order_time'] = df_merged['order_time'].dt.strftime('%Y%m%d').astype('Int64')
+    df_merged['order_time'] = df_merged['order_time'].dt.strftime('%Y%m%d')
     df_merged['quotation_date'] = pd.to_datetime(df_merged['quotation_date'], errors='coerce')
-    df_merged['quotation_date'] = df_merged['quotation_date'].dt.strftime('%Y%m%d').astype('Int64')
+    df_merged['quotation_date'] = df_merged['quotation_date'].dt.strftime('%Y%m%d')
     df_merged['installment_number'] = df_merged['installment_number'].replace({'0': '1', '03': '3', '06': '6', '08': '8'})
 
     # ✅ เพิ่มการสร้างคอลัมน์ `status`
@@ -157,6 +160,66 @@ def clean_sales_quotation_data(inputs):
     ]
     df_merged = clean_numeric_columns(df_merged, numeric_columns)
 
+    int_columns = ['installment_number', 'show_price_check', 'price_product', 'ems_amount', 'service_price']
+
+    for col in int_columns:
+        if col in df_merged.columns:
+            df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')   
+    # แปลง NaN ทั่วไปให้เป็น None สำหรับ PostgreSQL
+    df_merged = df_merged.where(pd.notnull(df_merged), None)
+
+    # ✅ แก้ไข tax_amount ที่เป็น Infinity หรือ -Infinity ให้เป็น 0
+    if 'tax_amount' in df_merged.columns:
+        df_merged['tax_amount'] = df_merged['tax_amount'].replace([np.inf, -np.inf], 0)
+
+    # ✅ ตรวจสอบค่าตัวเลขที่เกินขอบเขต integer/bigint
+    INT32_MAX = 2_147_483_647
+    INT32_MIN = -2_147_483_648
+    INT64_MAX = 9_223_372_036_854_775_807
+    INT64_MIN = -9_223_372_036_854_775_808
+
+    # สมมติว่าคอลัมน์ที่อาจเป็น integer/bigint
+    possible_int_cols = [
+        'installment_number', 'show_price_check', 'price_product', 'ems_amount', 'service_price',
+        'ins_amount', 'prb_amount', 'total_amount', 'tax_car_price', 'overdue_fine_price',
+        'ins_discount', 'mkt_discount', 'payment_amount', 'price_addon', 'discount_addon',
+        'goverment_discount', 'tax_amount', 'fin_goverment_discount', 'ins_goverment_discount'
+    ]
+    for col in possible_int_cols:
+        if col in df_merged.columns:
+            over_int64 = df_merged[(df_merged[col].notnull()) & ((df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN))]
+            if not over_int64.empty:
+                print(f"❌ พบค่าคอลัมน์ {col} เกินขอบเขต BIGINT:")
+                print(over_int64[[col, 'quotation_num']])
+                df_merged = df_merged.drop(over_int64.index)
+            over_int32 = df_merged[(df_merged[col].notnull()) & ((df_merged[col] > INT32_MAX) | (df_merged[col] < INT32_MIN))]
+            if not over_int32.empty:
+                print(f"⚠️ พบค่าคอลัมน์ {col} เกินขอบเขต INTEGER:")
+                print(over_int32[[col, 'quotation_num']])
+                df_merged = df_merged.drop(over_int32.index)
+
+    # --- INT8 columns ตาม schema ---
+    int8_cols = [
+        'transaction_date', 'order_time', 'installment_number', 'show_price_check',
+        'price_product', 'ems_amount', 'service_price', 'quotation_date'
+    ]
+    for col in int8_cols:
+        if col in df_merged.columns:
+            df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')
+            mask_inf = df_merged[col].apply(lambda x: x == np.inf or x == -np.inf)
+            if mask_inf.any():
+                print(f"⚠️ {col} พบค่า inf/-inf {mask_inf.sum()} แถวแทนเป็น 0")
+                df_merged.loc[mask_inf, col] = 0
+            mask_invalid = df_merged[col].isnull()
+            if mask_invalid.any():
+                df_merged.loc[mask_invalid, col] = None
+            mask_over = (df_merged[col].notnull()) & ((df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN))
+            if mask_over.any():
+                print(f"❌ {col} พบค่ามาก/น้อยเกินขอบเขต int8 {mask_over.sum()} แถวแทนเป็น None (NULL)")
+                df_merged.loc[mask_over, col] = None
+            # แปลงเป็น pd.Int64Dtype() เพื่อให้ NULL/None รองรับและเป็น integer จริง
+            df_merged[col] = df_merged[col].astype('Int64')
+
     return df_merged
 
 @op
@@ -202,7 +265,9 @@ def load_sales_quotation_data(df: pd.DataFrame):
             val_old = row.get(f"{col}_old")
             if pd.isna(val_new) and pd.isna(val_old):
                 continue
-            if val_new != val_old:
+            if pd.isna(val_new) != pd.isna(val_old):
+                return True
+            if not pd.isna(val_new) and not pd.isna(val_old) and val_new != val_old:
                 return True
         return False
 
