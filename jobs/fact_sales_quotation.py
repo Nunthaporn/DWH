@@ -141,6 +141,22 @@ def clean_sales_quotation_data(inputs):
     df_merged = df_merged.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
     df_merged = df_merged.where(pd.notnull(df_merged), None)
 
+    # ✅ ล้าง comma ออกจากตัวเลข และแปลงเป็น numeric
+    def clean_numeric_columns(df: pd.DataFrame, numeric_cols: list[str]):
+        for col in numeric_cols:
+            df[col] = df[col].astype(str).str.replace(',', '', regex=False)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+
+    numeric_columns = [
+        'ins_amount', 'prb_amount', 'total_amount', 'show_price_check',
+        'service_price', 'tax_car_price', 'overdue_fine_price', 'ins_discount',
+        'mkt_discount', 'ems_amount', 'payment_amount', 'price_addon',
+        'discount_addon', 'goverment_discount', 'tax_amount', 'fin_goverment_discount',
+        'ins_goverment_discount'
+    ]
+    df_merged = clean_numeric_columns(df_merged, numeric_columns)
+
     return df_merged
 
 @op
