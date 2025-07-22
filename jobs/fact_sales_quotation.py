@@ -319,19 +319,19 @@ def load_sales_quotation_data(df: pd.DataFrame):
 def fact_sales_quotation_etl():
     load_sales_quotation_data(clean_sales_quotation_data(extract_sales_quotation_data()))
 
-if __name__ == "__main__":
-    df_plan, df_order, df_pay = extract_sales_quotation_data()
+# if __name__ == "__main__":
+#     df_plan, df_order, df_pay = extract_sales_quotation_data()
 
-    print(f"- df_plan: {df_plan.shape}")
-    print(f"- df_order: {df_order.shape}")
-    print(f"- df_pay: {df_pay.shape}")
+#     print(f"- df_plan: {df_plan.shape}")
+#     print(f"- df_order: {df_order.shape}")
+#     print(f"- df_pay: {df_pay.shape}")
 
-    df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_sales_quotation.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_sales_quotation.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_sales_quotation_data(df_clean)
-    print("🎉 completed! Data upserted to fact_sales_quotation.")
+#     load_sales_quotation_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_sales_quotation.")
