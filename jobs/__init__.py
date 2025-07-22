@@ -8,7 +8,6 @@ from .dim_agent import dim_agent_etl
 from .dim_order_type import dim_order_type_etl
 from .dim_payment_plan import dim_payment_plan_etl
 from .fact_installment_payments import fact_installment_payments_etl
-from .fact_payment_plan import fact_payment_plan_etl
 from .fact_sales_quotation import fact_sales_quotation_etl
 from schedules.schedules import dim_company_schedule  
 from schedules.schedules import dim_sales_schedule  
