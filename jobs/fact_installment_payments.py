@@ -158,6 +158,8 @@ def clean_installment_data(inputs):
         'numPay': 'installment_number'
     })
     df_fee = df_fee.drop_duplicates()
+    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce').astype('Int64')
+    df_fee['installment_number'] = pd.to_numeric(df_fee['installment_number'], errors='coerce').astype('Int64')
     df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
     df['late_fee'] = df['late_fee'].fillna(0).astype(int)
 
@@ -314,8 +316,8 @@ if __name__ == "__main__":
     df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "fact_installment_payment.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    output_path = "fact_installment_payment.csv"
+    df_clean.to_csv(output_path, index=False)
     print(f"💾 Saved to {output_path}")
 
     # load_installment_data(df_clean)
