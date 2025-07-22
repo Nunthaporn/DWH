@@ -37,7 +37,6 @@ def extract_order_type_data():
     df_order = pd.read_sql(query_order, source_engine_task)
 
     df_merged = pd.merge(df_plan, df_order, on='quo_num', how='left')
-    # df_merged.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
 
     return df_merged
 
@@ -93,6 +92,7 @@ def clean_order_type_data(df: pd.DataFrame):
     df.replace("NaN", np.nan, inplace=True)
     df.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
     df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    df = df.where(pd.notnull(df), None)
 
     return df
 
@@ -199,9 +199,9 @@ def dim_order_type_etl():
 #     df_clean = clean_order_type_data((df_row))
 #     print("✅ Cleaned columns:", df_clean.columns)
 
-#     output_path = "fact_check_price.xlsx"
-#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     print(f"💾 Saved to {output_path}")
+    # output_path = "fact_check_price.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-    # load_order_type_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_car.")
+#     load_order_type_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_car.")
