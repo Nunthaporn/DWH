@@ -42,12 +42,13 @@ def extract_payment_data():
 
 @op
 def clean_payment_data(df: pd.DataFrame):
-    # ✅ เตรียม column ให้พร้อมใช้
-    df['chanel'] = df['chanel'].fillna('').astype(str).str.strip()
-    df['chanel_main'] = df['chanel_main'].fillna('').astype(str).str.strip()
-    df['clickbank'] = df['clickbank'].fillna('').astype(str).str.strip()
+    # ✅ แปลง string "NaN", " nan ", "NaN " ให้เป็น np.nan
+    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
 
-    # ✅ lowercase สำหรับตรวจสอบ
+    # ✅ เติมช่องว่างเป็น '' และเปลี่ยน type → str
+    for col in ['chanel', 'chanel_main', 'clickbank']:
+        df[col] = df[col].fillna('').astype(str).str.strip()
+        
     ch = df['chanel'].str.lower()
     chm = df['chanel_main'].str.lower()
     cb = df['clickbank'].str.lower()
@@ -56,22 +57,25 @@ def clean_payment_data(df: pd.DataFrame):
         ch == 'เข้าฟิน',
         ch == 'เข้าประกัน',
         (chm.isin(['ผ่อนบัตรเครดิต', 'ผ่อนบัตร']) & cb.isin(['creditcard', '']) & ch.eq('ผ่อนบัตร')),
+        (chm.eq('ตัดบัตรเครดิต') & cb.isin(['']) & ch.eq('ผ่อนบัตร')),
+        (chm.eq('ผ่อนโอน') & cb.isin(['qrcode']) & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนบัตร')),
         (chm.eq('ตัดบัตรเครดิต') & cb.isin(['creditcard', '']) & ch.eq('ออนไลน์')),
-        (chm.eq('ผ่อนบัตรเครดิต') & cb.isin(['qrcode']) & ch.eq('ออนไลน์')),
+        (chm.eq('ตัดบัตรเครดิต') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
+        (chm.eq('ผ่อนบัตรเครดิต') & cb.isin(['qrcode','creditcard','']) & ch.eq('ออนไลน์')),
         (chm.eq('ผ่อนบัตรเครดิต') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
+        (chm.eq('โอนเงิน') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
         (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ตัดบัตรเครดิต')),
         (chm.eq('ผ่อนชำระ') & (cb.isin(['qrcode', '']) | cb.str.startswith('ธนาคาร')) & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนโอน')),
     ]
 
     choices = [
-        'เข้าฟิน',       # เฉพาะกรณีที่ ch == 'เข้าฟิน'
-        'เข้าประกัน',    # แยกไว้ต่างหาก
-        *(['เข้าฟิน'] * (len(conditions) - 2))  # ส่วนเงื่อนไขจัดกลุ่มที่เหลือ
+        'เข้าฟิน',
+        'เข้าประกัน',
+        *(['เข้าฟิน'] * (len(conditions) - 2)),
     ]
 
-    # ✅ Apply ผลลัพธ์
     df['chanel'] = np.select(conditions, choices, default=df['chanel'])
 
     # ✅ Generate payment_channel (ยังใช้ apply เพราะ logic ซับซ้อน)
@@ -132,7 +136,6 @@ def clean_payment_data(df: pd.DataFrame):
     query_del = """
         SELECT quo_num FROM fininsurance.fin_system_select_plan
         WHERE name IN ('ทดสอบ','test')
-        AND datestart >= '2025-01-01' AND datestart < '2025-07-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_del = pd.read_sql(query_del, source_engine)
@@ -140,7 +143,6 @@ def clean_payment_data(df: pd.DataFrame):
     df = df[df['quotation_num'] != 'FQ2505-24999']
 
     return df.replace(['', np.nan], None)
-
 
 @op
 def load_payment_data(df: pd.DataFrame):
@@ -159,23 +161,20 @@ def load_payment_data(df: pd.DataFrame):
 def dim_payment_plan_etl():
     load_payment_data(clean_payment_data(extract_payment_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_payment_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_payment_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_payment_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
-
-    # print(df_clean.head(10))
+#     df_clean = clean_payment_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
     # output_path = "dim_payment_plan.csv"
     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
     # print(f"💾 Saved to {output_path}")
 
-    output_path = "dim_payment_plan.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
-
+    # output_path = "dim_payment_plan.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
     # load_payment_data(df_clean)
     # print("🎉 Test completed! Data upserted to dim_payment_plan.")
