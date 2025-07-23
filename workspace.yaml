@@ -6,4 +6,5 @@ locations:
       repo: https://github.com/Nunthaporn/DWH
       branch: main
       subpath: jobs
+      update_interval_seconds: 60
       # เมื่อมี commit ใหม่ Agent จะ pull แล้ว reload ให้
