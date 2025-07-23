@@ -242,6 +242,18 @@ def clean_installment_data(inputs):
     
     df = df.where(pd.notnull(df), None)
 
+    # ✅ ลบ comma และแปลงเป็น float สำหรับคอลัมน์ตัวเลขที่อาจมี comma
+    for col in ['installment_amount', 'payment_amount', 'total_paid']:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(',', '', regex=False)
+                .replace('nan', None)
+                .replace('None', None)
+            )
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
     print("✅ Cleaned DataFrame:")
 
     return df
