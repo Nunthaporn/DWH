@@ -80,6 +80,15 @@ def extract_installment_data():
           AND type_insure IN ('ประกันรถ', 'ตรอ')
     """, source_engine)
 
+    # ✅ Debug print
+    print("📦 df_plan:", df_plan.shape)
+    print("📦 df_installment:", df_installment.shape)
+    print("📦 df_order:", df_order.shape)
+    print("📦 df_finance:", df_finance.shape)
+    print("📦 df_bill:", df_bill.shape)
+    print("📦 df_late_fee:", df_late_fee.shape)
+    print("📦 df_test:", df_test.shape)
+
     return df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test
 
 @op
@@ -232,6 +241,8 @@ def clean_installment_data(inputs):
         df[col] = df[col].replace(['null', 'nan', 'none', ''], None)
     
     df = df.where(pd.notnull(df), None)
+
+    print("✅ Cleaned DataFrame:")
 
     return df
 
