@@ -112,27 +112,35 @@ def clean_installment_data(inputs):
     # 3. เตรียมข้อมูลการชำระ
     num_to_name = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
                    'nine', 'ten', 'eleven', 'twelve']
-    rows = []
-
+    
     df_fin['numpay'] = pd.to_numeric(df_fin['numpay'], errors='coerce')
     df_fin = df_fin[df_fin['numpay'].notna() & (df_fin['numpay'] > 0)]
 
-    for _, row in df_fin.iterrows():
-        for i, sfx in enumerate(num_to_name, start=1):
-            money = row.get(f'moneypay_{sfx}')
-            raw_date = str(row.get(f'datepay_{sfx}'))
-            match = pd.Series(raw_date).str.extract(r'(\d{4}-\d{1,2}-\d{1,2})')[0]
-            clean_date = pd.to_datetime(match.values[0], errors='coerce') if pd.notna(match.values[0]) else None
-            if pd.notna(clean_date) and clean_date.year == 2026:
-                clean_date = clean_date.replace(year=2025)
-            rows.append({
-                'order_number': row['order_number'],
-                'payment_amount': money,
-                'payment_date': clean_date,
-                'installment_number': i
-            })
+    # ใช้ vectorized operations แทน iterrows()
+    rows_list = []
+    for i, sfx in enumerate(num_to_name, start=1):
+        money_col = f'moneypay_{sfx}'
+        date_col = f'datepay_{sfx}'
+        
+        # สร้าง DataFrame สำหรับแต่ละ installment
+        temp_df = df_fin[['order_number', money_col, date_col]].copy()
+        temp_df['installment_number'] = i
+        temp_df['payment_amount'] = temp_df[money_col]
+        
+        # ทำความสะอาดวันที่
+        temp_df['raw_date'] = temp_df[date_col].astype(str)
+        temp_df['payment_date'] = pd.to_datetime(
+            temp_df['raw_date'].str.extract(r'(\d{4}-\d{1,2}-\d{1,2})')[0], 
+            errors='coerce'
+        )
+        
+        # แก้ไขปี 2026 เป็น 2025
+        mask_2026 = temp_df['payment_date'].dt.year == 2026
+        temp_df.loc[mask_2026, 'payment_date'] = temp_df.loc[mask_2026, 'payment_date'].apply(lambda x: x.replace(year=2025) if pd.notna(x) else x)
+        
+        rows_list.append(temp_df[['order_number', 'payment_amount', 'payment_date', 'installment_number']])
 
-    df_payment = pd.DataFrame(rows)
+    df_payment = pd.concat(rows_list, ignore_index=True)
 
     # 4. เตรียม payment proof
     df_proof = df_bill.melt(id_vars=['order_number'],
@@ -163,38 +171,39 @@ def clean_installment_data(inputs):
     df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
     df['late_fee'] = df['late_fee'].fillna(0).astype(int)
 
-    # 7. คำนวณ total_paid
-    def calc_paid(row):
-        # ใช้ payment_amount ถ้ามี ถ้าไม่มีให้ใช้ installment_amount
-        payment = pd.to_numeric(row['payment_amount'], errors='coerce')
-        installment = pd.to_numeric(row['installment_amount'], errors='coerce')
-        fee = row['late_fee']
-        
-        # ถ้ามี payment_amount ให้ใช้ payment_amount + late_fee
-        # ถ้าไม่มี payment_amount ให้ใช้ installment_amount + late_fee
-        base_amount = payment if pd.notna(payment) else (installment if pd.notna(installment) else 0)
-        fee_amount = fee if pd.notna(fee) else 0
-        
-        return base_amount + fee_amount
+    # 7. คำนวณ total_paid - ใช้ vectorized operations
+    payment_numeric = pd.to_numeric(df['payment_amount'], errors='coerce')
+    installment_numeric = pd.to_numeric(df['installment_amount'], errors='coerce')
+    fee_numeric = df['late_fee'].fillna(0)
+    
+    # คำนวณ base_amount
+    base_amount = payment_numeric.fillna(installment_numeric.fillna(0))
+    
+    # ถ้า late_fee = 0 และไม่มี payment_amount ให้ใช้ installment_amount
+    mask_no_payment = payment_numeric.isna()
+    mask_no_fee = fee_numeric == 0
+    mask_use_installment = mask_no_payment & mask_no_fee
+    
+    df.loc[mask_use_installment, 'total_paid'] = installment_numeric[mask_use_installment].fillna(0)
+    df.loc[~mask_use_installment, 'total_paid'] = base_amount[~mask_use_installment] + fee_numeric[~mask_use_installment]
 
-    df['total_paid'] = df.apply(calc_paid, axis=1)
-
-    # 8. payment_status
+    # 8. payment_status - ใช้ vectorized operations
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
-
-    def status(row):
-        if pd.isna(row['payment_amount']) and pd.isna(row['payment_date']) and pd.isna(row['payment_proof']):
-            if pd.notna(row['due_date']) and datetime.now().date() > row['due_date'].date():
-                return 'เกินกำหนดชำระ'
-            return 'ยังไม่ชำระ'
-        elif pd.notna(row['payment_amount']) or pd.notna(row['payment_proof']):
-            if pd.notna(row['payment_date']) and pd.notna(row['due_date']):
-                return 'ชำระแล้ว' if row['payment_date'].date() <= row['due_date'].date() else 'ชำระล่าช้า'
-            return 'ชำระแล้ว'
-        return 'ยังไม่ชำระ'
-
-    df['payment_status'] = df.apply(status, axis=1)
+    
+    # สร้างเงื่อนไขต่างๆ
+    no_payment = df['payment_amount'].isna() & df['payment_date'].isna() & df['payment_proof'].isna()
+    has_payment = df['payment_amount'].notna() | df['payment_proof'].notna()
+    has_due_date = df['due_date'].notna()
+    has_payment_date = df['payment_date'].notna()
+    is_overdue = has_due_date & (datetime.now().date() > df['due_date'].dt.date)
+    is_late_payment = has_payment_date & has_due_date & (df['payment_date'].dt.date > df['due_date'].dt.date)
+    
+    # กำหนด payment_status
+    df['payment_status'] = 'ยังไม่ชำระ'  # ค่าเริ่มต้น
+    df.loc[no_payment & is_overdue, 'payment_status'] = 'เกินกำหนดชำระ'
+    df.loc[has_payment & ~is_late_payment, 'payment_status'] = 'ชำระแล้ว'
+    df.loc[has_payment & is_late_payment, 'payment_status'] = 'ชำระล่าช้า'
 
     # 9. ล้าง test
     df = df[~df['quo_num'].isin(df_test['quo_num'])]
@@ -205,9 +214,18 @@ def clean_installment_data(inputs):
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d').astype('Int64')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d').astype('Int64')
-    # df = df.replace(r'^\s*$', np.nan, regex=True)
-    # df = df.where(pd.notnull(df), None)
-    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    # แปลง NULL, NaN ที่เป็น string ให้เป็น None - ใช้ vectorized operations
+    # แปลงเฉพาะคอลัมน์ที่เป็น object (string) เท่านั้น
+    object_columns = df.select_dtypes(include=['object']).columns
+    
+    for col in object_columns:
+        # สร้าง mask สำหรับค่า null strings
+        null_mask = (
+            df[col].astype(str).str.strip().str.lower().isin(['null', 'nan', 'none']) |
+            (df[col].astype(str).str.strip() == '')
+        )
+        df.loc[null_mask, col] = None
+    
     df = df.where(pd.notnull(df), None)
 
     return df
@@ -325,8 +343,11 @@ def fact_installment_payments_etl():
 #     print("✅ Cleaned columns:", df_clean.columns)
 
 #     output_path = "fact_installment_payment.csv"
-#     df_clean.to_csv(output_path, index=False)
+#     # ใช้ compression และ optimize การเซฟ
+#     df_clean.to_csv(output_path, index=False, compression='gzip' if output_path.endswith('.gz') else None)
 #     print(f"💾 Saved to {output_path}")
+#     print(f"📊 DataFrame shape: {df_clean.shape}")
+#     print(f"💾 File size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
 
     # load_installment_data(df_clean)
     # print("🎉 completed! Data upserted to fact_installment_payment.")
