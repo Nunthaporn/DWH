@@ -183,6 +183,10 @@ def clean_installment_data(inputs):
         base_amount = payment if pd.notna(payment) else (installment if pd.notna(installment) else 0)
         fee_amount = fee if pd.notna(fee) else 0
         
+        # ถ้า late_fee = 0 และไม่มี payment_amount ให้ใช้ installment_amount
+        if fee_amount == 0 and pd.isna(payment):
+            return installment if pd.notna(installment) else 0
+        
         return base_amount + fee_amount
 
     df['total_paid'] = df.apply(calc_paid, axis=1)
@@ -214,9 +218,15 @@ def clean_installment_data(inputs):
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d').astype('Int64')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d').astype('Int64')
-    # df = df.replace(r'^\s*$', np.nan, regex=True)
-    # df = df.where(pd.notnull(df), None)
-    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    # แปลง NULL, NaN ที่เป็น string ให้เป็น None
+    def clean_null_values(x):
+        if isinstance(x, str):
+            x_clean = x.strip().lower()
+            if x_clean in ['null', 'nan', 'none', '']:
+                return None
+        return x
+    
+    df = df.applymap(clean_null_values)
     df = df.where(pd.notnull(df), None)
 
     return df
@@ -333,9 +343,9 @@ if __name__ == "__main__":
     df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
     print("✅ Cleaned columns:", df_clean.columns)
 
-#     output_path = "fact_installment_payment.csv"
-#     df_clean.to_csv(output_path, index=False)
-#     print(f"💾 Saved to {output_path}")
+    output_path = "fact_installment_payment.csv"
+    df_clean.to_csv(output_path, index=False)
+    print(f"💾 Saved to {output_path}")
 
     # load_installment_data(df_clean)
     # print("🎉 completed! Data upserted to fact_installment_payment.")
