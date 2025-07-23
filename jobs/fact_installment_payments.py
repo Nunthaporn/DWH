@@ -180,8 +180,8 @@ def clean_installment_data(inputs):
         'numPay': 'installment_number'
     })
     df_fee = df_fee.drop_duplicates()
-    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce').astype('Int64')
-    df_fee['installment_number'] = pd.to_numeric(df_fee['installment_number'], errors='coerce').astype('Int64')
+    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
+    df_fee['installment_number'] = pd.to_numeric(df_fee['installment_number'], errors='coerce')
     df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
     df['late_fee'] = df['late_fee'].fillna(0).astype(int)
 
@@ -227,11 +227,11 @@ def clean_installment_data(inputs):
     df = df[~df['quo_num'].isin(df_test['quo_num'])]
     df = df.rename(columns={'quo_num': 'quotation_num'})
     df['installment_number'] = df['installment_number'].replace({'0': '1'})
-    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce').astype('Int64')
+    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
-    df['due_date'] = df['due_date'].dt.strftime('%Y%m%d').astype('Int64')
+    df['due_date'] = df['due_date'].dt.strftime('%Y%m%d')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
-    df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d').astype('Int64')
+    df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d')
     
     # แปลง NULL, NaN ที่เป็น string ให้เป็น None - ใช้ vectorized operations แทน applymap
     # แปลงเฉพาะคอลัมน์ที่เป็น string
@@ -239,20 +239,22 @@ def clean_installment_data(inputs):
     for col in string_columns:
         df[col] = df[col].astype(str).str.strip().str.lower()
         df[col] = df[col].replace(['null', 'nan', 'none', ''], None)
-    
+
+    # ✅ แปลง NaN (float) ให้เป็น None อีกรอบหลังจากแปลง string
     df = df.where(pd.notnull(df), None)
+
+    # ✅ แปลง NaN (float) ที่อาจหลงเหลือใน DataFrame ให้เป็น None สำหรับทุก cell
+    df = df.applymap(lambda x: None if pd.isna(x) else x)
 
     # ✅ ลบ comma และแปลงเป็น float สำหรับคอลัมน์ตัวเลขที่อาจมี comma
     for col in ['installment_amount', 'payment_amount', 'total_paid']:
         if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(',', '', regex=False)
-                .replace('nan', None)
-                .replace('None', None)
-            )
+            # ลบ comma เฉพาะ cell ที่เป็น string
+            df[col] = df[col].apply(lambda x: x.replace(',', '') if isinstance(x, str) else x)
+            # แปลงเป็น float ถ้าเป็นตัวเลข
             df[col] = pd.to_numeric(df[col], errors='coerce')
+            # แปลง NaN (float) เป็น None
+            df[col] = df[col].apply(lambda x: None if pd.isna(x) else x)
 
     print("✅ Cleaned DataFrame:")
 
@@ -355,26 +357,26 @@ def load_installment_data(df: pd.DataFrame):
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
 
-# if __name__ == "__main__":
-#     # ✅ Unpack tuple
-#     df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
+if __name__ == "__main__":
+    # # ✅ Unpack tuple
+    df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
     
-#     print("✅ Extracted logs:")
-#     print(f"- df_plan: {df_plan.shape}")
-#     print(f"- df_installment: {df_installment.shape}")
-#     print(f"- df_order: {df_order.shape}")
-#     print(f"- df_finance: {df_finance.shape}")
-#     print(f"- df_bill: {df_bill.shape}")
-#     print(f"- df_late_fee: {df_late_fee.shape}")
-#     print(f"- df_test: {df_test.shape}")
+    # print("✅ Extracted logs:")
+    # print(f"- df_plan: {df_plan.shape}")
+    # print(f"- df_installment: {df_installment.shape}")
+    # print(f"- df_order: {df_order.shape}")
+    # print(f"- df_finance: {df_finance.shape}")
+    # print(f"- df_bill: {df_bill.shape}")
+    # print(f"- df_late_fee: {df_late_fee.shape}")
+    # print(f"- df_test: {df_test.shape}")
     
-#     # ✅ Pass as tuple to cleaning function
-#     df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    # ✅ Pass as tuple to cleaning function
+    df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
+    # print("✅ Cleaned columns:", df_clean.columns)
 
-#     output_path = "fact_installment_payment.csv"
-#     df_clean.to_csv(output_path, index=False)
-#     print(f"💾 Saved to {output_path}")
+    # output_path = "fact_installment_payment.csv"
+    # df_clean.to_csv(output_path, index=False)
+    # print(f"💾 Saved to {output_path}")
 
-    # load_installment_data(df_clean)
-    # print("🎉 completed! Data upserted to fact_installment_payment.")
+    load_installment_data(df_clean)
+    print("🎉 completed! Data upserted to fact_installment_payment.")
