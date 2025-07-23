@@ -1,3 +1,9 @@
 load_from:
   - python_file: jobs/insurerun_etl.py
   - python_file: schedules/schedules.py
+locations:
+  - git:
+      repo: https://github.com/Nunthaporn/DWH
+      branch: main
+      subpath: jobs
+      # เมื่อมี commit ใหม่ Agent จะ pull แล้ว reload ให้
