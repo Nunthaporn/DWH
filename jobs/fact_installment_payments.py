@@ -165,9 +165,17 @@ def clean_installment_data(inputs):
 
     # 7. คำนวณ total_paid
     def calc_paid(row):
-        base = pd.to_numeric(row['installment_amount'], errors='coerce')
+        # ใช้ payment_amount ถ้ามี ถ้าไม่มีให้ใช้ installment_amount
+        payment = pd.to_numeric(row['payment_amount'], errors='coerce')
+        installment = pd.to_numeric(row['installment_amount'], errors='coerce')
         fee = row['late_fee']
-        return (base if pd.notna(base) else 0) + (fee if pd.notna(fee) else 0)
+        
+        # ถ้ามี payment_amount ให้ใช้ payment_amount + late_fee
+        # ถ้าไม่มี payment_amount ให้ใช้ installment_amount + late_fee
+        base_amount = payment if pd.notna(payment) else (installment if pd.notna(installment) else 0)
+        fee_amount = fee if pd.notna(fee) else 0
+        
+        return base_amount + fee_amount
 
     df['total_paid'] = df.apply(calc_paid, axis=1)
 
@@ -299,26 +307,26 @@ def load_installment_data(df: pd.DataFrame):
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
 
-if __name__ == "__main__":
-    # ✅ Unpack tuple
-    df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
+# if __name__ == "__main__":
+#     # ✅ Unpack tuple
+#     df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
     
-    print("✅ Extracted logs:")
-    print(f"- df_plan: {df_plan.shape}")
-    print(f"- df_installment: {df_installment.shape}")
-    print(f"- df_order: {df_order.shape}")
-    print(f"- df_finance: {df_finance.shape}")
-    print(f"- df_bill: {df_bill.shape}")
-    print(f"- df_late_fee: {df_late_fee.shape}")
-    print(f"- df_test: {df_test.shape}")
+#     print("✅ Extracted logs:")
+#     print(f"- df_plan: {df_plan.shape}")
+#     print(f"- df_installment: {df_installment.shape}")
+#     print(f"- df_order: {df_order.shape}")
+#     print(f"- df_finance: {df_finance.shape}")
+#     print(f"- df_bill: {df_bill.shape}")
+#     print(f"- df_late_fee: {df_late_fee.shape}")
+#     print(f"- df_test: {df_test.shape}")
     
-    # ✅ Pass as tuple to cleaning function
-    df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     # ✅ Pass as tuple to cleaning function
+#     df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "fact_installment_payment.csv"
-    df_clean.to_csv(output_path, index=False)
-    print(f"💾 Saved to {output_path}")
+#     output_path = "fact_installment_payment.csv"
+#     df_clean.to_csv(output_path, index=False)
+#     print(f"💾 Saved to {output_path}")
 
     # load_installment_data(df_clean)
     # print("🎉 completed! Data upserted to fact_installment_payment.")
