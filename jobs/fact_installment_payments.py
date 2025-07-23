@@ -171,23 +171,23 @@ def clean_installment_data(inputs):
     df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
     df['late_fee'] = df['late_fee'].fillna(0).astype(int)
 
-    # 7. คำนวณ total_paid - ใช้ vectorized operations
-    payment_numeric = pd.to_numeric(df['payment_amount'], errors='coerce')
-    installment_numeric = pd.to_numeric(df['installment_amount'], errors='coerce')
-    fee_numeric = df['late_fee'].fillna(0)
-    
-    # คำนวณ base_amount
-    base_amount = payment_numeric.fillna(installment_numeric.fillna(0))
-    
-    # ถ้า late_fee = 0 และไม่มี payment_amount ให้ใช้ installment_amount
-    mask_no_payment = payment_numeric.isna()
-    mask_no_fee = fee_numeric == 0
-    mask_use_installment = mask_no_payment & mask_no_fee
-    
-    df.loc[mask_use_installment, 'total_paid'] = installment_numeric[mask_use_installment].fillna(0)
-    df.loc[~mask_use_installment, 'total_paid'] = base_amount[~mask_use_installment] + fee_numeric[~mask_use_installment]
+    # 7. คำนวณ total_paid
+    def calc_paid(row):
+        # ใช้ payment_amount ถ้ามี ถ้าไม่มีให้ใช้ installment_amount
+        payment = pd.to_numeric(row['payment_amount'], errors='coerce')
+        installment = pd.to_numeric(row['installment_amount'], errors='coerce')
+        fee = row['late_fee']
+        
+        # ถ้ามี payment_amount ให้ใช้ payment_amount + late_fee
+        # ถ้าไม่มี payment_amount ให้ใช้ installment_amount + late_fee
+        base_amount = payment if pd.notna(payment) else (installment if pd.notna(installment) else 0)
+        fee_amount = fee if pd.notna(fee) else 0
+        
+        return base_amount + fee_amount
 
-    # 8. payment_status - ใช้ vectorized operations
+    df['total_paid'] = df.apply(calc_paid, axis=1)
+
+    # 8. payment_status
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     
@@ -214,18 +214,9 @@ def clean_installment_data(inputs):
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d').astype('Int64')
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d').astype('Int64')
-    # แปลง NULL, NaN ที่เป็น string ให้เป็น None - ใช้ vectorized operations
-    # แปลงเฉพาะคอลัมน์ที่เป็น object (string) เท่านั้น
-    object_columns = df.select_dtypes(include=['object']).columns
-    
-    for col in object_columns:
-        # สร้าง mask สำหรับค่า null strings
-        null_mask = (
-            df[col].astype(str).str.strip().str.lower().isin(['null', 'nan', 'none']) |
-            (df[col].astype(str).str.strip() == '')
-        )
-        df.loc[null_mask, col] = None
-    
+    # df = df.replace(r'^\s*$', np.nan, regex=True)
+    # df = df.where(pd.notnull(df), None)
+    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
     df = df.where(pd.notnull(df), None)
 
     return df
@@ -325,29 +316,26 @@ def load_installment_data(df: pd.DataFrame):
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
 
-# if __name__ == "__main__":
-#     # ✅ Unpack tuple
-#     df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
+if __name__ == "__main__":
+    # ✅ Unpack tuple
+    df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
     
-#     print("✅ Extracted logs:")
-#     print(f"- df_plan: {df_plan.shape}")
-#     print(f"- df_installment: {df_installment.shape}")
-#     print(f"- df_order: {df_order.shape}")
-#     print(f"- df_finance: {df_finance.shape}")
-#     print(f"- df_bill: {df_bill.shape}")
-#     print(f"- df_late_fee: {df_late_fee.shape}")
-#     print(f"- df_test: {df_test.shape}")
+    print("✅ Extracted logs:")
+    print(f"- df_plan: {df_plan.shape}")
+    print(f"- df_installment: {df_installment.shape}")
+    print(f"- df_order: {df_order.shape}")
+    print(f"- df_finance: {df_finance.shape}")
+    print(f"- df_bill: {df_bill.shape}")
+    print(f"- df_late_fee: {df_late_fee.shape}")
+    print(f"- df_test: {df_test.shape}")
     
-#     # ✅ Pass as tuple to cleaning function
-#     df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    # ✅ Pass as tuple to cleaning function
+    df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
+    print("✅ Cleaned columns:", df_clean.columns)
 
 #     output_path = "fact_installment_payment.csv"
-#     # ใช้ compression และ optimize การเซฟ
-#     df_clean.to_csv(output_path, index=False, compression='gzip' if output_path.endswith('.gz') else None)
+#     df_clean.to_csv(output_path, index=False)
 #     print(f"💾 Saved to {output_path}")
-#     print(f"📊 DataFrame shape: {df_clean.shape}")
-#     print(f"💾 File size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
 
     # load_installment_data(df_clean)
     # print("🎉 completed! Data upserted to fact_installment_payment.")
