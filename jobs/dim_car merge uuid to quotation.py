@@ -12,7 +12,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, id_motor1, id_motor2, datestart
@@ -39,7 +39,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan, yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity, weight_car, cc_car, color_car, datestart

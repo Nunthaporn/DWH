@@ -12,7 +12,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, type_insure
@@ -39,7 +39,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
@@ -78,7 +78,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance_task'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, status_paybill
@@ -200,7 +200,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT * 

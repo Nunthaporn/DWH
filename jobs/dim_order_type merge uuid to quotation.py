@@ -16,7 +16,7 @@ port = os.getenv('DB_PORT')
 database = 'fininsurance'
 
 # สร้าง engine สำหรับเชื่อมต่อฐานข้อมูล
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 # SQL query
 query = """
@@ -44,7 +44,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance_task'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num,worksend

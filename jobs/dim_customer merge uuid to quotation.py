@@ -12,7 +12,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, address, province, amphoe, district, zipcode, datestart
@@ -39,7 +39,7 @@ host = os.getenv('DB_HOST')
 port = os.getenv('DB_PORT')  
 database = 'fininsurance'
 
-engine = create_engine(f'mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{database}')
+engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}:{port}/{database}')
 
 query = """
 SELECT quo_num, idcard, title, name, lastname, birthDate, career, gender, tel, email, datestart
