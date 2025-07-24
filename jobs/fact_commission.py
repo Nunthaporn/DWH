@@ -202,6 +202,13 @@ def load_commission_data(df: pd.DataFrame):
     table_name = 'fact_commission'
     pk_column = 'quotation_num'
 
+    # 🧹 Clean: inf, -inf เป็น 0, string NaN/None/null/'' เป็น None, np.nan เป็น None
+    import numpy as np
+    nan_strs = ['nan', 'NaN', 'None', 'null', '']
+    df = df.replace([np.inf, -np.inf], 0)
+    df = df.replace(nan_strs, None)
+    df = df.where(pd.notnull(df), None)
+
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
     with target_engine.connect() as conn:

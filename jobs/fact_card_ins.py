@@ -111,7 +111,7 @@ def load_card_ins_data(df: pd.DataFrame):
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    exclude_columns = [pk_column, 'create_at', 'update_at']
+    exclude_columns = [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
     compare_cols = [
         col for col in df.columns
         if col not in exclude_columns
