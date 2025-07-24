@@ -25,60 +25,82 @@ target_engine = create_engine(
 
 @op
 def extract_installment_data():
-    df_plan = pd.read_sql("""
-        SELECT quo_num
-        FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
-        AND type_insure IN ('ประกันรถ', 'ตรอ')
-    """, source_engine)
+    # ✅ ใช้ context manager เพื่อจัดการ connection อย่างปลอดภัย
+    try:
+        df_plan = pd.read_sql("""
+            SELECT quo_num
+            FROM fin_system_select_plan
+            WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+            AND type_insure IN ('ประกันรถ', 'ตรอ')
+        """, source_engine)
 
-    df_installment = pd.read_sql("""
-        SELECT quo_num, money_one, money_two, money_three, money_four,
-               money_five, money_six, money_seven, money_eight, money_nine,
-               money_ten, money_eleven, money_twelve,
-               date_one, date_two, date_three, date_four, date_five,
-               date_six, date_seven, date_eight, date_nine, date_ten,
-               date_eleven, date_twelve, numpay
-        FROM fin_installment
-    """, source_engine)
+        df_installment = pd.read_sql("""
+            SELECT quo_num, money_one, money_two, money_three, money_four,
+                   money_five, money_six, money_seven, money_eight, money_nine,
+                   money_ten, money_eleven, money_twelve,
+                   date_one, date_two, date_three, date_four, date_five,
+                   date_six, date_seven, date_eight, date_nine, date_ten,
+                   date_eleven, date_twelve, numpay
+            FROM fin_installment
+        """, source_engine)
 
-    df_order = pd.read_sql("""
-        SELECT quo_num, order_number
-        FROM fin_order
-        WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-    """, task_engine)
+        df_order = pd.read_sql("""
+            SELECT quo_num, order_number
+            FROM fin_order
+            WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+        """, task_engine)
 
-    df_finance = pd.read_sql("""
-        SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
-               datepay_five, datepay_six, datepay_seven, datepay_eight,
-               datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
-               moneypay_one, moneypay_two, moneypay_three, moneypay_four,
-               moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
-               moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
-               numpay
-        FROM fin_finance
-        WHERE order_number REGEXP '[A-Z]+25[0-9]{2}-[0-9]+'
-    """, task_engine)
+        df_finance = pd.read_sql("""
+            SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
+                   datepay_five, datepay_six, datepay_seven, datepay_eight,
+                   datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
+                   moneypay_one, moneypay_two, moneypay_three, moneypay_four,
+                   moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
+                   moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
+                   numpay
+            FROM fin_finance
+            WHERE order_number REGEXP '[A-Z]+25[0-9]{2}-[0-9]+'
+        """, task_engine)
 
-    df_bill = pd.read_sql("""
-        SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
-               bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
-               bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
-        FROM fin_bill
-    """, task_engine)
+        df_bill = pd.read_sql("""
+            SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
+                   bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
+                   bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
+            FROM fin_bill
+        """, task_engine)
 
-    df_late_fee = pd.read_sql("""
-        SELECT orderNumber, penaltyPay, numPay
-        FROM FIN_Account_AttachSlip_PathImageSlip
-        WHERE checkPay IN ('ค่าปรับ', 'ค่างวด/ค่าปรับ')
-    """, task_engine)
+        df_late_fee = pd.read_sql("""
+            SELECT orderNumber, penaltyPay, numPay
+            FROM FIN_Account_AttachSlip_PathImageSlip
+            WHERE checkPay IN ('ค่าปรับ', 'ค่างวด/ค่าปรับ')
+        """, task_engine)
 
-    df_test = pd.read_sql("""
-        SELECT quo_num
-        FROM fin_system_select_plan
-        WHERE name IN ('ทดสอบ','test')
-          AND type_insure IN ('ประกันรถ', 'ตรอ')
-    """, source_engine)
+        df_test = pd.read_sql("""
+            SELECT quo_num
+            FROM fin_system_select_plan
+            WHERE name IN ('ทดสอบ','test')
+              AND type_insure IN ('ประกันรถ', 'ตรอ')
+        """, source_engine)
+        
+    except Exception as e:
+        print(f"❌ Error during data extraction: {e}")
+        # ✅ Rollback connections เพื่อแก้ปัญหา PendingRollbackError
+        try:
+            with source_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        try:
+            with task_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        try:
+            with target_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        raise e
 
     # ✅ Debug print
     print("📦 df_plan:", df_plan.shape)
@@ -233,44 +255,140 @@ def clean_installment_data(inputs):
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d')
     
-    # แปลง NULL, NaN ที่เป็น string ให้เป็น None - ใช้ vectorized operations แทน applymap
-    # แปลงเฉพาะคอลัมน์ที่เป็น string
-    string_columns = df.select_dtypes(include=['object']).columns
-    for col in string_columns:
-        df[col] = df[col].astype(str).str.strip().str.lower()
-        df[col] = df[col].replace(['null', 'nan', 'none', ''], None)
-
-    # ✅ แปลง NaN (float) ให้เป็น None อีกรอบหลังจากแปลง string
-    df = df.where(pd.notnull(df), None)
-
-    # ✅ แปลง NaN (float) ที่อาจหลงเหลือใน DataFrame ให้เป็น None สำหรับทุก cell
-    df = df.applymap(lambda x: None if pd.isna(x) else x)
-
-    # ✅ ลบ comma และแปลงเป็น float สำหรับคอลัมน์ตัวเลขที่อาจมี comma
-    for col in ['installment_amount', 'payment_amount', 'total_paid']:
-        if col in df.columns:
-            # ลบ comma เฉพาะ cell ที่เป็น string
-            df[col] = df[col].apply(lambda x: x.replace(',', '') if isinstance(x, str) else x)
-            # แปลงเป็น float ถ้าเป็นตัวเลข
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            # แปลง NaN (float) เป็น None
-            df[col] = df[col].apply(lambda x: None if pd.isna(x) else x)
-
-    print("✅ Cleaned DataFrame:")
+    # ✅ ตรวจสอบข้อมูลก่อนการทำความสะอาด - ลดการตรวจสอบ
+    print("🔍 Before cleaning:")
+    print(f"📊 Shape: {df.shape}")
+    nan_counts_before = df.isna().sum()
+    print("📊 NaN counts before cleaning:")
+    for col, count in nan_counts_before.items():
+        if count > 0:
+            print(f"  - {col}: {count}")
+    
+    # ✅ ใช้ sanitize_dataframe function เพื่อทำความสะอาดข้อมูลอย่างครอบคลุม - เรียกครั้งเดียว
+    print("🧹 Applying comprehensive data sanitization...")
+    df = sanitize_dataframe(df.copy())
+    
+    # ✅ ตรวจสอบผลลัพธ์การทำความสะอาด - ลดการตรวจสอบ
+    print("✅ After cleaning:")
+    print(f"📊 Shape: {df.shape}")
+    
+    # ตรวจสอบ NaN values ที่เหลือ
+    nan_counts_after = df.isna().sum()
+    print("📊 NaN counts after cleaning:")
+    for col, count in nan_counts_after.items():
+        if count > 0:
+            print(f"  - {col}: {count}")
+    
+    # แสดงสรุปการเปลี่ยนแปลง
+    print("\n📊 Cleaning completed")
+    for col in df.columns:
+        if col in nan_counts_before.index and col in nan_counts_after.index:
+            before = nan_counts_before[col]
+            after = nan_counts_after[col]
+            if before != after:
+                print(f"  - {col}: {before} → {after} NaN values")
 
     return df
+
+def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """ล้างค่า 'NaN', 'null', 'none' string ให้เป็น None และแปลง float NaN เป็น None - เวอร์ชันที่ปรับปรุงประสิทธิภาพ"""
+    
+    # 🔁 สร้าง copy เพื่อไม่ให้กระทบข้อมูลต้นฉบับ
+    df_clean = df.copy()
+    
+    # 🔁 แปลง float NaN เป็น None ก่อน
+    df_clean = df_clean.where(pd.notna(df_clean), None)
+    
+    # 🔁 ล้าง string columns อย่างมีประสิทธิภาพ
+    string_columns = df_clean.select_dtypes(include=['object']).columns
+    
+    for col in string_columns:
+        if col in df_clean.columns:
+            # แปลงเป็น string และทำความสะอาดในครั้งเดียว
+            df_clean[col] = df_clean[col].astype(str)
+            
+            # ใช้วิธีที่เร็วขึ้น - ตรวจสอบเฉพาะค่าที่จำเป็น
+            nan_mask = (
+                df_clean[col].str.lower().isin(['nan', 'null', 'none', 'nonetype', 'nulltype']) |
+                df_clean[col].str.strip().isin(['', '[null]']) |
+                df_clean[col].str.contains('^\\[null\\]$', case=False, na=False)
+            )
+            
+            # แทนที่ค่า NaN string ด้วย None
+            df_clean.loc[nan_mask, col] = None
+            
+            # ลบ whitespace เฉพาะค่าที่ไม่ใช่ None
+            mask_not_none = df_clean[col].notna()
+            if mask_not_none.any():
+                df_clean.loc[mask_not_none, col] = df_clean.loc[mask_not_none, col].str.strip()
+                
+                # ตรวจสอบอีกครั้งหลังจาก strip
+                nan_mask_after = (
+                    df_clean[col].str.lower().isin(['nan', 'null', 'none', '']) |
+                    df_clean[col].str.contains('^\\[null\\]$', case=False, na=False)
+                )
+                df_clean.loc[nan_mask_after, col] = None
+
+    # 🔁 ล้างคอลัมน์ตัวเลขที่อาจมี comma - ใช้วิธีที่เร็วขึ้น
+    numeric_cols = ['installment_amount', 'payment_amount', 'total_paid', 'late_fee']
+    for col in numeric_cols:
+        if col in df_clean.columns:
+            # ลบ comma เฉพาะ cell ที่เป็น string และไม่ใช่ None
+            mask_string = df_clean[col].astype(str).str.contains(',', na=False)
+            if mask_string.any():
+                df_clean.loc[mask_string, col] = df_clean.loc[mask_string, col].astype(str).str.replace(',', '')
+            
+            # แปลงเป็น numeric
+            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+            # แปลง NaN เป็น None
+            df_clean[col] = df_clean[col].where(pd.notna(df_clean[col]), None)
+
+    return df_clean
 
 @op
 def load_installment_data(df: pd.DataFrame):
     table_name = 'fact_installment_payments'
     pk_column = 'quotation_num'
 
+    # ✅ ตรวจสอบข้อมูลก่อนการบันทึก - ลดการตรวจสอบที่ซ้ำซ้อน
+    print("🔍 Before database operations:")
+    print(f"📊 DataFrame shape: {df.shape}")
+    
+    # ตรวจสอบ NaN values เฉพาะครั้งเดียว
+    nan_counts = df.isna().sum()
+    print("📊 NaN counts before DB operations:")
+    for col, count in nan_counts.items():
+        if count > 0:
+            print(f"  - {col}: {count}")
+    
+    # ✅ ใช้ sanitize_dataframe function เพื่อทำความสะอาดข้อมูลอย่างครอบคลุม - เรียกครั้งเดียว
+    print("🧹 Applying comprehensive data sanitization...")
+    df = sanitize_dataframe(df.copy())
+    
+    # ✅ ตรวจสอบข้อมูลหลังการทำความสะอาด - ลดการตรวจสอบ
+    print("✅ After sanitization:")
+    nan_counts_after = df.isna().sum()
+    print("📊 NaN counts after sanitization:")
+    for col, count in nan_counts_after.items():
+        if count > 0:
+            print(f"  - {col}: {count}")
+
     # ✅ กรอง fact_installment_payments ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
     # ✅ Load ข้อมูลเดิมจาก PostgreSQL
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    try:
+        with target_engine.connect() as conn:
+            df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    except Exception as e:
+        print(f"❌ Error loading existing data: {e}")
+        # ✅ Rollback connection
+        try:
+            with target_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        raise e
 
     # ✅ กรอง fact_installment_payments ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
@@ -322,6 +440,29 @@ def load_installment_data(df: pd.DataFrame):
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
+    # ✅ ตรวจสอบและทำความสะอาดข้อมูลก่อนการ insert/update - ลดการตรวจสอบ
+    if not df_to_insert.empty:
+        print("🔍 Checking insert data:")
+        insert_nan_counts = df_to_insert.isna().sum()
+        for col, count in insert_nan_counts.items():
+            if count > 0:
+                print(f"  - {col}: {count} NaN values")
+        
+        # ✅ ทำความสะอาดข้อมูล insert อีกครั้ง
+        print("🧹 Sanitizing insert data...")
+        df_to_insert = sanitize_dataframe(df_to_insert.copy())
+    
+    if not df_diff_renamed.empty:
+        print("🔍 Checking update data:")
+        update_nan_counts = df_diff_renamed.isna().sum()
+        for col, count in update_nan_counts.items():
+            if count > 0:
+                print(f"  - {col}: {count} NaN values")
+        
+        # ✅ ทำความสะอาดข้อมูล update อีกครั้ง
+        print("🧹 Sanitizing update data...")
+        df_diff_renamed = sanitize_dataframe(df_diff_renamed.copy())
+
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
@@ -351,32 +492,151 @@ def load_installment_data(df: pd.DataFrame):
                 )
                 conn.execute(stmt)
 
+    # ✅ ตรวจสอบข้อมูลในฐานข้อมูลหลังการ insert/update - ลดการตรวจสอบ
+    print("🔍 Checking data in database after operations:")
+    try:
+        with target_engine.connect() as conn:
+            # ตรวจสอบจำนวนแถวทั้งหมด
+            total_rows = pd.read_sql(f"SELECT COUNT(*) as total FROM {table_name}", conn).iloc[0]['total']
+            print(f"📊 Total rows in {table_name}: {total_rows}")
+            
+            # ตรวจสอบ NaN values ในฐานข้อมูล - เฉพาะคอลัมน์หลัก
+            key_columns = ['quotation_num', 'installment_number', 'order_number', 'payment_status']
+            for col in key_columns:
+                if col in df.columns:
+                    null_count = pd.read_sql(f"SELECT COUNT(*) as null_count FROM {table_name} WHERE {col} IS NULL", conn).iloc[0]['null_count']
+                    if null_count > 0:
+                        print(f"  - {col}: {null_count} NULL values in database")
+    except Exception as e:
+        print(f"❌ Error in database check: {e}")
+        # ✅ Rollback connection
+        try:
+            with target_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        raise e
+
     print("✅ Insert/update completed.")
+    
+    # ✅ ทำความสะอาดข้อมูลในฐานข้อมูลที่มีอยู่แล้ว (ถ้ามี NaN strings) - ลดการตรวจสอบ
+    print("🧹 Cleaning existing data in database...")
+    with target_engine.begin() as conn:
+        # ตรวจสอบประเภทข้อมูลของคอลัมน์ในฐานข้อมูล
+        column_info_query = f"""
+        SELECT column_name, data_type 
+        FROM information_schema.columns 
+        WHERE table_name = '{table_name}'
+        ORDER BY ordinal_position
+        """
+        column_info = pd.read_sql(column_info_query, conn)
+        
+        # อัปเดตค่า NaN strings ให้เป็น NULL (เฉพาะคอลัมน์ string)
+        update_queries = []
+        for col in df.columns:
+            col_info = column_info[column_info['column_name'] == col]
+            if not col_info.empty:
+                data_type = col_info.iloc[0]['data_type']
+                
+                if data_type in ['character varying', 'text', 'character']:
+                    update_query = f"""
+                    UPDATE {table_name} 
+                    SET {col} = NULL 
+                    WHERE {col} IN ('nan', 'NaN', 'NAN', 'null', 'NULL', 'Null', 'none', 'None', 'NONE', '[null]', '[NULL]', '[Null]')
+                    OR {col} = ''
+                    """
+                    update_queries.append(update_query)
+        
+        # ทำการอัปเดต
+        for query in update_queries:
+            try:
+                result = conn.execute(query)
+                if result.rowcount > 0:
+                    print(f"  ✅ Updated {result.rowcount} rows with NaN strings")
+            except Exception as e:
+                print(f"  ⚠️ Warning: Could not update some rows: {e}")
+    
+    # ✅ ตรวจสอบข้อมูลในฐานข้อมูลหลังการทำความสะอาด - ลดการตรวจสอบ
+    print("🔍 Final check of data in database after cleaning:")
+    try:
+        with target_engine.connect() as conn:
+            # ตรวจสอบจำนวนแถวทั้งหมด
+            total_rows = pd.read_sql(f"SELECT COUNT(*) as total FROM {table_name}", conn).iloc[0]['total']
+            print(f"📊 Total rows in {table_name}: {total_rows}")
+            
+            # ตรวจสอบ NaN values ในฐานข้อมูล - เฉพาะคอลัมน์หลัก
+            key_columns = ['quotation_num', 'installment_number', 'order_number', 'payment_status']
+            for col in key_columns:
+                if col in df.columns:
+                    null_count = pd.read_sql(f"SELECT COUNT(*) as null_count FROM {table_name} WHERE {col} IS NULL", conn).iloc[0]['null_count']
+                    if null_count > 0:
+                        print(f"  - {col}: {null_count} NULL values in database")
+    
+    except Exception as e:
+        print(f"❌ Error in final database check: {e}")
+        # ✅ Rollback connection
+        try:
+            with target_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        raise e
 
 @job
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
 
 if __name__ == "__main__":
-    # # ✅ Unpack tuple
-    df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
-    
-    # print("✅ Extracted logs:")
-    # print(f"- df_plan: {df_plan.shape}")
-    # print(f"- df_installment: {df_installment.shape}")
-    # print(f"- df_order: {df_order.shape}")
-    # print(f"- df_finance: {df_finance.shape}")
-    # print(f"- df_bill: {df_bill.shape}")
-    # print(f"- df_late_fee: {df_late_fee.shape}")
-    # print(f"- df_test: {df_test.shape}")
-    
-    # ✅ Pass as tuple to cleaning function
-    df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
-    # print("✅ Cleaned columns:", df_clean.columns)
+    try:
+        # ✅ Unpack tuple
+        df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test = extract_installment_data()
+        
+        # ✅ Pass as tuple to cleaning function
+        df_clean = clean_installment_data((df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test))
+        
+        # ✅ ตรวจสอบข้อมูลก่อนการบันทึก - ลดการตรวจสอบที่ซ้ำซ้อน
+        print("🔍 Before database operations:")
+        print(f"📊 DataFrame shape: {df_clean.shape}")
+        
+        # ตรวจสอบ NaN values เฉพาะครั้งเดียว
+        nan_counts_csv = df_clean.isna().sum()
+        print("📊 NaN counts before DB operations:")
+        for col, count in nan_counts_csv.items():
+            if count > 0:
+                print(f"  - {col}: {count}")
+        
+        # ✅ ใช้ sanitize_dataframe function เพื่อทำความสะอาดข้อมูลอย่างครอบคลุม - เรียกครั้งเดียว
+        print("🧹 Applying comprehensive data sanitization...")
+        df_clean = sanitize_dataframe(df_clean.copy())
+        
+        # ✅ ตรวจสอบข้อมูลหลังการทำความสะอาด - ลดการตรวจสอบ
+        print("✅ After sanitization:")
+        nan_counts_after = df_clean.isna().sum()
+        print("📊 NaN counts after sanitization:")
+        for col, count in nan_counts_after.items():
+            if count > 0:
+                print(f"  - {col}: {count}")
 
-    # output_path = "fact_installment_payment.csv"
-    # df_clean.to_csv(output_path, index=False)
-    # print(f"💾 Saved to {output_path}")
-
-    load_installment_data(df_clean)
-    print("🎉 completed! Data upserted to fact_installment_payment.")
+        load_installment_data(df_clean)
+        print("🎉 completed! Data upserted to fact_installment_payment.")
+        
+    except Exception as e:
+        print(f"❌ Error in main execution: {e}")
+        # ✅ Rollback connections เพื่อแก้ปัญหา PendingRollbackError
+        try:
+            with source_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        try:
+            with task_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        try:
+            with target_engine.connect() as conn:
+                conn.rollback()
+        except:
+            pass
+        raise e
+    
