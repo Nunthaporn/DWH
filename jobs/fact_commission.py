@@ -266,19 +266,19 @@ def load_commission_data(df: pd.DataFrame):
 def fact_commission_etl():
     load_commission_data(clean_commission_data(extract_commission_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_commission_data()
+# if __name__ == "__main__":
+#     df_raw = extract_commission_data()
 
-    df_clean = clean_commission_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_commission_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_commission.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_commission.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    output_path = "fact_commission.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     output_path = "fact_commission.xlsx"
+#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     print(f"💾 Saved to {output_path}")
 
     # load_commission_data(df_clean)
     # print("🎉 completed! Data upserted to fact_commission.")
