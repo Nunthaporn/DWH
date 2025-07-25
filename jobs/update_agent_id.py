@@ -8,46 +8,61 @@ from sqlalchemy import create_engine, MetaData, Table, update
 # ✅ Load .env
 load_dotenv()
 
-# ✅ DB connections
+# ✅ DB Connections
+# Source: MariaDB
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
 )
+
+# Target: PostgreSQL
 target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
 @op
-def extract_agent_quotation_mapping():
-    df_plan = pd.read_sql("SELECT quo_num, id_cus FROM fin_system_select_plan", source_engine)
-    df_plan = df_plan.rename(columns={'quo_num': 'quotation_num'})
-
-    df_fact = pd.read_sql("SELECT * FROM fact_sales_quotation", target_engine)
-    df_fact = df_fact.drop(columns=['create_at', 'update_at', 'agent_id'], errors='ignore')
-
-    df_dim = pd.read_sql("SELECT * FROM dim_agent", target_engine)
-    df_dim = df_dim.drop(columns=['create_at', 'update_at'], errors='ignore')
-    df_dim = df_dim.rename(columns={'agent_id': 'id_cus'})
-
-    df_merged = pd.merge(df_fact, df_plan, on='quotation_num', how='right')
-    df_final = pd.merge(df_merged, df_dim, on='id_cus', how='inner')
-    df_final = df_final.rename(columns={'id_contact': 'agent_id'})
-    df_final = df_final[['quotation_num', 'agent_id']]
-    df_final = df_final.dropna(subset=['quotation_num', 'agent_id'])
-    return df_final
+def extract_quotation_idcus():
+    df = pd.read_sql("SELECT quo_num, id_cus FROM fin_system_select_plan", source_engine)
+    df = df.rename(columns={'quo_num': 'quotation_num'})
+    return df
 
 @op
-def update_agent_ids(df_selected: pd.DataFrame):
+def extract_fact_sales_quotation():
+    df = pd.read_sql("SELECT * FROM fact_sales_quotation", target_engine)
+    df = df.drop(columns=['create_at', 'update_at', 'agent_id'], errors='ignore')
+    return df
+
+@op
+def extract_dim_agent():
+    df = pd.read_sql("SELECT * FROM dim_agent", target_engine)
+    df = df.drop(columns=['create_at', 'update_at'], errors='ignore')
+    df = df.rename(columns={'agent_id': 'id_cus'})
+    return df
+
+@op
+def join_and_clean_agent_data(df_plan: pd.DataFrame, df_sales: pd.DataFrame, df_agent: pd.DataFrame):
+    df_merge = pd.merge(df_plan, df_sales, on='quotation_num', how='right')
+    df_merge = pd.merge(df_merge, df_agent, on='id_cus', how='inner')
+    df_merge = df_merge.rename(columns={'id_contact': 'agent_id'})
+    df_merge = df_merge[['quotation_num', 'agent_id']]
+    df_merge = df_merge.where(pd.notnull(df_merge), None)  # Convert NaN, NaT -> None
+    return df_merge
+
+@op
+def update_agent_id(df_selected: pd.DataFrame):
     metadata = MetaData()
     table = Table('fact_sales_quotation', metadata, autoload_with=target_engine)
     records = df_selected.to_dict(orient='records')
     chunk_size = 5000
 
     for start in range(0, len(records), chunk_size):
-        chunk = records[start:start + chunk_size]
-        print(f"🔄 Updating chunk {start // chunk_size + 1}: records {start} to {start + len(chunk) - 1}")
+        end = start + chunk_size
+        chunk = records[start:end]
+        print(f"🔄 Updating chunk {start // chunk_size + 1}: records {start} to {end - 1}")
+
         with target_engine.begin() as conn:
             for record in chunk:
-                if pd.isna(record['quotation_num']) or pd.isna(record['agent_id']):
+                if not record.get('quotation_num') or not record.get('agent_id'):
+                    print(f"⚠️ Skip row: missing data: {record}")
                     continue
                 stmt = (
                     update(table)
@@ -55,8 +70,15 @@ def update_agent_ids(df_selected: pd.DataFrame):
                     .values(agent_id=record['agent_id'])
                 )
                 conn.execute(stmt)
+
     print("✅ Update agent_id completed successfully.")
 
 @job
-def update_agent_id_etl():
-    update_agent_ids(extract_agent_quotation_mapping())
+def update_fact_sales_quotation_agent_id():
+    update_agent_id(
+        join_and_clean_agent_data(
+            extract_quotation_idcus(),
+            extract_fact_sales_quotation(),
+            extract_dim_agent()
+        )
+    )
