@@ -144,6 +144,14 @@ def load_customer_data(df: pd.DataFrame):
     table_name = 'dim_customer'
     pk_columns = ['customer_card', 'customer_name']  # Composite key
 
+    # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
+    with target_engine.connect() as conn:
+        inspector = inspect(conn)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        if 'quotation_num' not in columns:
+            print("➕ Adding missing column 'quotation_num' to dim_car")
+            conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
+
     # ✅ Drop duplicates ตาม composite key
     df = df.drop_duplicates(subset=pk_columns).copy()
 

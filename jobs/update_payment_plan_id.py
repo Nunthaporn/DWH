@@ -5,6 +5,8 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, update
 import re
+from sqlalchemy import create_engine, MetaData, Table, update
+from sqlalchemy import text
 
 # ✅ Load .env
 load_dotenv()
@@ -69,6 +71,9 @@ def update_dim_payment_plan_in_sales(df_merged: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Update payment_plan_id completed successfully.")
+
+    with target_engine.begin() as conn:
+        conn.execute(text("ALTER TABLE dim_payment_plan DROP COLUMN quotation_num;"))
 
 @job
 def update_fact_sales_quotation_payment_plan_id():

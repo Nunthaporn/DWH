@@ -228,6 +228,14 @@ def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
+    # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
+    with target_engine.connect() as conn:
+        inspector = inspect(conn)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        if 'quotation_num' not in columns:
+            print("➕ Adding missing column 'quotation_num' to dim_car")
+            conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
+
     # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
