@@ -28,7 +28,7 @@ def extract_dim_car_data():
     return df
 
 @op
-def extract_fact_sales_quotation():
+def extract_fact_sales_quotation_for_car():
     query = "SELECT * FROM fact_sales_quotation"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['car_id', 'create_at', 'update_at'], errors='ignore')
@@ -75,6 +75,6 @@ def update_fact_sales_quotation_car_id():
     update_car_id_in_sales(
         merge_car_to_sales(
             extract_dim_car_data(),
-            extract_fact_sales_quotation()
+            extract_fact_sales_quotation_for_car()
         )
     )

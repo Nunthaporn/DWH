@@ -28,7 +28,7 @@ def extract_dim_payment_plan_data():
     return df
 
 @op
-def extract_fact_sales_quotation():
+def extract_fact_sales_quotation_for_payment_plan():
     query = "SELECT * FROM fact_sales_quotation"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['payment_plan_id', 'create_at', 'update_at'], errors='ignore')
@@ -75,6 +75,6 @@ def update_fact_sales_quotation_payment_plan_id():
     update_dim_payment_plan_in_sales(
         merge_dim_payment_plan_to_sales(
             extract_dim_payment_plan_data(),
-            extract_fact_sales_quotation()
+            extract_fact_sales_quotation_for_payment_plan()
         )
     )

@@ -28,15 +28,15 @@ def extract_dim_customer_data():
     return df
 
 @op
-def extract_fact_sales_quotation():
+def extract_fact_sales_quotation_for_customer():
     query = "SELECT * FROM fact_sales_quotation"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['customer_id', 'create_at', 'update_at'], errors='ignore')
     return df
 
 @op
-def merge_dim_customer_to_sales(df_car: pd.DataFrame, df_sales: pd.DataFrame):
-    df_merged = pd.merge(df_car, df_sales, on='quotation_num', how='right')
+def merge_dim_customer_to_sales(df_customer: pd.DataFrame, df_sales: pd.DataFrame):
+    df_merged = pd.merge(df_customer, df_sales, on='quotation_num', how='right')
     return df_merged
 
 @op
@@ -75,6 +75,6 @@ def update_fact_sales_quotation_customer_id():
     update_dim_customer_in_sales(
         merge_dim_customer_to_sales(
             extract_dim_customer_data(),
-            extract_fact_sales_quotation()
+            extract_fact_sales_quotation_for_customer()
         )
     )
