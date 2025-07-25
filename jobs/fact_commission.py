@@ -199,11 +199,16 @@ def clean_commission_data(data_tuple):
 
 @op
 def load_commission_data(df: pd.DataFrame):
+    import numpy as np
+    from sqlalchemy.exc import OperationalError
+    import time
+
     table_name = 'fact_commission'
     pk_column = 'quotation_num'
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2  # seconds
 
-    # 🧹 Clean: inf, -inf เป็น 0, string NaN/None/null/'' เป็น None, np.nan เป็น None
-    import numpy as np
+    # 🧹 Clean NaN and inf
     nan_strs = ['nan', 'NaN', 'None', 'null', '']
     df = df.replace([np.inf, -np.inf], 0)
     df = df.replace(nan_strs, None)
@@ -212,33 +217,17 @@ def load_commission_data(df: pd.DataFrame):
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+        df_existing = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", conn)
 
+    df_existing = df_existing.drop_duplicates(subset=[pk_column])
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
-
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-
-    exclude_columns = [pk_column, 'create_at', 'update_at']
-    compare_cols = [col for col in df.columns if col not in exclude_columns and f"{col}_new" in merged.columns]
-
-    def is_different(row):
-        for col in compare_cols:
-            if not pd.isna(row[f"{col}_new"]) or not pd.isna(row[f"{col}_old"]):
-                if row[f"{col}_new"] != row[f"{col}_old"]:
-                    return True
-        return False
-
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
-    df_diff_renamed = df_diff[[pk_column] + [f"{col}_new" for col in compare_cols]].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols
+    df_to_update = df[df[pk_column].isin(common_ids)].copy()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    print(f"🔄 Update: {len(df_to_update)} rows")
 
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
@@ -246,19 +235,30 @@ def load_commission_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
-    if not df_diff_renamed.empty:
-        with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
-                stmt = pg_insert(metadata).values(**record)
-                update_dict = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns if c.name != pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_dict
-                )
-                conn.execute(stmt)
+    if not df_to_update.empty:
+        records = df_to_update.to_dict(orient='records')
+        for attempt in range(MAX_RETRIES):
+            try:
+                with target_engine.begin() as conn:
+                    stmt = pg_insert(metadata).values(records)
+
+                    update_dict = {
+                        c.name: stmt.excluded[c.name]
+                        for c in metadata.columns if c.name != pk_column
+                    }
+
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[pk_column],
+                        set_=update_dict
+                    )
+                    conn.execute(stmt)
+                break  # ✅ success
+            except OperationalError as e:
+                if "deadlock detected" in str(e):
+                    print(f"⚠️ Deadlock detected. Retrying in {RETRY_DELAY}s ({attempt + 1}/{MAX_RETRIES})...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    raise
 
     print("✅ Insert/update completed.")
 
