@@ -17,6 +17,7 @@ from jobs.update_car_id import update_fact_sales_quotation_car_id
 from jobs.update_customer_id import update_fact_sales_quotation_customer_id
 from jobs.update_payment_plan_id import update_fact_sales_quotation_payment_plan_id
 from jobs.update_order_type_id import update_fact_sales_quotation_order_type_id
+from jobs.update_sales_id import update_fact_sales_quotation_sales_id
 
 dim_company_schedule = ScheduleDefinition(
     job=dim_company_etl,
@@ -88,5 +89,9 @@ update_payment_plan_id_schedule = ScheduleDefinition(
 )
 update_order_type_id_schedule = ScheduleDefinition(
     job=update_fact_sales_quotation_order_type_id,
+    cron_schedule="0 * * * *", 
+)
+update_sales_id_schedule = ScheduleDefinition(
+    job=update_fact_sales_quotation_sales_id,
     cron_schedule="0 * * * *", 
 )
