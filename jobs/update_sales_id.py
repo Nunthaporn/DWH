@@ -20,7 +20,7 @@ target_engine = create_engine(
 )
 
 @op
-def extract_quotation_idcus():
+def extract_quotation_idcus_system():
     df = pd.read_sql("SELECT quo_num, id_cus FROM fin_system_select_plan", source_engine)
     df = df.rename(columns={'quo_num': 'quotation_num'})
     return df
@@ -77,7 +77,7 @@ def update_sales_id(df_selected: pd.DataFrame):
 def update_fact_sales_quotation_sales_id():
     update_sales_id(
         join_and_clean_sales_data(
-            extract_quotation_idcus(),
+            extract_quotation_idcus_system(),
             extract_fact_sales_quotation_for_sales(),
             extract_dim_sales()
         )
