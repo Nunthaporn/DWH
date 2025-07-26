@@ -71,9 +71,9 @@ def update_dim_customer_in_sales(df_merged: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Update customer_id completed successfully.")
-
-    with target_engine.begin() as conn:
-        conn.execute(text("ALTER TABLE dim_payment_plan DROP COLUMN quotation_num;"))
+# 
+    # with target_engine.begin() as conn:
+    #     conn.execute(text("ALTER TABLE dim_payment_plan DROP COLUMN quotation_num;"))
 
 @job
 def update_fact_sales_quotation_customer_id():

@@ -72,8 +72,15 @@ def update_car_id_in_sales(df_merged: pd.DataFrame):
 
     print("✅ Update car_id completed successfully.")
 
-    with target_engine.begin() as conn:
-        conn.execute(text("ALTER TABLE dim_payment_plan DROP COLUMN quotation_num;"))
+    with conn.begin():
+        result = conn.execute(text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'dim_car'
+            AND column_name = 'quotation_num'
+        """))
+        if result.fetchone():
+            conn.execute(text("ALTER TABLE dim_car DROP COLUMN quotation_num"))
 
 @job
 def update_fact_sales_quotation_car_id():
