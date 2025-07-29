@@ -234,13 +234,6 @@ def clean_motor_data(data_tuple):
         df['vehicle_theft_fire'] = df['vehicle_theft_fire'].replace(190000050, 1900000)
         print(f"🔧 Fixed vehicle_theft_fire: changed 190,000,050 to 1,900,000")
     
-    # ✅ แปลงคอลัมน์ตัวเลขเป็น int
-    for col in numeric_columns:
-        if col in df.columns:
-            # แปลงเป็น int โดยจัดการกับ NaN values
-            df[col] = df[col].astype('Int64')  # ใช้ Int64 เพื่อรองรับ NaN values
-            print(f"🔢 Converted {col} to int type")
-
     df = df.where(pd.notnull(df), None)
 
     print("\n📊 Cleaning completed")
@@ -290,19 +283,19 @@ def load_motor_data(df: pd.DataFrame):
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_motor_data()
+if __name__ == "__main__":
+    df_raw = extract_motor_data()
 
-#     df_clean = clean_motor_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_motor_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "fact_insurance_motor.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_insurance_motor.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     output_path = "fact_insurance_motor.xlsx"
-#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     print(f"💾 Saved to {output_path}")
+    output_path = "fact_insurance_motor.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
 
     # load_motor_data(df_clean)
     # print("🎉 completed! Data upserted to fact_insurance_motor.")
