@@ -150,12 +150,14 @@ def load_payment_data(df: pd.DataFrame):
     pk_column = 'quotation_num'
 
     with target_engine.connect() as conn:
-        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR"))
-        conn.commit()
+        inspector = inspect(conn)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        if pk_column not in columns:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {pk_column} VARCHAR"))
+            conn.commit()
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
@@ -168,19 +170,19 @@ def load_payment_data(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge ด้วย suffix (_new, _old)
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
     exclude_columns = [pk_column, 'payment_plan_id', 'create_at', 'update_at']
+
+    # ✅ คำนวณ column ที่เหมือนกันทั้ง df และ df_existing เท่านั้น
+    all_columns = set(df_common_new.columns) & set(df_common_old.columns)
     compare_cols = [
-        col for col in df.columns
+        col for col in all_columns
         if col not in exclude_columns
         and f"{col}_new" in merged.columns
         and f"{col}_old" in merged.columns
     ]
 
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
     def is_different(row):
         for col in compare_cols:
             val_new = row.get(f"{col}_new")
@@ -191,33 +193,30 @@ def load_payment_data(df: pd.DataFrame):
                 return True
         return False
 
-    # ✅ ตรวจหาความแตกต่างจริง
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
     update_cols = [f"{col}_new" for col in compare_cols]
     all_cols = [pk_column] + update_cols
 
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols 
+    # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
+    df_diff_renamed = df_diff.loc[:, [c for c in all_cols if c in df_diff.columns]].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols if compare_cols else [pk_column]
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
-    # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง car_id ที่เป็น NaN)
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
+            print(f"⚠️ Skipped {dropped} insert rows with null {pk_column}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
-    # ✅ Update
-    if not df_diff_renamed.empty:
+    if not df_diff_renamed.empty and compare_cols:
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
@@ -233,6 +232,7 @@ def load_payment_data(df: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
+
 
 @job
 def dim_payment_plan_etl():

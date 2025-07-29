@@ -99,7 +99,7 @@ def clean_order_type_data(df: pd.DataFrame):
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = ['quotation_num']
+    pk_column = 'quotation_num'
 
     with target_engine.connect() as conn:
         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR"))
