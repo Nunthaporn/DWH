@@ -10,7 +10,7 @@ from jobs.fact_check_price import fact_check_price_etl
 from jobs.fact_installment_payments import fact_installment_payments_etl
 from jobs.fact_sales_quotation import fact_sales_quotation_etl
 from jobs.fact_commission import fact_commission_etl
-from jobs.fact_card_ins import fact_card_ins_etl
+from jobs.dim_card_agent import dim_card_agent_etl
 from jobs.fact_insurance_motor import fact_insurance_motor_etl
 from jobs.update_agent_id import update_fact_sales_quotation_agent_id
 from jobs.update_car_id import update_fact_sales_quotation_car_id
@@ -63,8 +63,8 @@ fact_commission_schedule = ScheduleDefinition(
     job=fact_commission_etl,
     cron_schedule="0 * * * *", 
 )
-fact_card_ins_schedule = ScheduleDefinition(
-    job=fact_card_ins_etl,
+dim_card_agent_schedule = ScheduleDefinition(
+    job=dim_card_agent_etl,
     cron_schedule="0 * * * *", 
 )
 fact_insurance_motor_schedule = ScheduleDefinition(

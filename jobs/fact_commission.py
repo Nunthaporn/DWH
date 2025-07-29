@@ -17,9 +17,11 @@ task_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
 )
 
-# ✅ Target (PostgreSQL)
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={"keepalives": 1, "keepalives_idle": 30}
 )
 
 @op
@@ -207,6 +209,7 @@ def load_commission_data(df: pd.DataFrame):
     pk_column = 'quotation_num'
     MAX_RETRIES = 3
     RETRY_DELAY = 2  # seconds
+    BATCH_SIZE = 1000  # 👈 batch size สำหรับ update
 
     # 🧹 Clean NaN and inf
     nan_strs = ['nan', 'NaN', 'None', 'null', '']
@@ -231,31 +234,34 @@ def load_commission_data(df: pd.DataFrame):
 
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
+    # ✅ Insert
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), df_to_insert.to_dict(orient='records'))
 
+    # ✅ Update in batch
     if not df_to_update.empty:
         records = df_to_update.to_dict(orient='records')
+
         for attempt in range(MAX_RETRIES):
             try:
                 with target_engine.begin() as conn:
-                    stmt = pg_insert(metadata).values(records)
-
-                    update_dict = {
-                        c.name: stmt.excluded[c.name]
-                        for c in metadata.columns if c.name != pk_column
-                    }
-
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=[pk_column],
-                        set_=update_dict
-                    )
-                    conn.execute(stmt)
+                    for i in range(0, len(records), BATCH_SIZE):
+                        batch = records[i:i + BATCH_SIZE]
+                        stmt = pg_insert(metadata).values(batch)
+                        update_dict = {
+                            c.name: stmt.excluded[c.name]
+                            for c in metadata.columns if c.name != pk_column
+                        }
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=[pk_column],
+                            set_=update_dict
+                        )
+                        conn.execute(stmt)
                 break  # ✅ success
             except OperationalError as e:
-                if "deadlock detected" in str(e):
-                    print(f"⚠️ Deadlock detected. Retrying in {RETRY_DELAY}s ({attempt + 1}/{MAX_RETRIES})...")
+                if "deadlock detected" in str(e) or "server closed the connection" in str(e):
+                    print(f"⚠️ PostgreSQL error. Retrying in {RETRY_DELAY}s ({attempt + 1}/{MAX_RETRIES})...")
                     time.sleep(RETRY_DELAY)
                 else:
                     raise
