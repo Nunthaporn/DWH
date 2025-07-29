@@ -101,13 +101,9 @@ def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
     pk_column = ['quotation_num']
 
-    # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
     with target_engine.connect() as conn:
-        inspector = inspect(conn)
-        columns = [col['name'] for col in inspector.get_columns(table_name)]
-        if 'quotation_num' not in columns:
-            print("➕ Adding missing column 'quotation_num' to dim_car")
-            conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR"))
+        conn.commit()
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
