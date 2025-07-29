@@ -121,6 +121,8 @@ def clean_motor_data(data_tuple):
     df['date_expired'] = pd.to_datetime(df['date_expired'], errors='coerce')
     df['date_expired'] = df['date_expired'].dt.strftime('%Y%m%d').astype('Int64')
     
+    df['ems_amount'] = df['ems_amount'].fillna(0).astype(int)
+    
     # ทำความสะอาดข้อมูลจังหวัด - เก็บแค่จังหวัดเท่านั้น
     def clean_province(province):
         if pd.isna(province) or str(province).strip() == '':
