@@ -30,6 +30,7 @@ def extract_card_agent_data() -> pd.DataFrame:
             ic_ins.card_no AS id_card_ins,
             ic_ins.type AS type_ins,
             ic_ins.revoke_type_code AS revoke_type_ins,
+            ic_ins.company AS company_ins,
             CASE 
                 WHEN ic_ins.create_date IS NULL OR ic_ins.create_date = '0000-00-00' THEN NULL
                 ELSE ic_ins.create_date
@@ -42,6 +43,7 @@ def extract_card_agent_data() -> pd.DataFrame:
             ic_life.card_no AS id_card_life,
             ic_life.type AS type_life,
             ic_life.revoke_type_code AS revoke_type_life,
+            ic_life.company AS company_life,
             CASE 
                 WHEN ic_life.create_date IS NULL OR ic_life.create_date = '0000-00-00' THEN NULL
                 ELSE ic_life.create_date
