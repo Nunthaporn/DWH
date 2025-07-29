@@ -233,6 +233,13 @@ def clean_motor_data(data_tuple):
     if 'vehicle_theft_fire' in df.columns:
         df['vehicle_theft_fire'] = df['vehicle_theft_fire'].replace(190000050, 1900000)
         print(f"🔧 Fixed vehicle_theft_fire: changed 190,000,050 to 1,900,000")
+    
+    # ✅ แปลงคอลัมน์ตัวเลขเป็น int
+    for col in numeric_columns:
+        if col in df.columns:
+            # แปลงเป็น int โดยจัดการกับ NaN values
+            df[col] = df[col].astype('Int64')  # ใช้ Int64 เพื่อรองรับ NaN values
+            print(f"🔢 Converted {col} to int type")
 
     df = df.where(pd.notnull(df), None)
 
