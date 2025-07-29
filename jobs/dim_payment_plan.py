@@ -38,6 +38,11 @@ def extract_payment_data():
     df_order = pd.read_sql(query2, source_engine)
 
     df = pd.merge(df_pay, df_order, on='quo_num', how='left')
+
+    print("📦 df_pay:", df_pay.shape)
+    print("📦 df_order:", df_order.shape)
+    print("📦 df:", df.shape)
+
     return df
 
 @op
@@ -141,6 +146,8 @@ def clean_payment_data(df: pd.DataFrame):
     df_del = pd.read_sql(query_del, source_engine)
     df = df[~df['quotation_num'].isin(df_del['quo_num'])]
     df = df[df['quotation_num'] != 'FQ2505-24999']
+
+    print("\n📊 Cleaning completed")
 
     return df.replace(['', np.nan], None)
 

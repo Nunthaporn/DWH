@@ -38,6 +38,10 @@ def extract_order_type_data():
 
     df_merged = pd.merge(df_plan, df_order, on='quo_num', how='left')
 
+    print("📦 df_plan:", df_plan.shape)
+    print("📦 df_order:", df_order.shape)
+    print("📦 df_merged:", df_merged.shape)
+
     return df_merged
 
 @op
@@ -91,8 +95,11 @@ def clean_order_type_data(df: pd.DataFrame):
     df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
     df.replace("NaN", np.nan, inplace=True)
     df.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
-    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    # แก้ไข applymap ที่ deprecated แล้ว
+    df = df.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
     df = df.where(pd.notnull(df), None)
+
+    print("\n📊 Cleaning completed")
 
     return df
 
@@ -130,13 +137,17 @@ def load_order_type_data(df: pd.DataFrame):
     compare_cols = [
         col for col in df.columns
         if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
     ]
+
+    # ✅ ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
+    available_cols = []
+    for col in compare_cols:
+        if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
+            available_cols.append(col)
 
     # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
     def is_different(row):
-        for col in compare_cols:
+        for col in available_cols:
             val_new = row.get(f"{col}_new")
             val_old = row.get(f"{col}_old")
             if pd.isna(val_new) and pd.isna(val_old):
@@ -148,11 +159,22 @@ def load_order_type_data(df: pd.DataFrame):
     # ✅ ตรวจหาความแตกต่างจริง
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
+    if not df_diff.empty and available_cols:
+        update_cols = [f"{col}_new" for col in available_cols]
+        all_cols = [pk_column] + update_cols
 
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+        # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
+        existing_cols = [col for col in all_cols if col in df_diff.columns]
+        
+        if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
+            df_diff_renamed = df_diff[existing_cols].copy()
+            # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+            new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
+            df_diff_renamed.columns = new_col_names
+        else:
+            df_diff_renamed = pd.DataFrame()
+    else:
+        df_diff_renamed = pd.DataFrame()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
@@ -160,12 +182,12 @@ def load_order_type_data(df: pd.DataFrame):
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง car_id ที่เป็น NaN)
+    # ✅ Insert (กรอง quotation_num ที่เป็น NaN)
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null car_id")
+            print(f"⚠️ Skipped {dropped} insert rows with null {pk_column}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
@@ -206,16 +228,16 @@ def load_order_type_data(df: pd.DataFrame):
 def dim_order_type_etl():
     load_order_type_data(clean_order_type_data(extract_order_type_data()))
 
-# if __name__ == "__main__":
-#     df_row = extract_order_type_data()
-#     print("✅ Extracted logs:", df_row.shape)
+if __name__ == "__main__":
+    df_row = extract_order_type_data()
+    # print("✅ Extracted logs:", df_row.shape)
 
-#     df_clean = clean_order_type_data((df_row))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_order_type_data((df_row))
+    # print("✅ Cleaned columns:", df_clean.columns)
 
     # output_path = "fact_check_price.xlsx"
     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
     # print(f"💾 Saved to {output_path}")
 
-#     load_order_type_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_car.")
+    load_order_type_data(df_clean)
+    print("🎉 completed! Data upserted to dim_order_type.")
