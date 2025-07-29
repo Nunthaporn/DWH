@@ -234,6 +234,11 @@ def clean_motor_data(data_tuple):
         df['vehicle_theft_fire'] = df['vehicle_theft_fire'].replace(190000050, 1900000)
         print(f"🔧 Fixed vehicle_theft_fire: changed 190,000,050 to 1,900,000")
     
+    # ✅ แก้ไขค่า sum_insured จาก 190000050 เป็น 1900000 และ 250000093 เป็น 2500000
+    if 'sum_insured' in df.columns:
+        df['sum_insured'] = df['sum_insured'].replace(190000050, 1900000)
+        df['sum_insured'] = df['sum_insured'].replace(250000093, 2500000)
+    
     df = df.where(pd.notnull(df), None)
 
     print("\n📊 Cleaning completed")
