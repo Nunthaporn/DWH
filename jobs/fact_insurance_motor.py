@@ -115,6 +115,11 @@ def clean_motor_data(data_tuple):
     # แปลง NaT เป็น None เพื่อให้ PostgreSQL เข้าใจ
     df["date_warranty"] = df["date_warranty"].replace({pd.NaT: None})
     df["date_expired"] = df["date_expired"].replace({pd.NaT: None})
+
+    df['date_warranty'] = pd.to_datetime(df['date_warranty'], errors='coerce')
+    df['date_warranty'] = df['date_warranty'].dt.strftime('%Y%m%d').astype('Int64')
+    df['date_expired'] = pd.to_datetime(df['date_expired'], errors='coerce')
+    df['date_expired'] = df['date_expired'].dt.strftime('%Y%m%d').astype('Int64')
     
     # ทำความสะอาดข้อมูลจังหวัด - เก็บแค่จังหวัดเท่านั้น
     def clean_province(province):
@@ -214,6 +219,20 @@ def clean_motor_data(data_tuple):
             df[col] = pd.to_numeric(df[col], errors="coerce")
             # ใช้ float64 แทน Int64 เพื่อหลีกเลี่ยงปัญหา casting
             df[col] = df[col].astype("float64")
+    
+    # ✅ แก้ไขค่า human_coverage_atime จาก 100,000,000 เป็น 10,000,000
+    if 'human_coverage_atime' in df.columns:
+        df['human_coverage_atime'] = df['human_coverage_atime'].replace(100000000, 10000000)
+        print(f"🔧 Fixed human_coverage_atime: changed 100,000,000 to 10,000,000")
+    
+    # ✅ แก้ไขค่า vehicle_damage และ vehicle_theft_fire จาก 190000050 เป็น 1,900,000
+    if 'vehicle_damage' in df.columns:
+        df['vehicle_damage'] = df['vehicle_damage'].replace(190000050, 1900000)
+        print(f"🔧 Fixed vehicle_damage: changed 190,000,050 to 1,900,000")
+    
+    if 'vehicle_theft_fire' in df.columns:
+        df['vehicle_theft_fire'] = df['vehicle_theft_fire'].replace(190000050, 1900000)
+        print(f"🔧 Fixed vehicle_theft_fire: changed 190,000,050 to 1,900,000")
 
     df = df.where(pd.notnull(df), None)
 
@@ -264,19 +283,19 @@ def load_motor_data(df: pd.DataFrame):
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_motor_data()
+# if __name__ == "__main__":
+#     df_raw = extract_motor_data()
 
-    df_clean = clean_motor_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_motor_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_insurance_motor.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_insurance_motor.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "fact_insurance_motor.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     output_path = "fact_insurance_motor.xlsx"
+#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     print(f"💾 Saved to {output_path}")
 
-    load_motor_data(df_clean)
-    print("🎉 completed! Data upserted to fact_insurance_motor.")
+    # load_motor_data(df_clean)
+    # print("🎉 completed! Data upserted to fact_insurance_motor.")
