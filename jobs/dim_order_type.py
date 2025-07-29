@@ -102,8 +102,11 @@ def load_order_type_data(df: pd.DataFrame):
     pk_column = 'quotation_num'
 
     with target_engine.connect() as conn:
-        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR"))
-        conn.commit()
+        inspector = inspect(conn)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        if pk_column not in columns:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {pk_column} VARCHAR"))
+            conn.commit()
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
