@@ -228,16 +228,16 @@ def load_order_type_data(df: pd.DataFrame):
 def dim_order_type_etl():
     load_order_type_data(clean_order_type_data(extract_order_type_data()))
 
-if __name__ == "__main__":
-    df_row = extract_order_type_data()
-    # print("✅ Extracted logs:", df_row.shape)
+# if __name__ == "__main__":
+#     df_row = extract_order_type_data()
+#     # print("✅ Extracted logs:", df_row.shape)
 
-    df_clean = clean_order_type_data((df_row))
-    # print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_order_type_data((df_row))
+#     # print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_check_price.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_check_price.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_order_type_data(df_clean)
-    print("🎉 completed! Data upserted to dim_order_type.")
+#     load_order_type_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_order_type.")

@@ -48,7 +48,7 @@ def extract_payment_data():
 @op
 def clean_payment_data(df: pd.DataFrame):
     # ✅ แปลง string "NaN", " nan ", "NaN " ให้เป็น np.nan
-    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    df = df.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
 
     # ✅ เติมช่องว่างเป็น '' และเปลี่ยน type → str
     for col in ['chanel', 'chanel_main', 'clickbank']:
@@ -202,12 +202,22 @@ def load_payment_data(df: pd.DataFrame):
 
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
+    if not df_diff.empty and compare_cols:
+        update_cols = [f"{col}_new" for col in compare_cols]
+        all_cols = [pk_column] + update_cols
 
-    # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
-    df_diff_renamed = df_diff.loc[:, [c for c in all_cols if c in df_diff.columns]].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols if compare_cols else [pk_column]
+        # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
+        existing_cols = [c for c in all_cols if c in df_diff.columns]
+        
+        if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
+            df_diff_renamed = df_diff.loc[:, existing_cols].copy()
+            # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+            new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
+            df_diff_renamed.columns = new_col_names
+        else:
+            df_diff_renamed = pd.DataFrame()
+    else:
+        df_diff_renamed = pd.DataFrame()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
@@ -245,20 +255,20 @@ def load_payment_data(df: pd.DataFrame):
 def dim_payment_plan_etl():
     load_payment_data(clean_payment_data(extract_payment_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_payment_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_payment_data()
+    print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_payment_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_payment_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_payment_plan.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_payment_plan.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "dim_payment_plan.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_payment_plan.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_payment_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_payment_plan.")
+    load_payment_data(df_clean)
+    print("🎉 completed! Data upserted to dim_payment_plan.")
