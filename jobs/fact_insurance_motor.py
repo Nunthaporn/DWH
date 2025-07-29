@@ -107,8 +107,14 @@ def clean_motor_data(data_tuple):
     df.columns = df.columns.str.lower()
     df["income_comp_ins"] = df["income_comp_ins"].apply(lambda x: True if x == 1 else False if x == 0 else None)
     df["insurance_class"] = df["insurance_class"].replace("ซ่อมอู่", np.nan)
+    
+    # แปลง datetime และจัดการกับ NaT values
     df["date_warranty"] = pd.to_datetime(df["date_warranty"], errors="coerce")
     df["date_expired"] = pd.to_datetime(df["date_expired"], errors="coerce")
+    
+    # แปลง NaT เป็น None เพื่อให้ PostgreSQL เข้าใจ
+    df["date_warranty"] = df["date_warranty"].replace({pd.NaT: None})
+    df["date_expired"] = df["date_expired"].replace({pd.NaT: None})
     
     # ทำความสะอาดข้อมูลจังหวัด - เก็บแค่จังหวัดเท่านั้น
     def clean_province(province):
