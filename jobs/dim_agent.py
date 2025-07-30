@@ -395,9 +395,13 @@ def load_to_wh(df: pd.DataFrame):
         for col in compare_cols:
             val_new = row.get(f"{col}_new")
             val_old = row.get(f"{col}_old")
+            
+            # ตรวจสอบค่า NA อย่างปลอดภัย
             if pd.isna(val_new) and pd.isna(val_old):
                 continue
-            if val_new != val_old:
+            elif pd.isna(val_new) or pd.isna(val_old):
+                return True
+            elif val_new != val_old:
                 return True
         return False
 
