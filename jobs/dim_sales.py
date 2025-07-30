@@ -196,7 +196,7 @@ def load_sales_data(df: pd.DataFrame):
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null agent_id")
+            print(f"⚠️ Skipped {dropped}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))

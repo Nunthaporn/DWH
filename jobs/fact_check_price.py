@@ -191,7 +191,7 @@ def load_fact_check_price(df: pd.DataFrame):
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null keys")
+            print(f"⚠️ Skipped {dropped}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))

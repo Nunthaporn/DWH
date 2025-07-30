@@ -183,7 +183,7 @@ def load_card_agent_data(df: pd.DataFrame):
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null {pk_column}")
+            print(f"⚠️ Skipped {dropped}")
         
         # ✅ แปลง NaT และ string ว่างเป็น None ก่อนส่งไปยัง PostgreSQL
         if not df_to_insert_valid.empty:

@@ -187,7 +187,7 @@ def load_order_type_data(df: pd.DataFrame):
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} insert rows with null {pk_column}")
+            print(f"⚠️ Skipped {dropped}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
@@ -209,20 +209,6 @@ def load_order_type_data(df: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
-
-# @op
-# def load_order_type_data(df: pd.DataFrame):
-#     table_name = 'dim_order_type'
-
-#     # ✅ Load table metadata
-#     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-
-#     # ✅ Insert data as-is
-#     if not df.empty:
-#         with target_engine.begin() as conn:
-#             conn.execute(metadata.insert(), df.to_dict(orient='records'))
-
-#     print(f"✅ Inserted {len(df)} rows into {table_name}.")
 
 @job
 def dim_order_type_etl():
