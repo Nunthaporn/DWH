@@ -37,28 +37,36 @@ target_engine = create_engine(
 def extract_agent_data():
     query_main = r"""
     SELECT cuscode, name, rank,
-           CASE 
-           WHEN user_registered 
-             ELSE user_registered 
-           END AS user_registered,
+           user_registered,
            status, fin_new_group, fin_new_mem,
            type_agent, typebuy, user_email, name_store, address, city, district,
            province, province_cur, area_cur, postcode, tel,date_active,card_ins_type,file_card_ins,
            card_ins_type_life,file_card_ins_life
     FROM wp_users 
     WHERE user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
-      AND name NOT LIKE '%%ทดสอบ%%'
-      AND name NOT LIKE '%%tes%%'
-      AND cuscode NOT LIKE 'bkk%%'
-      AND cuscode NOT LIKE '%%east%%'
-      AND cuscode NOT LIKE 'north%%'
-      AND cuscode NOT LIKE 'central%%'
-      AND cuscode NOT LIKE 'upc%%'
-      AND cuscode NOT LIKE 'sqc_%%'
-      AND cuscode NOT LIKE 'pm_%%'
-      AND cuscode NOT LIKE 'Sale-Tor%%'
-      AND cuscode NOT LIKE 'online%%'
-      AND cuscode NOT LIKE 'Sale-Direct%%'
+        AND name NOT LIKE '%%ทดสอบ%%'
+        AND name NOT LIKE '%%tes%%'
+        AND cuscode NOT LIKE 'bkk%%'
+        AND cuscode NOT LIKE '%%east%%'
+        AND cuscode NOT LIKE 'north%%'
+        AND cuscode NOT LIKE 'central%%'
+        AND cuscode NOT LIKE 'upc%%'
+        AND cuscode NOT LIKE 'sqc_%%'
+        AND cuscode NOT LIKE 'pm_%%'
+        AND cuscode NOT LIKE 'Sale-Tor%%'
+        AND cuscode NOT LIKE 'online%%'
+        AND cuscode NOT LIKE 'Sale-Direct%%'
+        AND name NOT LIKE '%%ทดสอบ%%'
+        AND name NOT LIKE '%%test%%'
+        AND name NOT LIKE '%%เทสระบบ%%'
+        AND name NOT LIKE '%%Tes ระบบ%%'
+        AND name NOT LIKE '%%ทด่ท%%'
+        AND name NOT LIKE '%%ทด สอบ%%'
+        AND name NOT LIKE '%%ปัญญวัฒน์ โพธิ์ศรีทอง%%'
+        AND name NOT LIKE '%%เอกศิษฎ์ เจริญธันยบูรณ์%%'
+        AND cuscode NOT LIKE '%%FIN-TestApp%%'
+        AND cuscode NOT LIKE '%%FIN-Tester1%%'
+        AND cuscode NOT LIKE '%%FIN-Tester2%%';
     """
 
 
@@ -181,6 +189,167 @@ def clean_agent_data(df: pd.DataFrame):
     df_cleaned["agent_name"] = df_cleaned["agent_name"].str.lstrip()
     df_cleaned["is_experienced"] = df_cleaned["is_experienced"].apply(lambda x: 'no' if str(x).strip().lower() == 'ไม่เคยขาย' else 'yes')
 
+    # ✅ เปลี่ยน "Others" เป็น "อื่นๆ" ในคอลัมน์ province
+    df_cleaned["province"] = df_cleaned["province"].replace("Others", "อื่นๆ")
+
+    # ✅ ทำความสะอาด agent_email - เก็บเฉพาะภาษาอังกฤษและรูปแบบ email ที่ถูกต้อง
+    def clean_email(email):
+        if pd.isna(email) or email == '':
+            return None
+        
+        email_str = str(email).strip()
+        
+        # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
+        thai_chars = re.findall(r'[ก-๙]', email_str)
+        if thai_chars:
+            return None
+        
+        # ตรวจสอบรูปแบบ email ที่ถูกต้อง
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if re.match(email_pattern, email_str):
+            return email_str.lower()  # แปลงเป็นตัวพิมพ์เล็ก
+        else:
+            return None
+    
+    df_cleaned["agent_email"] = df_cleaned["agent_email"].apply(clean_email)
+
+    # ✅ ทำความสะอาด agent_name - ลบสระพิเศษด้านหน้าแต่ไม่ลบสระในชื่อ
+    def clean_agent_name(name):
+        if pd.isna(name) or name == '':
+            return None
+        
+        name_str = str(name).strip()
+        
+        # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าชื่อ (ไม่ลบสระในชื่อจริง)
+        # ตรวจสอบว่าสระด้านหน้าเป็นสระพิเศษหรือไม่
+        if name_str.startswith(('ิ', 'ี', 'ึ', 'ื', 'ุ', 'ู', '่', '้', '๊', '๋')):
+            # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าเท่านั้น
+            cleaned_name = re.sub(r'^[ิีึืุู่้๊๋]+', '', name_str)
+        else:
+            cleaned_name = name_str
+        
+        # ลบตัวอักษรพิเศษที่ไม่ควรมีในชื่อ (ยกเว้นตัวอักษรไทยและอังกฤษ)
+        cleaned_name = re.sub(r'[^\u0E00-\u0E7F\u0020\u0041-\u005A\u0061-\u007A]', '', cleaned_name)
+        
+        # ลบช่องว่างที่ซ้ำกัน
+        cleaned_name = re.sub(r'\s+', ' ', cleaned_name)
+        
+        # ลบช่องว่างที่ต้นและท้าย
+        cleaned_name = cleaned_name.strip()
+        
+        # ตรวจสอบว่าชื่อมีความยาวที่เหมาะสม (อย่างน้อย 2 ตัวอักษร)
+        if len(cleaned_name) < 2:
+            return None
+        
+        return cleaned_name
+
+    df_cleaned["agent_name"] = df_cleaned["agent_name"].apply(clean_agent_name)
+
+    # ✅ ทำความสะอาด store_name - เก็บเฉพาะชื่อร้าน
+    def clean_store_name(store_name):
+        if pd.isna(store_name) or store_name == '':
+            return None
+        
+        store_str = str(store_name).strip()
+        
+        # ถ้ามีคำว่า "ร้าน" หรือ "shop" หรือ "store" ให้เก็บไว้
+        if any(keyword in store_str.lower() for keyword in ['ร้าน', 'shop', 'store', 'บริษัท', 'company']):
+            return store_str
+        else:
+            return None
+    
+    df_cleaned["store_name"] = df_cleaned["store_name"].apply(clean_store_name)
+
+    # ✅ ตรวจสอบและเปลี่ยนค่าที่ไม่ใช่ภาษาไทยเป็น None ในคอลัมน์ที่ระบุ
+    def check_thai_text(text):
+        if pd.isna(text) or text == '':
+            return None
+        
+        text_str = str(text).strip()
+        
+        # ลบ space และ ] หรือ * ที่อยู่ด้านหน้าข้อความ
+        cleaned_text = re.sub(r'^[\s\]\*]+', '', text_str)
+        
+        # กรองข้อมูลที่ไม่ต้องการ
+        unwanted_patterns = [
+            r'^\d+$',    # เป็นตัวเลขล้วนๆ
+            r'^[A-Za-z\s]+$',  # เป็นภาษาอังกฤษล้วนๆ
+        ]
+        
+        for pattern in unwanted_patterns:
+            if re.match(pattern, cleaned_text):
+                return None
+        
+        # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
+        thai_chars = re.findall(r'[ก-๙]', cleaned_text)
+        if thai_chars:
+            return cleaned_text
+        else:
+            return None
+    
+    # ใช้ฟังก์ชันกับคอลัมน์ที่ระบุ
+    location_columns = ['subdistrict', 'district', 'province', 'current_province', 'current_area']
+    for col in location_columns:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].apply(check_thai_text)
+
+    # ✅ ทำความสะอาด zipcode - เก็บเฉพาะตัวเลข 5 หลัก
+    def clean_zipcode(zipcode):
+        if pd.isna(zipcode) or zipcode == '':
+            return None
+        
+        zipcode_str = str(zipcode).strip()
+        
+        # ตรวจสอบว่าเป็นตัวเลข 5 หลักหรือไม่
+        if re.match(r'^\d{5}$', zipcode_str):
+            return zipcode_str
+        else:
+            return None
+    
+    df_cleaned["zipcode"] = df_cleaned["zipcode"].apply(clean_zipcode)
+
+    # ✅ กรองแถวที่มี card_ins_type เป็น "ญาตเป็นนายหน้า"
+    df_cleaned = df_cleaned[df_cleaned["card_ins_type"] != "ญาตเป็นนายหน้า"]
+
+    # ✅ ทำความสะอาด agent_address - ลบสระด้านหน้า, -, :, . และตัวอักษรพิเศษ
+    def clean_address(address):
+        if pd.isna(address) or address == '':
+            return None
+        
+        address_str = str(address).strip()
+        
+        # ลบสระพิเศษที่อยู่ด้านหน้าข้อความ (สระที่ไม่ได้เป็นส่วนของที่อยู่จริง)
+        # ลบเครื่องหมาย -, :, . และตัวอักษรพิเศษ
+        # ใช้ regex ที่ครอบคลุมสระทั้งหมดที่อยู่ด้านหน้า
+        cleaned_address = re.sub(r'^[\u0E30-\u0E3A\u0E47-\u0E4E]+', '', address_str)  # ลบสระด้านหน้า
+        cleaned_address = re.sub(r'[-:.,]', '', cleaned_address)  # ลบเครื่องหมายพิเศษ
+        
+        # ลบช่องว่างที่ซ้ำกัน
+        cleaned_address = re.sub(r'\s+', ' ', cleaned_address)
+        
+        # ลบช่องว่างที่ต้นและท้าย
+        cleaned_address = cleaned_address.strip()
+        
+        return cleaned_address
+    
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].apply(clean_address)
+
+    # ✅ ลบ space ที่อยู่ด้านหน้าข้อความในทุกคอลัมน์
+    def clean_leading_spaces(text):
+        if pd.isna(text) or text == '':
+            return None
+        
+        text_str = str(text).strip()
+        # ลบ space ที่อยู่ด้านหน้าข้อความ
+        cleaned_text = re.sub(r'^\s+', '', text_str)
+        
+        return cleaned_text if cleaned_text != '' else None
+    
+    # ใช้ฟังก์ชันกับทุกคอลัมน์
+    for col in df_cleaned.columns:
+        if df_cleaned[col].dtype == 'object':  # เฉพาะคอลัมน์ที่เป็นข้อความ
+            df_cleaned[col] = df_cleaned[col].apply(clean_leading_spaces)
+
     print("\n📊 Cleaning completed")
 
     return df_cleaned
@@ -287,10 +456,8 @@ if __name__ == "__main__":
     df_clean = clean_agent_data((df_raw))
     print("✅ Cleaned columns:", df_clean.columns)
 
-    # print(df_clean.head(10))
-
-    output_path = "dim_agent.csv"
-    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    output_path = "dim_agent.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
     print(f"💾 Saved to {output_path}")
 
     # load_to_wh(df_clean)
