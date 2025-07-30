@@ -72,7 +72,8 @@ def update_dim_payment_plan_in_sales(df_merged: pd.DataFrame):
 
     print("✅ Update payment_plan_id completed successfully.")
 
-    with conn.begin():
+    # ✅ เปิด connection ใหม่สำหรับ ALTER TABLE
+    with target_engine.begin() as conn:
         result = conn.execute(text("""
             SELECT column_name
             FROM information_schema.columns

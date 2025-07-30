@@ -72,7 +72,8 @@ def update_dim_order_type_in_sales(df_merged: pd.DataFrame):
 
     print("✅ Update order_type_id completed successfully.")
 
-    with conn.begin():
+    # 🔄 ใช้ connection ใหม่ตรงนี้
+    with target_engine.begin() as conn:
         result = conn.execute(text("""
             SELECT column_name
             FROM information_schema.columns
