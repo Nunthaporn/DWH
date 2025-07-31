@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime, timedelta
 
 # ✅ โหลด .env
 load_dotenv()
@@ -43,7 +44,15 @@ target_engine = create_engine(
 
 @op
 def extract_agent_data():
-    query_main = r"""
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)  
+    end_time = now.replace(minute=59, second=59, microsecond=999999) 
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
+    query_main = f"""
     SELECT cuscode, name, rank,
            user_registered,
            status, fin_new_group, fin_new_mem,
@@ -51,7 +60,8 @@ def extract_agent_data():
            province, province_cur, area_cur, postcode, tel,date_active,card_ins_type,file_card_ins,
            card_ins_type_life,file_card_ins_life
     FROM wp_users 
-    WHERE user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
+    WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+        AND user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
         AND name NOT LIKE '%%ทดสอบ%%'
         AND name NOT LIKE '%%tes%%'
         AND cuscode NOT LIKE 'bkk%%'
@@ -369,8 +379,15 @@ def load_to_wh(df: pd.DataFrame):
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df_existing = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
 
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
