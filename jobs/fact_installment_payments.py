@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime, timedelta
 
 # ✅ Load env
 load_dotenv()
@@ -25,12 +26,20 @@ target_engine = create_engine(
 
 @op
 def extract_installment_data():
-    # ✅ ใช้ context manager เพื่อจัดการ connection อย่างปลอดภัย
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)  
+    end_time = now.replace(minute=59, second=59, microsecond=999999) 
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
     try:
-        df_plan = pd.read_sql("""
+        df_plan = pd.read_sql(f"""
             SELECT quo_num
             FROM fin_system_select_plan
-            WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            AND type_insure IN ('ประกันรถ', 'ตรอ')
         """, source_engine)
 
         df_installment = pd.read_sql("""
@@ -809,9 +818,16 @@ def load_installment_data(df: pd.DataFrame):
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     print(f"🔍 After removing duplicates: {len(df)} rows")
 
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
+
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df_existing = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
     print(f"📊 Existing data: {len(df_existing)} rows")
 
     # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
