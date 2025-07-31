@@ -325,3 +325,17 @@ def load_car_data(df: pd.DataFrame):
 @job
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
+
+if __name__ == "__main__":
+    df_raw = extract_car_data()
+    print("✅ Extracted logs:", df_raw.shape)
+
+    df_clean = clean_car_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
+
+    output_path = "dim_car.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
+
+    # load_car_data(df_clean)
+    # print("🎉 Test completed! Data upserted to dim_car.")
