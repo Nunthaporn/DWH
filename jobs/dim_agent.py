@@ -440,7 +440,7 @@ def load_to_wh(df: pd.DataFrame):
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} rows without {pk_column}")
+            print(f"⚠️ Skipped {dropped} rows")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 for batch_df in chunk_dataframe(df_to_insert_valid):
