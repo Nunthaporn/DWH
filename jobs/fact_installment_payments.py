@@ -947,6 +947,8 @@ def load_installment_data(df: pd.DataFrame):
                         for c in metadata.columns
                         if c.name not in pk_column
                     }
+                    update_columns["update_at"] = datetime.now()  # ✅ เพิ่มให้ update timestamp ทุกครั้ง
+
                     stmt = stmt.on_conflict_do_update(
                         index_elements=pk_column,
                         set_=update_columns
