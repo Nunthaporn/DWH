@@ -30,7 +30,15 @@ target_port = os.getenv('DB_PORT_test')
 target_db = 'fininsurance'
 
 target_engine = create_engine(
-    f"postgresql+psycopg2://{target_user}:{target_password}@{target_host}:{target_port}/{target_db}"
+    f"postgresql+psycopg2://{target_user}:{target_password}@{target_host}:{target_port}/{target_db}",
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+        "options": "-c statement_timeout=300000"  # 5 นาที
+    },
+    pool_pre_ping=True
 )
 
 @op
@@ -406,6 +414,10 @@ def load_to_wh(df: pd.DataFrame):
 
     metadata_table = Table(table_name, MetaData(), autoload_with=target_engine)
 
+    def chunk_dataframe(df, chunk_size=500):
+        for i in range(0, len(df), chunk_size):
+            yield df.iloc[i:i + chunk_size]
+
     # ✅ Insert batch
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
@@ -414,26 +426,25 @@ def load_to_wh(df: pd.DataFrame):
             print(f"⚠️ Skipped {dropped} rows without {pk_column}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
-                conn.execute(metadata_table.insert(), df_to_insert_valid.to_dict(orient='records'))
+                for batch_df in chunk_dataframe(df_to_insert_valid):
+                    conn.execute(metadata_table.insert(), batch_df.to_dict(orient='records'))
 
     # ✅ Update batch
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
-            stmt = pg_insert(metadata_table).values(df_diff_renamed.to_dict(orient="records"))
-
-            valid_column_names = [c.name for c in metadata_table.columns]
-            update_columns = {
-                c: stmt.excluded[c]
-                for c in valid_column_names
-                if c != pk_column and c in df_diff_renamed.columns
-            }
-
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[pk_column],
-                set_=update_columns
-            )
-
-            conn.execute(stmt)
+            for batch_df in chunk_dataframe(df_diff_renamed):
+                stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
+                valid_column_names = [c.name for c in metadata_table.columns]
+                update_columns = {
+                    c: stmt.excluded[c]
+                    for c in valid_column_names
+                    if c != pk_column and c in batch_df.columns
+                }
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[pk_column],
+                    set_=update_columns
+                )
+                conn.execute(stmt)
 
     print("✅ Insert/update completed.")
 

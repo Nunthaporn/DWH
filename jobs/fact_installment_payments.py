@@ -334,10 +334,15 @@ def clean_installment_data(inputs):
     print(f"🔍 Before setting installment 1 - installment_amount non-null: {df['installment_amount'].notna().sum()}")
     print(f"🔍 Before setting installment 1 - payment_amount non-null: {df['payment_amount'].notna().sum()}")
     
-    df.loc[
-        (df['installment_number'] == 1) & (df['payment_amount'].isna()),
-        'payment_amount'
-    ] = df['installment_amount']
+    # ✅ แปลง installment_number เป็น numeric ก่อนเปรียบเทียบ
+    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
+    
+    # ✅ ตรวจสอบข้อมูลก่อนการตั้งค่า
+    installment_1_mask = (df['installment_number'] == 1) & (df['payment_amount'].isna())
+    print(f"🔍 Rows where installment_number=1 and payment_amount is null: {installment_1_mask.sum()}")
+    
+    # ✅ ตั้งค่า payment_amount สำหรับ installment 1 ที่ยังไม่มีข้อมูล
+    df.loc[installment_1_mask, 'payment_amount'] = df.loc[installment_1_mask, 'installment_amount']
     
     print(f"🔍 After setting installment 1 - payment_amount non-null: {df['payment_amount'].notna().sum()}")
 
@@ -360,11 +365,33 @@ def clean_installment_data(inputs):
     
     # ✅ ลบ comma ออกจากข้อมูลก่อนแปลงเป็น numeric
     if df['payment_amount'].dtype == 'object':
-        df['payment_amount'] = df['payment_amount'].astype(str).str.replace(',', '')
-    if df['installment_amount'].dtype == 'object':
-        df['installment_amount'] = df['installment_amount'].astype(str).str.replace(',', '')
+        print(f"🔍 payment_amount dtype: {df['payment_amount'].dtype}")
+        print(f"🔍 payment_amount sample values before cleaning: {df['payment_amount'].dropna().head(5).tolist()}")
+        
+        # ทำความสะอาดข้อมูลก่อนลบ comma
+        df['payment_amount'] = df['payment_amount'].astype(str)
+        
+        # ลบ comma เฉพาะค่าที่ไม่ใช่ NaN string
+        mask_not_nan = ~df['payment_amount'].str.lower().isin(['nan', 'null', 'none', 'undefined'])
+        df.loc[mask_not_nan, 'payment_amount'] = df.loc[mask_not_nan, 'payment_amount'].str.replace(',', '')
+        
+        print(f"🔍 payment_amount sample values after cleaning: {df['payment_amount'].dropna().head(5).tolist()}")
     
+    if df['installment_amount'].dtype == 'object':
+        print(f"🔍 installment_amount dtype: {df['installment_amount'].dtype}")
+        
+        # ทำความสะอาดข้อมูลก่อนลบ comma
+        df['installment_amount'] = df['installment_amount'].astype(str)
+        
+        # ลบ comma เฉพาะค่าที่ไม่ใช่ NaN string
+        mask_not_nan = ~df['installment_amount'].str.lower().isin(['nan', 'null', 'none', 'undefined'])
+        df.loc[mask_not_nan, 'installment_amount'] = df.loc[mask_not_nan, 'installment_amount'].str.replace(',', '')
+    
+    # ✅ แปลงเป็น numeric และจัดการ NaN
+    print(f"🔍 Before numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
     df['payment_amount'] = pd.to_numeric(df['payment_amount'], errors='coerce')
+    print(f"🔍 After numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
+    
     df['installment_amount'] = pd.to_numeric(df['installment_amount'], errors='coerce')
     df['late_fee'] = pd.to_numeric(df['late_fee'], errors='coerce').fillna(0)
     
@@ -372,20 +399,26 @@ def clean_installment_data(inputs):
     print(f"🔍 After numeric conversion - installment_amount non-null: {df['installment_amount'].notna().sum()}")
     print(f"🔍 After numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
     
-    # ใช้ numpy.where สำหรับ vectorized conditional logic
-    import numpy as np
+    # ✅ ตรวจสอบค่าที่เป็น Infinity หรือ -Infinity
+    df['payment_amount'] = df['payment_amount'].replace([np.inf, -np.inf], np.nan)
+    df['installment_amount'] = df['installment_amount'].replace([np.inf, -np.inf], np.nan)
+    df['late_fee'] = df['late_fee'].replace([np.inf, -np.inf], 0)
     
-    # ถ้า late_fee = 0 ให้ใช้ installment_amount
+    # ✅ คำนวณ total_paid อย่างปลอดภัย
     df['total_paid'] = np.where(
         df['late_fee'] == 0,
         df['installment_amount'].fillna(0),
         # ถ้า late_fee != 0 ให้ใช้ payment_amount + late_fee หรือ installment_amount + late_fee
         np.where(
             df['payment_amount'].notna(),
-            df['payment_amount'] + df['late_fee'],
+            df['payment_amount'].fillna(0) + df['late_fee'],
             df['installment_amount'].fillna(0) + df['late_fee']
         )
     )
+    
+    # ✅ ตรวจสอบ total_paid ที่คำนวณได้
+    print(f"🔍 total_paid non-null: {df['total_paid'].notna().sum()}")
+    print(f"🔍 total_paid range: {df['total_paid'].min()} to {df['total_paid'].max()}")
 
     # 8. payment_status
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
@@ -415,12 +448,29 @@ def clean_installment_data(inputs):
     df = df.rename(columns={'quo_num': 'quotation_num'})
     df['installment_number'] = df['installment_number'].replace({'0': '1'})
     df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
+    
+    # ✅ แปลงวันที่อย่างปลอดภัย
+    print(f"🔍 Before due_date conversion - non-null: {df['due_date'].notna().sum()}")
+    print(f"🔍 due_date sample values: {df['due_date'].dropna().head(3).tolist()}")
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
+    print(f"🔍 After due_date conversion - non-null: {df['due_date'].notna().sum()}")
+    # ✅ ตรวจสอบวันที่ที่แปลงไม่ได้
+    invalid_due_dates = df[df['due_date'].isna()]['due_date'].shape[0]
+    if invalid_due_dates > 0:
+        print(f"⚠️ Invalid due_date values: {invalid_due_dates}")
+    
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d')
+    print(f"🔍 After due_date strftime - non-null: {df['due_date'].notna().sum()}")
     
     print(f"🔍 Before payment_date conversion - non-null: {df['payment_date'].notna().sum()}")
+    print(f"🔍 payment_date sample values: {df['payment_date'].dropna().head(3).tolist()}")
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
     print(f"🔍 After payment_date conversion - non-null: {df['payment_date'].notna().sum()}")
+    # ✅ ตรวจสอบวันที่ที่แปลงไม่ได้
+    invalid_payment_dates = df[df['payment_date'].isna()]['payment_date'].shape[0]
+    if invalid_payment_dates > 0:
+        print(f"⚠️ Invalid payment_date values: {invalid_payment_dates}")
+    
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d')
     print(f"🔍 After payment_date strftime - non-null: {df['payment_date'].notna().sum()}")
     
@@ -429,6 +479,8 @@ def clean_installment_data(inputs):
     print(f"📊 Shape: {df.shape}")
     print(f"📊 installment_amount non-null: {df['installment_amount'].notna().sum()}")
     print(f"📊 payment_amount non-null: {df['payment_amount'].notna().sum()}")
+    print(f"📊 payment_amount sample values: {df['payment_amount'].dropna().head(5).tolist()}")
+    print(f"📊 payment_amount dtype: {df['payment_amount'].dtype}")
     nan_counts_before = df.isna().sum()
     print("📊 NaN counts before cleaning:")
     for col, count in nan_counts_before.items():
@@ -444,6 +496,8 @@ def clean_installment_data(inputs):
     print(f"📊 Shape: {df.shape}")
     print(f"📊 installment_amount non-null: {df['installment_amount'].notna().sum()}")
     print(f"📊 payment_amount non-null: {df['payment_amount'].notna().sum()}")
+    print(f"📊 payment_amount sample values: {df['payment_amount'].dropna().head(5).tolist()}")
+    print(f"📊 payment_amount dtype: {df['payment_amount'].dtype}")
     
     # ตรวจสอบ NaN values ที่เหลือ
     nan_counts_after = df.isna().sum()
@@ -480,6 +534,42 @@ def clean_installment_data(inputs):
     print(f"📊 Final columns: {list(df_final.columns)}")
     print(f"📊 Final installment_amount non-null: {df_final['installment_amount'].notna().sum()}")
     print(f"📊 Final payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
+    print(f"📊 Final payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
+    print(f"📊 Final payment_amount dtype: {df_final['payment_amount'].dtype}")
+    
+    # ✅ ตรวจสอบข้อมูลสุดท้ายก่อนส่งกลับ
+    print("\n📊 Final data quality check:")
+    for col in df_final.columns:
+        non_null_count = df_final[col].notna().sum()
+        total_count = len(df_final)
+        null_percentage = (total_count - non_null_count) / total_count * 100
+        print(f"  - {col}: {non_null_count}/{total_count} ({null_percentage:.1f}% null)")
+        
+        # ตรวจสอบค่าที่เป็น string 'nan' หรือ 'null'
+        if df_final[col].dtype == 'object':
+            nan_strings = df_final[col].astype(str).str.lower().isin(['nan', 'null', 'none', 'undefined']).sum()
+            if nan_strings > 0:
+                print(f"    ⚠️ Contains {nan_strings} string NaN/null values")
+        
+        # ตรวจสอบข้อมูลในคอลัมน์ payment_amount อย่างละเอียด
+        if col == 'payment_amount':
+            print(f"    🔍 payment_amount dtype: {df_final[col].dtype}")
+            print(f"    🔍 payment_amount sample values: {df_final[col].dropna().head(3).tolist()}")
+            print(f"    🔍 payment_amount unique values: {df_final[col].dropna().nunique()}")
+    
+    # ✅ แปลง NaN string เป็น None สำหรับ PostgreSQL
+    for col in df_final.columns:
+        if df_final[col].dtype == 'object':
+            df_final[col] = df_final[col].replace(['nan', 'null', 'none', 'undefined', 'NaN', 'NULL', 'NONE', 'UNDEFINED'], None)
+    
+    print(f"📊 After NaN string replacement - payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
+    print(f"📊 After NaN string replacement - payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
+    print(f"📊 After NaN string replacement - payment_amount dtype: {df_final['payment_amount'].dtype}")
+    
+    # ✅ ตรวจสอบข้อมูลสุดท้ายก่อนส่งกลับ
+    print(f"📊 Final check - payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
+    print(f"📊 Final check - payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
+    print("\n✅ Data cleaning completed for PostgreSQL")
 
     return df_final
 
@@ -505,9 +595,10 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             
             # ใช้วิธีที่เร็วขึ้น - ตรวจสอบเฉพาะค่าที่จำเป็น
             nan_mask = (
-                df_clean[col].str.lower().isin(['nan', 'null', 'none', 'nonetype', 'nulltype']) |
-                df_clean[col].str.strip().isin(['', '[null]']) |
-                df_clean[col].str.contains('^\\[null\\]$', case=False, na=False)
+                df_clean[col].str.lower().isin(['nan', 'null', 'none', 'nonetype', 'nulltype', 'undefined']) |
+                df_clean[col].str.strip().isin(['', '[null]', 'undefined']) |
+                df_clean[col].str.contains('^\\[null\\]$', case=False, na=False) |
+                df_clean[col].str.contains('^undefined$', case=False, na=False)
             )
             
             # แทนที่ค่า NaN string ด้วย None
@@ -520,8 +611,9 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 
                 # ตรวจสอบอีกครั้งหลังจาก strip
                 nan_mask_after = (
-                    df_clean[col].str.lower().isin(['nan', 'null', 'none', '']) |
-                    df_clean[col].str.contains('^\\[null\\]$', case=False, na=False)
+                    df_clean[col].str.lower().isin(['nan', 'null', 'none', '', 'undefined']) |
+                    df_clean[col].str.contains('^\\[null\\]$', case=False, na=False) |
+                    df_clean[col].str.contains('^undefined$', case=False, na=False)
                 )
                 df_clean.loc[nan_mask_after, col] = None
             
@@ -537,12 +629,24 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             # ตรวจสอบข้อมูลก่อนการทำความสะอาด
             non_null_count_before = df_clean[col].notna().sum()
             
-            # ลบ comma เฉพาะ cell ที่เป็น string และไม่ใช่ None
-            mask_string = df_clean[col].astype(str).str.contains(',', na=False)
-            if mask_string.any():
-                df_clean.loc[mask_string, col] = df_clean.loc[mask_string, col].astype(str).str.replace(',', '')
+            # ตรวจสอบว่าเป็น numeric column หรือไม่
+            if df_clean[col].dtype in ['int64', 'float64']:
+                # ถ้าเป็น numeric แล้ว ให้ข้ามไป
+                print(f"🔍 Column {col} is already numeric, skipping conversion")
+                continue
             
-            # แปลงเป็น numeric
+            # ทำความสะอาดข้อมูลก่อนลบ comma
+            df_clean[col] = df_clean[col].astype(str)
+            
+            # ลบ comma เฉพาะค่าที่ไม่ใช่ NaN string
+            mask_not_nan = ~df_clean[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
+            mask_has_comma = df_clean[col].str.contains(',', na=False)
+            mask_to_clean = mask_not_nan & mask_has_comma
+            
+            if mask_to_clean.any():
+                df_clean.loc[mask_to_clean, col] = df_clean.loc[mask_to_clean, col].str.replace(',', '')
+            
+            # แปลงเป็น numeric เฉพาะเมื่อจำเป็น
             df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
             # แปลง NaN เป็น None
             df_clean[col] = df_clean[col].where(pd.notna(df_clean[col]), None)
@@ -559,6 +663,17 @@ def load_installment_data(df: pd.DataFrame):
     table_name = 'fact_installment_payments'
     pk_column = ['quotation_num', 'installment_number']
 
+    # ✅ ตรวจสอบข้อมูลก่อนการโหลด
+    print(f"🔍 Before loading - DataFrame shape: {df.shape}")
+    print(f"🔍 Before loading - Columns: {list(df.columns)}")
+    
+    # ✅ ตรวจสอบ NaN values ก่อนการโหลด
+    print("\n🔍 NaN check before loading:")
+    for col in df.columns:
+        nan_count = df[col].isna().sum()
+        if nan_count > 0:
+            print(f"  - {col}: {nan_count} NaN values")
+    
     # ✅ กรองซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     print(f"🔍 After removing duplicates: {len(df)} rows")
@@ -620,10 +735,18 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ Insert - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_to_insert.empty:
         df_to_insert = df_to_insert.drop(columns=['composite_key'])
+        
+        # ✅ ตรวจสอบข้อมูลก่อนการ insert
+        print(f"🔍 Before insert validation - shape: {df_to_insert.shape}")
+        for col in df_to_insert.columns:
+            nan_count = df_to_insert[col].isna().sum()
+            if nan_count > 0:
+                print(f"  - {col}: {nan_count} NaN values")
+        
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped}")
+            print(f"⚠️ Skipped {dropped} rows with null primary keys")
         
         if not df_to_insert_valid.empty:
             print(f"📤 Inserting {len(df_to_insert_valid)} new records in batches...")
@@ -655,6 +778,14 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ Update - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_diff.empty:
         df_diff = df_diff.drop(columns=['composite_key'])
+        
+        # ✅ ตรวจสอบข้อมูลก่อนการ update
+        print(f"🔍 Before update validation - shape: {df_diff.shape}")
+        for col in df_diff.columns:
+            nan_count = df_diff[col].isna().sum()
+            if nan_count > 0:
+                print(f"  - {col}: {nan_count} NaN values")
+        
         print(f"📝 Updating {len(df_diff)} existing records in batches...")
         
         # ใช้ batch size 1000 แถวต่อครั้ง
@@ -697,4 +828,4 @@ if __name__ == "__main__":
     # print(f"💾 Saved to {output_path}")
 
     load_installment_data(df_clean)
-    print("🎉 Test completed! Data upserted to fact_installment_payments.")
+    print("🎉 completed! Data upserted to fact_installment_payments.")
