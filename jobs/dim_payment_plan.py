@@ -156,12 +156,18 @@ def load_payment_data(df: pd.DataFrame):
     table_name = 'dim_payment_plan'
     pk_column = 'quotation_num'
 
+    # Ensure the unique constraint on quotation_num
     with target_engine.connect() as conn:
-        inspector = inspect(conn)
-        columns = [col['name'] for col in inspector.get_columns(table_name)]
-        if pk_column not in columns:
-            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {pk_column} VARCHAR"))
-            conn.commit()
+        # Check if the unique constraint exists, and add if not
+        conn.execute(text(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
+                    ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
+                END IF;
+            END $$;
+        """))
+        conn.commit()
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
@@ -253,24 +259,25 @@ def load_payment_data(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
 
+
 @job
 def dim_payment_plan_etl():
     load_payment_data(clean_payment_data(extract_payment_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_payment_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_payment_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_payment_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_payment_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_payment_plan.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_payment_plan.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "dim_payment_plan.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_payment_plan.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_payment_data(df_clean)
-    print("🎉 completed! Data upserted to dim_payment_plan.")
+#     load_payment_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_payment_plan.")

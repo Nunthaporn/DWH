@@ -109,12 +109,18 @@ def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
     pk_column = 'quotation_num'
 
+    # Ensure the unique constraint on quotation_num
     with target_engine.connect() as conn:
-        inspector = inspect(conn)
-        columns = [col['name'] for col in inspector.get_columns(table_name)]
-        if pk_column not in columns:
-            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {pk_column} VARCHAR"))
-            conn.commit()
+        # Check if the unique constraint exists, and add if not
+        conn.execute(text(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
+                    ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
+                END IF;
+            END $$;
+        """))
+        conn.commit()
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 

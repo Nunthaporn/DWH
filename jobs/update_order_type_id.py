@@ -74,6 +74,10 @@ def update_dim_order_type_in_sales(df_merged: pd.DataFrame):
 
     # 🔄 ใช้ connection ใหม่ตรงนี้
     with target_engine.begin() as conn:
+        # ลบ unique constraint ก่อน
+        conn.execute(text("""ALTER TABLE dim_order_type DROP CONSTRAINT IF EXISTS unique_quotation_num"""))
+
+        # ลบ quotation_num column
         result = conn.execute(text("""
             SELECT column_name
             FROM information_schema.columns
