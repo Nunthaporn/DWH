@@ -398,6 +398,15 @@ def load_to_wh(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
+    # ✅ Debug: แสดงจำนวนข้อมูลในแต่ละส่วน
+    print(f"🔍 Total new data: {len(df)}")
+    print(f"🔍 Existing data today: {len(df_existing)}")
+    print(f"🔍 New IDs to insert: {len(new_ids)}")
+    print(f"🔍 Common IDs to compare: {len(common_ids)}")
+    print(f"🔍 Data to insert: {len(df_to_insert)}")
+    print(f"🔍 Common new data: {len(df_common_new)}")
+    print(f"🔍 Common old data: {len(df_common_old)}")
+
     # ✅ ตรวจสอบว่ามีข้อมูลที่ซ้ำกันหรือไม่
     if df_common_new.empty or df_common_old.empty:
         print("ℹ️ No common data to compare, skipping update logic")
@@ -481,8 +490,12 @@ def load_to_wh(df: pd.DataFrame):
         for i in range(0, len(df), chunk_size):
             yield df.iloc[i:i + chunk_size]
 
-    # ✅ Insert batch
+    # ✅ Insert batch (ใช้ UPSERT แทน INSERT)
     if not df_to_insert.empty:
+        # ✅ ลบข้อมูลซ้ำใน df_to_insert
+        df_to_insert = df_to_insert[~df_to_insert[pk_column].duplicated(keep='first')].copy()
+        print(f"🔍 After removing duplicates in insert data: {len(df_to_insert)}")
+        
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
@@ -490,7 +503,18 @@ def load_to_wh(df: pd.DataFrame):
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 for batch_df in chunk_dataframe(df_to_insert_valid):
-                    conn.execute(metadata_table.insert(), batch_df.to_dict(orient='records'))
+                    stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
+                    valid_column_names = [c.name for c in metadata_table.columns]
+                    update_columns = {
+                        c: stmt.excluded[c]
+                        for c in valid_column_names
+                        if c != pk_column and c in batch_df.columns
+                    }
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[pk_column],
+                        set_=update_columns
+                    )
+                    conn.execute(stmt)
 
     # ✅ Update batch
     if not df_diff_renamed.empty:
