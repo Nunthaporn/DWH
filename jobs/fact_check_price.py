@@ -28,7 +28,7 @@ def extract_fact_check_price():
         SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
         FROM fin_customer_logs_B2B
-        WHERE create_at >= '2025-01-01' AND create_at < '2025-04-30'
+        WHERE create_at BETWEEN '2025-04-30' AND '2025-08-01'
     """, source_engine, chunksize=10000):
         chunks_logs.append(chunk)
     df_logs = pd.concat(chunks_logs, ignore_index=True)
@@ -219,13 +219,13 @@ def load_fact_check_price(df: pd.DataFrame):
 def fact_check_price_etl():
     load_fact_check_price(clean_fact_check_price(extract_fact_check_price()))
 
-if __name__ == "__main__":
-    df_logs, df_checkprice = extract_fact_check_price()
-    print("✅ Extracted logs:", df_logs.shape)
-    print("✅ Extracted checkprice:", df_checkprice.shape)
+# if __name__ == "__main__":
+#     df_logs, df_checkprice = extract_fact_check_price()
+#     print("✅ Extracted logs:", df_logs.shape)
+#     print("✅ Extracted checkprice:", df_checkprice.shape)
 
-    df_clean = clean_fact_check_price((df_logs, df_checkprice))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_fact_check_price((df_logs, df_checkprice))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
     # print(df_clean.head(10))
 
