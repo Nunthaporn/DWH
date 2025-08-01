@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -15,13 +16,36 @@ load_dotenv()
 
 # ✅ DB connections
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    echo=False
 )
 task_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    echo=False
 )
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    echo=False,
+    connect_args={
+        "connect_timeout": 30,
+        "application_name": "fact_installment_payments_etl",
+        "options": "-c statement_timeout=300000 -c idle_in_transaction_session_timeout=300000"
+    }
 )
 
 @op
@@ -35,6 +59,9 @@ def extract_installment_data():
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
 
     try:
+        print("🔄 Loading data from databases...")
+        
+        # ✅ เพิ่ม WHERE clause เพื่อโหลดเฉพาะข้อมูลที่จำเป็น
         df_plan = pd.read_sql(f"""
             SELECT quo_num
             FROM fin_system_select_plan
@@ -42,15 +69,21 @@ def extract_installment_data():
             AND type_insure IN ('ประกันรถ', 'ตรอ')
         """, source_engine)
 
-        df_installment = pd.read_sql("""
-            SELECT quo_num, money_one, money_two, money_three, money_four,
-                   money_five, money_six, money_seven, money_eight, money_nine,
-                   money_ten, money_eleven, money_twelve,
-                   date_one, date_two, date_three, date_four, date_five,
-                   date_six, date_seven, date_eight, date_nine, date_ten,
-                   date_eleven, date_twelve, numpay
-            FROM fin_installment
-        """, source_engine)
+        # ✅ โหลดเฉพาะข้อมูลที่มี quo_num ใน df_plan
+        if not df_plan.empty:
+            quo_nums = "','".join(df_plan['quo_num'].dropna().astype(str))
+            df_installment = pd.read_sql(f"""
+                SELECT quo_num, money_one, money_two, money_three, money_four,
+                       money_five, money_six, money_seven, money_eight, money_nine,
+                       money_ten, money_eleven, money_twelve,
+                       date_one, date_two, date_three, date_four, date_five,
+                       date_six, date_seven, date_eight, date_nine, date_ten,
+                       date_eleven, date_twelve, numpay
+                FROM fin_installment
+                WHERE quo_num IN ('{quo_nums}')
+            """, source_engine)
+        else:
+            df_installment = pd.DataFrame()
 
         df_order = pd.read_sql("""
             SELECT quo_num, order_number
@@ -58,25 +91,31 @@ def extract_installment_data():
             WHERE type_insure IN ('ประกันรถ', 'ตรอ')
         """, task_engine)
 
-        df_finance = pd.read_sql("""
-            SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
-                   datepay_five, datepay_six, datepay_seven, datepay_eight,
-                   datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
-                   moneypay_one, moneypay_two, moneypay_three, moneypay_four,
-                   moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
-                   moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
-                   numpay
-            FROM fin_finance
-            
-        """, task_engine)
+        # ✅ โหลดเฉพาะข้อมูลที่มี order_number ใน df_order
+        if not df_order.empty:
+            order_nums = "','".join(df_order['order_number'].dropna().astype(str))
+            df_finance = pd.read_sql(f"""
+                SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
+                       datepay_five, datepay_six, datepay_seven, datepay_eight,
+                       datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
+                       moneypay_one, moneypay_two, moneypay_three, moneypay_four,
+                       moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
+                       moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
+                       numpay
+                FROM fin_finance
+                WHERE order_number IN ('{order_nums}')
+            """, task_engine)
 
-        df_bill = pd.read_sql("""
-            SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
-                   bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
-                   bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
-            FROM fin_bill
-            
-        """, task_engine)
+            df_bill = pd.read_sql(f"""
+                SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
+                       bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
+                       bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
+                FROM fin_bill
+                WHERE order_number IN ('{order_nums}')
+            """, task_engine)
+        else:
+            df_finance = pd.DataFrame()
+            df_bill = pd.DataFrame()
 
         df_late_fee = pd.read_sql("""
             SELECT orderNumber, penaltyPay, numPay
@@ -91,40 +130,44 @@ def extract_installment_data():
               AND type_insure IN ('ประกันรถ', 'ตรอ')
         """, source_engine)
         
+        # ✅ ลด memory usage โดยการลบข้อมูลที่ไม่จำเป็น
+        import gc
+        gc.collect()
+        
     except Exception as e:
         print(f"❌ Error during data extraction: {e}")
         # ✅ Rollback connections เพื่อแก้ปัญหา PendingRollbackError
+        for engine_name, engine in [("source", source_engine), ("task", task_engine), ("target", target_engine)]:
+            try:
+                with engine.connect() as conn:
+                    conn.rollback()
+                print(f"✅ Rollback successful for {engine_name} engine")
+            except Exception as rollback_error:
+                print(f"⚠️ Rollback failed for {engine_name} engine: {rollback_error}")
+        
+        # ✅ ปิด connections ทั้งหมด
         try:
-            with source_engine.connect() as conn:
-                conn.rollback()
-        except:
-            pass
-        try:
-            with task_engine.connect() as conn:
-                conn.rollback()
-        except:
-            pass
-        try:
-            with target_engine.connect() as conn:
-                conn.rollback()
-        except:
-            pass
+            source_engine.dispose()
+            task_engine.dispose()
+            target_engine.dispose()
+            print("✅ All engines disposed successfully")
+        except Exception as dispose_error:
+            print(f"⚠️ Engine disposal failed: {dispose_error}")
+        
         raise e
 
-    # ✅ Debug print
-    print("📦 df_plan:", df_plan.shape)
-    print("📦 df_installment:", df_installment.shape)
-    print("📦 df_order:", df_order.shape)
-    print("📦 df_finance:", df_finance.shape)
-    print("📦 df_bill:", df_bill.shape)
-    print("📦 df_late_fee:", df_late_fee.shape)
-    print("📦 df_test:", df_test.shape)
+    # ✅ ลด debug prints เหลือแค่ข้อมูลสำคัญ
+    print(f"📦 Data loaded: plan({df_plan.shape[0]}), installment({df_installment.shape[0]}), "
+          f"order({df_order.shape[0]}), finance({df_finance.shape[0]}), "
+          f"bill({df_bill.shape[0]}), late_fee({df_late_fee.shape[0]}), test({df_test.shape[0]})")
 
     return df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test
 
 @op
 def clean_installment_data(inputs):
     df_plan, df_inst, df_order, df_fin, df_bill, df_fee, df_test = inputs
+
+    print("🔄 Processing installment data...")
 
     # 1. เตรียมข้อมูลค่างวด + วันที่
     df_inst['numpay'] = pd.to_numeric(df_inst['numpay'], errors='coerce')
@@ -135,28 +178,13 @@ def clean_installment_data(inputs):
     date_cols = [f'date_{n}' for n in ['one', 'two', 'three', 'four', 'five', 'six',
                                        'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']]
 
-    # ✅ Debug: ตรวจสอบข้อมูลใน df_filtered
-    print(f"🔍 df_filtered shape: {df_filtered.shape}")
-    print(f"🔍 df_filtered columns: {list(df_filtered.columns)}")
-    
-    # ตรวจสอบข้อมูลในคอลัมน์ money
-    for col in money_cols[:3]:  # ตรวจสอบแค่ 3 คอลัมน์แรก
-        if col in df_filtered.columns:
-            non_null_count = df_filtered[col].notna().sum()
-            print(f"🔍 {col}: {non_null_count} non-null values")
-            if non_null_count > 0:
-                print(f"🔍 Sample {col} values: {df_filtered[col].dropna().head(3).tolist()}")
+    # ✅ ลด debug prints เหลือแค่ข้อมูลสำคัญ
+    print(f"📊 Processing {df_filtered.shape[0]} installment records")
 
     df_money = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=money_cols,
                                  var_name='installment_period', value_name='installment_amount')
     df_date = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=date_cols,
                                 var_name='due_date_period', value_name='due_date')
-
-    # ✅ Debug: ตรวจสอบข้อมูลใน df_money
-    print(f"🔍 df_money shape: {df_money.shape}")
-    print(f"🔍 df_money installment_amount non-null: {df_money['installment_amount'].notna().sum()}")
-    if df_money['installment_amount'].notna().sum() > 0:
-        print(f"🔍 Sample installment_amount values: {df_money['installment_amount'].dropna().head(5).tolist()}")
 
     df_combined = pd.concat([df_money.reset_index(drop=True), df_date['due_date']], axis=1)
     df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
@@ -164,36 +192,11 @@ def clean_installment_data(inputs):
     df_combined = df_combined.sort_values(by=['quo_num', 'due_date'])
     df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
 
-    # ✅ Debug: ตรวจสอบข้อมูลใน df_combined
-    print(f"🔍 df_combined shape: {df_combined.shape}")
-    print(f"🔍 df_combined installment_amount non-null: {df_combined['installment_amount'].notna().sum()}")
-    print(f"🔍 df_combined unique quo_num: {df_combined['quo_num'].nunique()}")
+    print(f"📊 Combined {df_combined.shape[0]} installment records")
 
     # 2. ผูก order_number
-    print(f"🔍 df_join before merge shape: {df_combined.shape}")
-    print(f"🔍 df_order shape: {df_order.shape}")
-    print(f"🔍 df_order sample:")
-    print(df_order.head())
-    
-    # ✅ Debug: ตรวจสอบ intersection ของ quo_num
-    combined_quos = set(df_combined['quo_num'].dropna())
-    order_quos = set(df_order['quo_num'].dropna())
-    common_quos = combined_quos & order_quos
-    print(f"🔍 Common quo_num: {len(common_quos)}")
-    print(f"🔍 df_combined only: {len(combined_quos - order_quos)}")
-    print(f"🔍 df_order only: {len(order_quos - combined_quos)}")
-    
     df_join = pd.merge(df_combined, df_order, on='quo_num', how='left')
-    print(f"🔍 df_join after merge shape: {df_join.shape}")
-    print(f"🔍 df_join order_number non-null: {df_join['order_number'].notna().sum()}")
-    print(f"🔍 df_join installment_amount non-null: {df_join['installment_amount'].notna().sum()}")
-    
-    # ตรวจสอบข้อมูลที่ไม่มี order_number
-    missing_order = df_join[df_join['order_number'].isna()]
-    print(f"🔍 Missing order_number: {len(missing_order)} rows")
-    if not missing_order.empty:
-        print("🔍 Sample missing order_number:")
-        print(missing_order[['quo_num', 'installment_number', 'installment_amount']].head())
+    print(f"📊 Joined with orders: {df_join.shape[0]} records")
 
     # 3. เตรียมข้อมูลการชำระ
     num_to_name = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
@@ -202,34 +205,7 @@ def clean_installment_data(inputs):
     df_fin['numpay'] = pd.to_numeric(df_fin['numpay'], errors='coerce')
     df_fin = df_fin[df_fin['numpay'].notna() & (df_fin['numpay'] > 0)]
 
-    # ✅ Debug: ตรวจสอบข้อมูลใน df_fin
-    print(f"🔍 df_fin shape: {df_fin.shape}")
-    print(f"🔍 df_fin columns: {list(df_fin.columns)}")
-    
-    # ตรวจสอบรูปแบบ order_number ใน df_fin
-    print("🔍 df_fin order_number patterns:")
-    df_fin_sample = df_fin['order_number'].dropna().head(10)
-    for order in df_fin_sample:
-        print(f"  - {order}")
-    
-    # ตรวจสอบรูปแบบ order_number ใน df_order
-    print("🔍 df_order order_number patterns:")
-    df_order_sample = df_order['order_number'].dropna().head(10)
-    for order in df_order_sample:
-        print(f"  - {order}")
-    
-    # ตรวจสอบข้อมูลในคอลัมน์ payment
-    for sfx in num_to_name[:3]:  # ตรวจสอบแค่ 3 คอลัมน์แรก
-        money_col = f'moneypay_{sfx}'
-        date_col = f'datepay_{sfx}'
-        if money_col in df_fin.columns:
-            non_null_money = df_fin[money_col].notna().sum()
-            print(f"🔍 {money_col}: {non_null_money} non-null values")
-            if non_null_money > 0:
-                print(f"🔍 Sample {money_col} values: {df_fin[money_col].dropna().head(3).tolist()}")
-        if date_col in df_fin.columns:
-            non_null_date = df_fin[date_col].notna().sum()
-            print(f"🔍 {date_col}: {non_null_date} non-null values")
+    print(f"📊 Processing {df_fin.shape[0]} finance records")
 
     # ใช้ vectorized operations แทน iterrows()
     rows_list = []
@@ -242,25 +218,12 @@ def clean_installment_data(inputs):
         temp_df['installment_number'] = i
         temp_df['payment_amount'] = temp_df[money_col]
         
-        # ✅ Debug: ตรวจสอบข้อมูลใน temp_df
-        if i <= 3:  # ตรวจสอบแค่ 3 แถวแรก
-            print(f"🔍 Installment {i}:")
-            print(f"  - temp_df shape: {temp_df.shape}")
-            print(f"  - payment_amount non-null: {temp_df['payment_amount'].notna().sum()}")
-            print(f"  - {date_col} non-null: {temp_df[date_col].notna().sum()}")
-            if temp_df['payment_amount'].notna().sum() > 0:
-                print(f"  - Sample payment_amount values: {temp_df['payment_amount'].dropna().head(3).tolist()}")
-        
         # ทำความสะอาดวันที่
         temp_df['raw_date'] = temp_df[date_col].astype(str)
         temp_df['payment_date'] = pd.to_datetime(
             temp_df['raw_date'].str.extract(r'(\d{4}-\d{1,2}-\d{1,2})')[0], 
             errors='coerce'
         )
-        
-        # ✅ Debug: ตรวจสอบการแปลงวันที่
-        if i <= 3:
-            print(f"  - payment_date non-null after conversion: {temp_df['payment_date'].notna().sum()}")
         
         # แก้ไขปี 2026 เป็น 2025 - ใช้ vectorized operations
         mask_2026 = temp_df['payment_date'].dt.year == 2026
@@ -274,36 +237,7 @@ def clean_installment_data(inputs):
         rows_list.append(temp_df[['order_number', 'payment_amount', 'payment_date', 'installment_number']])
 
     df_payment = pd.concat(rows_list, ignore_index=True)
-    
-    # ✅ Debug: ตรวจสอบข้อมูลใน df_payment
-    print(f"🔍 df_payment shape: {df_payment.shape}")
-    print(f"🔍 df_payment payment_amount non-null: {df_payment['payment_amount'].notna().sum()}")
-    print(f"🔍 df_payment payment_date non-null: {df_payment['payment_date'].notna().sum()}")
-    
-    # ตรวจสอบ order_number ใน df_payment
-    print(f"🔍 df_payment order_number non-null: {df_payment['order_number'].notna().sum()}")
-    print(f"🔍 df_payment order_number unique: {df_payment['order_number'].nunique()}")
-    
-    # ตรวจสอบ order_number ใน df_join
-    print(f"🔍 df_join order_number non-null: {df_join['order_number'].notna().sum()}")
-    print(f"🔍 df_join order_number unique: {df_join['order_number'].nunique()}")
-    
-    # ตรวจสอบ intersection ของ order_number
-    join_orders = set(df_join['order_number'].dropna())
-    payment_orders = set(df_payment['order_number'].dropna())
-    common_orders = join_orders & payment_orders
-    print(f"🔍 Common order_number: {len(common_orders)}")
-    print(f"🔍 df_join only: {len(join_orders - payment_orders)}")
-    print(f"🔍 df_payment only: {len(payment_orders - join_orders)}")
-    
-    # แสดงตัวอย่างข้อมูล
-    if not df_payment.empty:
-        print("🔍 Sample df_payment data:")
-        sample_data = df_payment.head(5)
-        for idx, row in sample_data.iterrows():
-            print(f"  Row {idx}: order_number={row['order_number']}, "
-                  f"payment_amount={row['payment_amount']}, "
-                  f"payment_date={row['payment_date']}")
+    print(f"📊 Created {df_payment.shape[0]} payment records")
 
     # 4. เตรียม payment proof
     df_proof = df_bill.melt(id_vars=['order_number'],
@@ -313,47 +247,13 @@ def clean_installment_data(inputs):
     df_proof['installment_number'] = df_proof.groupby('order_number').cumcount() + 1
     df_proof = df_proof[['order_number', 'installment_number', 'payment_proof']]
 
-    # 5. รวมทั้งหมด
-    print(f"🔍 Before merge - df_join shape: {df_join.shape}")
-    print(f"🔍 Before merge - df_payment shape: {df_payment.shape}")
-    print(f"🔍 Before merge - df_proof shape: {df_proof.shape}")
-    print(f"🔍 Before merge - df_join installment_amount non-null: {df_join['installment_amount'].notna().sum()}")
-    
-    # ✅ แปลง installment_number เป็น numeric ก่อน merge
-    df_join['installment_number'] = pd.to_numeric(df_join['installment_number'], errors='coerce')
-    df_payment['installment_number'] = pd.to_numeric(df_payment['installment_number'], errors='coerce')
-    df_proof['installment_number'] = pd.to_numeric(df_proof['installment_number'], errors='coerce')
-    
-    df = pd.merge(df_join, df_payment, on=['order_number', 'installment_number'], how='left')
-    print(f"🔍 After first merge - df shape: {df.shape}")
-    print(f"🔍 After first merge - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    print(f"🔍 After first merge - payment_date non-null: {df['payment_date'].notna().sum()}")
-    print(f"🔍 After first merge - installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    
-    df = pd.merge(df, df_proof, on=['order_number', 'installment_number'], how='left')
-    print(f"🔍 After second merge - df shape: {df.shape}")
-    print(f"🔍 After second merge - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    print(f"🔍 After second merge - payment_date non-null: {df['payment_date'].notna().sum()}")
-    print(f"🔍 After second merge - installment_amount non-null: {df['installment_amount'].notna().sum()}")
+    print(f"📊 Created {df_proof.shape[0]} proof records")
 
-    # ✅ ตรวจสอบข้อมูลก่อนการตั้งค่า installment 1
-    print(f"🔍 Before setting installment 1 - installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"🔍 Before setting installment 1 - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    
-    # ✅ แปลง installment_number เป็น numeric ก่อนเปรียบเทียบ
-    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
-    
-    # ✅ ตรวจสอบข้อมูลก่อนการตั้งค่า
-    installment_1_mask = (df['installment_number'] == 1) & (df['payment_amount'].isna())
-    print(f"🔍 Rows where installment_number=1 and payment_amount is null: {installment_1_mask.sum()}")
-    
-    # ✅ ตั้งค่า payment_amount สำหรับ installment 1 ที่ยังไม่มีข้อมูล
-    df.loc[installment_1_mask, 'payment_amount'] = df.loc[installment_1_mask, 'installment_amount']
-    
-    # ✅ แปลง NaN เป็น None สำหรับ payment_amount
-    df['payment_amount'] = df['payment_amount'].where(pd.notna(df['payment_amount']), None)
-    
-    print(f"🔍 After setting installment 1 - payment_amount non-null: {df['payment_amount'].notna().sum()}")
+    # 5. รวมทั้งหมด
+    df = pd.merge(df_join, df_payment, on=['order_number', 'installment_number'], how='left')
+    df = pd.merge(df, df_proof, on=['order_number', 'installment_number'], how='left')
+
+    print(f"📊 Final merged data: {df.shape[0]} records")
 
     # 6. เพิ่ม late_fee
     df_fee = df_fee.rename(columns={
@@ -367,32 +267,17 @@ def clean_installment_data(inputs):
     df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
     df['late_fee'] = df['late_fee'].fillna(0).astype(int)
     
-    # ✅ แปลง NaN เป็น None สำหรับ late_fee
-    df['late_fee'] = df['late_fee'].where(pd.notna(df['late_fee']), None)
-    print(f"🔍 late_fee after NaN conversion: {df['late_fee'].notna().sum()} non-null values")
-
     # 7. คำนวณ total_paid - ใช้ vectorized operations แทน apply
-    # ✅ ตรวจสอบข้อมูลก่อนการแปลง
-    print(f"🔍 Before numeric conversion - installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"🔍 Before numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    
     # ✅ ลบ comma ออกจากข้อมูลก่อนแปลงเป็น numeric
     if df['payment_amount'].dtype == 'object':
-        print(f"🔍 payment_amount dtype: {df['payment_amount'].dtype}")
-        print(f"🔍 payment_amount sample values before cleaning: {df['payment_amount'].dropna().head(5).tolist()}")
-        
         # ทำความสะอาดข้อมูลก่อนลบ comma
         df['payment_amount'] = df['payment_amount'].astype(str)
         
         # ลบ comma เฉพาะค่าที่ไม่ใช่ NaN string
         mask_not_nan = ~df['payment_amount'].str.lower().isin(['nan', 'null', 'none', 'undefined'])
         df.loc[mask_not_nan, 'payment_amount'] = df.loc[mask_not_nan, 'payment_amount'].str.replace(',', '')
-        
-        print(f"🔍 payment_amount sample values after cleaning: {df['payment_amount'].dropna().head(5).tolist()}")
     
     if df['installment_amount'].dtype == 'object':
-        print(f"🔍 installment_amount dtype: {df['installment_amount'].dtype}")
-        
         # ทำความสะอาดข้อมูลก่อนลบ comma
         df['installment_amount'] = df['installment_amount'].astype(str)
         
@@ -401,28 +286,15 @@ def clean_installment_data(inputs):
         df.loc[mask_not_nan, 'installment_amount'] = df.loc[mask_not_nan, 'installment_amount'].str.replace(',', '')
     
     # ✅ แปลงเป็น numeric และจัดการ NaN
-    print(f"🔍 Before numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
     df['payment_amount'] = pd.to_numeric(df['payment_amount'], errors='coerce')
-    print(f"🔍 After numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    
-    # ✅ แปลง NaN เป็น None สำหรับ payment_amount
     df['payment_amount'] = df['payment_amount'].where(pd.notna(df['payment_amount']), None)
-    print(f"🔍 payment_amount after NaN conversion: {df['payment_amount'].notna().sum()} non-null values")
     
     df['installment_amount'] = pd.to_numeric(df['installment_amount'], errors='coerce')
     df['late_fee'] = pd.to_numeric(df['late_fee'], errors='coerce').fillna(0)
     
-    # ✅ แปลง NaN เป็น None สำหรับ installment_amount
+    # ✅ แปลง NaN เป็น None
     df['installment_amount'] = df['installment_amount'].where(pd.notna(df['installment_amount']), None)
-    print(f"🔍 installment_amount after NaN conversion: {df['installment_amount'].notna().sum()} non-null values")
-    
-    # ✅ แปลง NaN เป็น None สำหรับ late_fee
     df['late_fee'] = df['late_fee'].where(pd.notna(df['late_fee']), None)
-    print(f"🔍 late_fee after NaN conversion: {df['late_fee'].notna().sum()} non-null values")
-    
-    # ✅ ตรวจสอบข้อมูลหลังการแปลง
-    print(f"🔍 After numeric conversion - installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"🔍 After numeric conversion - payment_amount non-null: {df['payment_amount'].notna().sum()}")
     
     # ✅ ตรวจสอบค่าที่เป็น Infinity หรือ -Infinity
     df['payment_amount'] = df['payment_amount'].replace([np.inf, -np.inf], np.nan)
@@ -433,10 +305,6 @@ def clean_installment_data(inputs):
     df['payment_amount'] = df['payment_amount'].where(pd.notna(df['payment_amount']), None)
     df['installment_amount'] = df['installment_amount'].where(pd.notna(df['installment_amount']), None)
     df['late_fee'] = df['late_fee'].where(pd.notna(df['late_fee']), None)
-    
-    print(f"🔍 After Infinity handling - payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    print(f"🔍 After Infinity handling - installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"🔍 After Infinity handling - late_fee non-null: {df['late_fee'].notna().sum()}")
     
     # ✅ คำนวณ total_paid อย่างปลอดภัย
     df['total_paid'] = np.where(
@@ -452,12 +320,8 @@ def clean_installment_data(inputs):
     
     # ✅ แปลง NaN เป็น None สำหรับ total_paid
     df['total_paid'] = df['total_paid'].where(pd.notna(df['total_paid']), None)
-    
-    # ✅ ตรวจสอบ total_paid ที่คำนวณได้
-    print(f"🔍 total_paid non-null: {df['total_paid'].notna().sum()}")
-    if df['total_paid'].notna().sum() > 0:
-        print(f"🔍 total_paid range: {df['total_paid'].min()} to {df['total_paid'].max()}")
-    print(f"🔍 total_paid after NaN conversion: {df['total_paid'].notna().sum()} non-null values")
+
+    print(f"📊 Calculated total_paid for {df['total_paid'].notna().sum()} records")
 
     # 8. payment_status
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
@@ -490,79 +354,18 @@ def clean_installment_data(inputs):
     
     # ✅ แปลง NaN เป็น None สำหรับ installment_number
     df['installment_number'] = df['installment_number'].where(pd.notna(df['installment_number']), None)
-    print(f"🔍 installment_number after NaN conversion: {df['installment_number'].notna().sum()} non-null values")
     
     # ✅ แปลงวันที่อย่างปลอดภัย
-    print(f"🔍 Before due_date conversion - non-null: {df['due_date'].notna().sum()}")
-    print(f"🔍 due_date sample values: {df['due_date'].dropna().head(3).tolist()}")
     df['due_date'] = pd.to_datetime(df['due_date'], errors='coerce')
-    print(f"🔍 After due_date conversion - non-null: {df['due_date'].notna().sum()}")
-    # ✅ ตรวจสอบวันที่ที่แปลงไม่ได้
-    invalid_due_dates = df[df['due_date'].isna()]['due_date'].shape[0]
-    if invalid_due_dates > 0:
-        print(f"⚠️ Invalid due_date values: {invalid_due_dates}")
-    
     df['due_date'] = df['due_date'].dt.strftime('%Y%m%d')
-    print(f"🔍 After due_date strftime - non-null: {df['due_date'].notna().sum()}")
-    
-    # ✅ แปลง NaN เป็น None สำหรับ due_date
     df['due_date'] = df['due_date'].where(pd.notna(df['due_date']), None)
     
-    print(f"🔍 Before payment_date conversion - non-null: {df['payment_date'].notna().sum()}")
-    print(f"🔍 payment_date sample values: {df['payment_date'].dropna().head(3).tolist()}")
     df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
-    print(f"🔍 After payment_date conversion - non-null: {df['payment_date'].notna().sum()}")
-    # ✅ ตรวจสอบวันที่ที่แปลงไม่ได้
-    invalid_payment_dates = df[df['payment_date'].isna()]['payment_date'].shape[0]
-    if invalid_payment_dates > 0:
-        print(f"⚠️ Invalid payment_date values: {invalid_payment_dates}")
-    
     df['payment_date'] = df['payment_date'].dt.strftime('%Y%m%d')
-    print(f"🔍 After payment_date strftime - non-null: {df['payment_date'].notna().sum()}")
-    
-    # ✅ แปลง NaN เป็น None สำหรับ payment_date
     df['payment_date'] = df['payment_date'].where(pd.notna(df['payment_date']), None)
     
-    # ✅ ตรวจสอบข้อมูลก่อนการทำความสะอาด - ลดการตรวจสอบ
-    print("🔍 Before cleaning:")
-    print(f"📊 Shape: {df.shape}")
-    print(f"📊 installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"📊 payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    print(f"📊 payment_amount sample values: {df['payment_amount'].dropna().head(5).tolist()}")
-    print(f"📊 payment_amount dtype: {df['payment_amount'].dtype}")
-    nan_counts_before = df.isna().sum()
-    print("📊 NaN counts before cleaning:")
-    for col, count in nan_counts_before.items():
-        if count > 0:
-            print(f"  - {col}: {count}")
-    
-    # ✅ ใช้ sanitize_dataframe function เพื่อทำความสะอาดข้อมูลอย่างครอบคลุม - เรียกครั้งเดียว
-    print("🧹 Applying comprehensive data sanitization...")
+    # ✅ ใช้ sanitize_dataframe function เพื่อทำความสะอาดข้อมูลอย่างครอบคลุม
     df = sanitize_dataframe(df.copy())
-    
-    # ✅ ตรวจสอบผลลัพธ์การทำความสะอาด - ลดการตรวจสอบ
-    print("✅ After cleaning:")
-    print(f"📊 Shape: {df.shape}")
-    print(f"📊 installment_amount non-null: {df['installment_amount'].notna().sum()}")
-    print(f"📊 payment_amount non-null: {df['payment_amount'].notna().sum()}")
-    print(f"📊 payment_amount sample values: {df['payment_amount'].dropna().head(5).tolist()}")
-    print(f"📊 payment_amount dtype: {df['payment_amount'].dtype}")
-    
-    # ตรวจสอบ NaN values ที่เหลือ
-    nan_counts_after = df.isna().sum()
-    print("📊 NaN counts after cleaning:")
-    for col, count in nan_counts_after.items():
-        if count > 0:
-            print(f"  - {col}: {count}")
-    
-    # แสดงสรุปการเปลี่ยนแปลง
-    print("\n📊 Cleaning completed")
-    for col in df.columns:
-        if col in nan_counts_before.index and col in nan_counts_after.index:
-            before = nan_counts_before[col]
-            after = nan_counts_after[col]
-            if before != after:
-                print(f"  - {col}: {before} → {after} NaN values")
 
     # ✅ เลือกเฉพาะคอลัมน์ที่ต้องการสำหรับตารางปลายทาง
     final_columns = [
@@ -579,76 +382,25 @@ def clean_installment_data(inputs):
         print(f"⚠️ Missing columns: {missing_columns}")
     
     df_final = df[available_columns].copy()
-    print(f"📊 Final DataFrame shape: {df_final.shape}")
-    print(f"📊 Final columns: {list(df_final.columns)}")
-    print(f"📊 Final installment_amount non-null: {df_final['installment_amount'].notna().sum()}")
-    print(f"📊 Final payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
-    print(f"📊 Final payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
-    print(f"📊 Final payment_amount dtype: {df_final['payment_amount'].dtype}")
-    
-    # ✅ ตรวจสอบข้อมูลสุดท้ายก่อนส่งกลับ
-    print("\n📊 Final data quality check:")
-    for col in df_final.columns:
-        non_null_count = df_final[col].notna().sum()
-        total_count = len(df_final)
-        null_percentage = (total_count - non_null_count) / total_count * 100
-        print(f"  - {col}: {non_null_count}/{total_count} ({null_percentage:.1f}% null)")
-        
-        # ตรวจสอบค่าที่เป็น string 'nan' หรือ 'null'
-        if df_final[col].dtype == 'object':
-            nan_strings = df_final[col].astype(str).str.lower().isin(['nan', 'null', 'none', 'undefined']).sum()
-            if nan_strings > 0:
-                print(f"    ⚠️ Contains {nan_strings} string NaN/null values")
-        
-        # ตรวจสอบข้อมูลในคอลัมน์ payment_amount อย่างละเอียด
-        if col == 'payment_amount':
-            print(f"    🔍 payment_amount dtype: {df_final[col].dtype}")
-            print(f"    🔍 payment_amount sample values: {df_final[col].dropna().head(3).tolist()}")
-            print(f"    🔍 payment_amount unique values: {df_final[col].dropna().nunique()}")
+    print(f"📊 Final data ready: {df_final.shape[0]} records")
     
     # ✅ แปลง NaN string เป็น None สำหรับ PostgreSQL
     for col in df_final.columns:
         if df_final[col].dtype == 'object':
             df_final[col] = df_final[col].replace(['nan', 'null', 'none', 'undefined', 'NaN', 'NULL', 'NONE', 'UNDEFINED'], None)
     
-    print(f"📊 After NaN string replacement - payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
-    print(f"📊 After NaN string replacement - payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
-    print(f"📊 After NaN string replacement - payment_amount dtype: {df_final['payment_amount'].dtype}")
-    
-    # ✅ ตรวจสอบข้อมูลสุดท้ายก่อนส่งกลับ
-    print(f"📊 Final check - payment_amount non-null: {df_final['payment_amount'].notna().sum()}")
-    print(f"📊 Final check - payment_amount sample values: {df_final['payment_amount'].dropna().head(5).tolist()}")
-    
     # ✅ ทำความสะอาดข้อมูลขั้นสุดท้าย - แปลง NaN เป็น None สำหรับทุกคอลัมน์
-    print("\n🧹 Final data sanitization...")
     for col in df_final.columns:
         if df_final[col].dtype in ['float64', 'int64']:
             # แปลง NaN เป็น None สำหรับ numeric columns
-            nan_count = df_final[col].isna().sum()
-            if nan_count > 0:
-                print(f"  🔄 Converting {nan_count} NaN values to None in {col}")
-                df_final[col] = df_final[col].where(pd.notna(df_final[col]), None)
+            df_final[col] = df_final[col].where(pd.notna(df_final[col]), None)
         elif df_final[col].dtype == 'object':
             # แปลง string 'nan', 'null' เป็น None
             df_final[col] = df_final[col].astype(str)
             nan_mask = df_final[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-            nan_count = nan_mask.sum()
-            if nan_count > 0:
-                print(f"  🔄 Converting {nan_count} string NaN values to None in {col}")
-                df_final.loc[nan_mask, col] = None
-    
-    # ✅ ตรวจสอบข้อมูลหลังการทำความสะอาดขั้นสุดท้าย
-    print("\n📊 After final sanitization:")
-    for col in df_final.columns:
-        if col in ['payment_amount', 'installment_amount', 'total_paid', 'late_fee']:
-            non_null_count = df_final[col].notna().sum()
-            total_count = len(df_final)
-            print(f"  - {col}: {non_null_count}/{total_count} non-null values")
-            if non_null_count > 0:
-                sample_values = df_final[col].dropna().head(3).tolist()
-                print(f"    Sample values: {sample_values}")
-    
-    print("\n✅ Data cleaning completed for PostgreSQL")
+            df_final.loc[nan_mask, col] = None
+
+    print("✅ Data cleaning completed for PostgreSQL")
 
     return df_final
 
@@ -818,17 +570,43 @@ def load_installment_data(df: pd.DataFrame):
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     print(f"🔍 After removing duplicates: {len(df)} rows")
 
-
     # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(
-            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
-            conn
-        )
-    print(f"📊 Existing data: {len(df_existing)} rows")
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL - เพิ่มการจัดการ connection
+    df_existing = pd.DataFrame()
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            print(f"🔄 Attempting to load existing data (attempt {retry_count + 1}/{max_retries})...")
+            
+            # สร้าง connection ใหม่ทุกครั้ง
+            with target_engine.connect() as conn:
+                # ตั้งค่า timeout และ connection parameters
+                conn.execute("SET statement_timeout = 300000")  # 5 minutes
+                conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                
+                df_existing = pd.read_sql(
+                    f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+                    conn
+                )
+            
+            print(f"📊 Existing data loaded successfully: {len(df_existing)} rows")
+            break
+            
+        except Exception as e:
+            retry_count += 1
+            print(f"❌ Error loading existing data (attempt {retry_count}/{max_retries}): {e}")
+            
+            if retry_count >= max_retries:
+                print("⚠️ Max retries reached. Proceeding without existing data comparison.")
+                df_existing = pd.DataFrame()
+                break
+            
+            # รอสักครู่ก่อนลองใหม่
+            time.sleep(2 ** retry_count)  # Exponential backoff
 
     # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
     for col in pk_column:
@@ -883,28 +661,14 @@ def load_installment_data(df: pd.DataFrame):
     if not df_to_insert.empty:
         df_to_insert = df_to_insert.drop(columns=['composite_key'])
         
-        # ✅ ตรวจสอบข้อมูลก่อนการ insert
-        print(f"🔍 Before insert validation - shape: {df_to_insert.shape}")
-        for col in df_to_insert.columns:
-            nan_count = df_to_insert[col].isna().sum()
-            if nan_count > 0:
-                print(f"  - {col}: {nan_count} NaN values")
-        
         # ✅ ทำความสะอาดข้อมูลก่อน insert - แปลง NaN เป็น None
-        print("🧹 Cleaning data before insert...")
         for col in df_to_insert.columns:
             if df_to_insert[col].dtype in ['float64', 'int64']:
-                nan_count = df_to_insert[col].isna().sum()
-                if nan_count > 0:
-                    print(f"  🔄 Converting {nan_count} NaN values to None in {col}")
-                    df_to_insert[col] = df_to_insert[col].where(pd.notna(df_to_insert[col]), None)
+                df_to_insert[col] = df_to_insert[col].where(pd.notna(df_to_insert[col]), None)
             elif df_to_insert[col].dtype == 'object':
                 df_to_insert[col] = df_to_insert[col].astype(str)
                 nan_mask = df_to_insert[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-                nan_count = nan_mask.sum()
-                if nan_count > 0:
-                    print(f"  🔄 Converting {nan_count} string NaN values to None in {col}")
-                    df_to_insert.loc[nan_mask, col] = None
+                df_to_insert.loc[nan_mask, col] = None
         
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
@@ -912,118 +676,141 @@ def load_installment_data(df: pd.DataFrame):
             print(f"⚠️ Skipped {dropped} rows with null primary keys")
         
         if not df_to_insert_valid.empty:
-            print(f"📤 Inserting {len(df_to_insert_valid)} new records in batches...")
+            print(f"📤 Inserting {len(df_to_insert_valid)} new records...")
             
-            # ใช้ batch size 1000 แถวต่อครั้ง
-            batch_size = 5000
+            # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
+            batch_size = 1000
             total_batches = (len(df_to_insert_valid) + batch_size - 1) // batch_size
             
-            with target_engine.begin() as conn:
-                for i in range(0, len(df_to_insert_valid), batch_size):
-                    batch_df = df_to_insert_valid.iloc[i:i+batch_size]
-                    batch_num = (i // batch_size) + 1
-                    print(f"  📦 Processing batch {batch_num}/{total_batches} ({len(batch_df)} records)")
-                    
-                    # ✅ ตรวจสอบและทำความสะอาดข้อมูลก่อนแปลงเป็น records
-                    print(f"    🔍 Checking batch {batch_num} data...")
-                    for col in batch_df.columns:
-                        if col in ['payment_amount', 'installment_amount', 'total_paid', 'late_fee']:
-                            nan_count = batch_df[col].isna().sum()
-                            if nan_count > 0:
-                                print(f"      ⚠️ Found {nan_count} NaN values in {col}")
-                                # แปลง NaN เป็น None
-                                batch_df[col] = batch_df[col].where(pd.notna(batch_df[col]), None)
-                    
-                    # ใช้ executemany สำหรับ batch insert
-                    records = batch_df.to_dict(orient='records')
-                    
-                    # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
-                    print(f"    🧹 Cleaning {len(records)} records...")
-                    records = clean_records_for_db(records)
-                    
-                    stmt = pg_insert(metadata).values(records)
-                    update_columns = {
-                        c.name: stmt.excluded[c.name]
-                        for c in metadata.columns
-                        if c.name not in pk_column
-                    }
-                    update_columns["update_at"] = datetime.now()  # ✅ เพิ่มให้ update timestamp ทุกครั้ง
+            # ✅ ใช้ connection แยกสำหรับแต่ละ batch
+            for i in range(0, len(df_to_insert_valid), batch_size):
+                batch_df = df_to_insert_valid.iloc[i:i+batch_size]
+                batch_num = (i // batch_size) + 1
+                print(f"  📦 Processing batch {batch_num}/{total_batches} ({len(batch_df)} records)")
+                
+                # ใช้ executemany สำหรับ batch insert
+                records = batch_df.to_dict(orient='records')
+                
+                # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
+                records = clean_records_for_db(records)
+                
+                # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
+                max_retries = 3
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    try:
+                        with target_engine.begin() as conn:
+                            # ตั้งค่า timeout
+                            conn.execute("SET statement_timeout = 300000")  # 5 minutes
+                            conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                            
+                            stmt = pg_insert(metadata).values(records)
+                            update_columns = {
+                                c.name: stmt.excluded[c.name]
+                                for c in metadata.columns
+                                if c.name not in pk_column
+                            }
+                            update_columns["update_at"] = datetime.now()  # ✅ เพิ่มให้ update timestamp ทุกครั้ง
 
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=pk_column,
-                        set_=update_columns
-                    )
-                    conn.execute(stmt)
+                            stmt = stmt.on_conflict_do_update(
+                                index_elements=pk_column,
+                                set_=update_columns
+                            )
+                            conn.execute(stmt)
+                        
+                        print(f"    ✅ Batch {batch_num} inserted successfully")
+                        break
+                        
+                    except Exception as e:
+                        retry_count += 1
+                        print(f"    ❌ Error inserting batch {batch_num} (attempt {retry_count}/{max_retries}): {e}")
+                        
+                        if retry_count >= max_retries:
+                            print(f"    ⚠️ Max retries reached for batch {batch_num}. Skipping this batch.")
+                            break
+                        
+                        # รอสักครู่ก่อนลองใหม่
+                        time.sleep(2 ** retry_count)  # Exponential backoff
 
     # ✅ Update - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_diff.empty:
         df_diff = df_diff.drop(columns=['composite_key'])
         
-        # ✅ ตรวจสอบข้อมูลก่อนการ update
-        print(f"🔍 Before update validation - shape: {df_diff.shape}")
-        for col in df_diff.columns:
-            nan_count = df_diff[col].isna().sum()
-            if nan_count > 0:
-                print(f"  - {col}: {nan_count} NaN values")
-        
         # ✅ ทำความสะอาดข้อมูลก่อน update - แปลง NaN เป็น None
-        print("🧹 Cleaning data before update...")
         for col in df_diff.columns:
             if df_diff[col].dtype in ['float64', 'int64']:
-                nan_count = df_diff[col].isna().sum()
-                if nan_count > 0:
-                    print(f"  🔄 Converting {nan_count} NaN values to None in {col}")
-                    df_diff[col] = df_diff[col].where(pd.notna(df_diff[col]), None)
+                df_diff[col] = df_diff[col].where(pd.notna(df_diff[col]), None)
             elif df_diff[col].dtype == 'object':
                 df_diff[col] = df_diff[col].astype(str)
                 nan_mask = df_diff[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-                nan_count = nan_mask.sum()
-                if nan_count > 0:
-                    print(f"  🔄 Converting {nan_count} string NaN values to None in {col}")
-                    df_diff.loc[nan_mask, col] = None
+                df_diff.loc[nan_mask, col] = None
         
-        print(f"📝 Updating {len(df_diff)} existing records in batches...")
+        print(f"📝 Updating {len(df_diff)} existing records...")
         
-        # ใช้ batch size 1000 แถวต่อครั้ง
-        batch_size = 5000
+        # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
+        batch_size = 1000
         total_batches = (len(df_diff) + batch_size - 1) // batch_size
         
-        with target_engine.begin() as conn:
-            for i in range(0, len(df_diff), batch_size):
-                batch_df = df_diff.iloc[i:i+batch_size]
-                batch_num = (i // batch_size) + 1
-                print(f"  📦 Processing update batch {batch_num}/{total_batches} ({len(batch_df)} records)")
-                
-                # ✅ ตรวจสอบและทำความสะอาดข้อมูลก่อนแปลงเป็น records
-                print(f"    🔍 Checking update batch {batch_num} data...")
-                for col in batch_df.columns:
-                    if col in ['payment_amount', 'installment_amount', 'total_paid', 'late_fee']:
-                        nan_count = batch_df[col].isna().sum()
-                        if nan_count > 0:
-                            print(f"      ⚠️ Found {nan_count} NaN values in {col}")
-                            # แปลง NaN เป็น None
-                            batch_df[col] = batch_df[col].where(pd.notna(batch_df[col]), None)
-                
-                # ใช้ executemany สำหรับ batch update
-                records = batch_df.to_dict(orient='records')
-                
-                # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
-                print(f"    🧹 Cleaning {len(records)} records...")
-                records = clean_records_for_db(records)
-                
-                stmt = pg_insert(metadata).values(records)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name not in pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=pk_column,
-                    set_=update_columns
-                )
-                conn.execute(stmt)
+        # ✅ ใช้ connection แยกสำหรับแต่ละ batch
+        for i in range(0, len(df_diff), batch_size):
+            batch_df = df_diff.iloc[i:i+batch_size]
+            batch_num = (i // batch_size) + 1
+            print(f"  📦 Processing update batch {batch_num}/{total_batches} ({len(batch_df)} records)")
+            
+            # ใช้ executemany สำหรับ batch update
+            records = batch_df.to_dict(orient='records')
+            
+            # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
+            records = clean_records_for_db(records)
+            
+            # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    with target_engine.begin() as conn:
+                        # ตั้งค่า timeout
+                        conn.execute("SET statement_timeout = 300000")  # 5 minutes
+                        conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                        
+                        stmt = pg_insert(metadata).values(records)
+                        update_columns = {
+                            c.name: stmt.excluded[c.name]
+                            for c in metadata.columns
+                            if c.name not in pk_column
+                        }
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=pk_column,
+                            set_=update_columns
+                        )
+                        conn.execute(stmt)
+                    
+                    print(f"    ✅ Update batch {batch_num} completed successfully")
+                    break
+                    
+                except Exception as e:
+                    retry_count += 1
+                    print(f"    ❌ Error updating batch {batch_num} (attempt {retry_count}/{max_retries}): {e}")
+                    
+                    if retry_count >= max_retries:
+                        print(f"    ⚠️ Max retries reached for update batch {batch_num}. Skipping this batch.")
+                        break
+                    
+                    # รอสักครู่ก่อนลองใหม่
+                    time.sleep(2 ** retry_count)  # Exponential backoff
 
     print("✅ Insert/update completed.")
+    
+    # ✅ ปิด connections หลังจากเสร็จสิ้น
+    try:
+        source_engine.dispose()
+        task_engine.dispose()
+        target_engine.dispose()
+        print("✅ All database connections closed successfully")
+    except Exception as e:
+        print(f"⚠️ Error closing database connections: {e}")
 
 @job
 def fact_installment_payments_etl():
