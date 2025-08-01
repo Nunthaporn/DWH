@@ -4,12 +4,11 @@ import numpy as np
 import os
 import re
 import time
-from datetime import datetime
+import gc
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from datetime import datetime, timedelta
 
 # ✅ Load env
 load_dotenv()
@@ -58,101 +57,203 @@ def extract_installment_data():
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
 
+    # ✅ สร้าง engines ใหม่สำหรับแต่ละ query เพื่อหลีกเลี่ยง PendingRollbackError
+    def create_fresh_engine(engine_url, engine_name):
+        """สร้าง engine ใหม่สำหรับแต่ละ query"""
+        try:
+            fresh_engine = create_engine(
+                engine_url,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=1800,
+                pool_pre_ping=True,
+                echo=False
+            )
+            return fresh_engine
+        except Exception as e:
+            print(f"❌ Error creating fresh {engine_name} engine: {e}")
+            return None
+
     try:
         print("🔄 Loading data from databases...")
         
-        # ✅ เพิ่ม WHERE clause เพื่อโหลดเฉพาะข้อมูลที่จำเป็น
-        df_plan = pd.read_sql(f"""
-            SELECT quo_num
-            FROM fin_system_select_plan
-            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
-            AND type_insure IN ('ประกันรถ', 'ตรอ')
-        """, source_engine)
+        # ✅ สร้าง fresh engines สำหรับแต่ละ query
+        source_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+        task_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
+        
+        # ✅ โหลดข้อมูลทีละส่วนพร้อม fresh engines
+        print("📊 Loading plan data...")
+        fresh_source_1 = create_fresh_engine(source_url, "source_1")
+        if fresh_source_1:
+            try:
+                df_plan = pd.read_sql(f"""
+                    SELECT quo_num
+                    FROM fin_system_select_plan
+                    WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+                    AND type_insure IN ('ประกันรถ', 'ตรอ')
+                """, fresh_source_1)
+                fresh_source_1.dispose()
+            except Exception as e:
+                print(f"❌ Error loading plan data: {e}")
+                fresh_source_1.dispose()
+                df_plan = pd.DataFrame()
+        else:
+            df_plan = pd.DataFrame()
 
-        # ✅ โหลดเฉพาะข้อมูลที่มี quo_num ใน df_plan
+        # ✅ โหลด installment data
+        df_installment = pd.DataFrame()
         if not df_plan.empty:
-            quo_nums = "','".join(df_plan['quo_num'].dropna().astype(str))
-            df_installment = pd.read_sql(f"""
-                SELECT quo_num, money_one, money_two, money_three, money_four,
-                       money_five, money_six, money_seven, money_eight, money_nine,
-                       money_ten, money_eleven, money_twelve,
-                       date_one, date_two, date_three, date_four, date_five,
-                       date_six, date_seven, date_eight, date_nine, date_ten,
-                       date_eleven, date_twelve, numpay
-                FROM fin_installment
-                WHERE quo_num IN ('{quo_nums}')
-            """, source_engine)
+            print("📊 Loading installment data...")
+            fresh_source_2 = create_fresh_engine(source_url, "source_2")
+            if fresh_source_2:
+                try:
+                    quo_nums = "','".join(df_plan['quo_num'].dropna().astype(str))
+                    df_installment = pd.read_sql(f"""
+                        SELECT quo_num, money_one, money_two, money_three, money_four,
+                               money_five, money_six, money_seven, money_eight, money_nine,
+                               money_ten, money_eleven, money_twelve,
+                               date_one, date_two, date_three, date_four, date_five,
+                               date_six, date_seven, date_eight, date_nine, date_ten,
+                               date_eleven, date_twelve, numpay
+                        FROM fin_installment
+                        WHERE quo_num IN ('{quo_nums}')
+                    """, fresh_source_2)
+                    fresh_source_2.dispose()
+                except Exception as e:
+                    print(f"❌ Error loading installment data: {e}")
+                    fresh_source_2.dispose()
+                    df_installment = pd.DataFrame()
+
+        # ✅ โหลด order data
+        print("📊 Loading order data...")
+        fresh_task_1 = create_fresh_engine(task_url, "task_1")
+        if fresh_task_1:
+            try:
+                df_order = pd.read_sql("""
+                    SELECT quo_num, order_number
+                    FROM fin_order
+                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+                """, fresh_task_1)
+                fresh_task_1.dispose()
+            except Exception as e:
+                print(f"❌ Error loading order data: {e}")
+                fresh_task_1.dispose()
+                df_order = pd.DataFrame()
         else:
-            df_installment = pd.DataFrame()
+            df_order = pd.DataFrame()
 
-        df_order = pd.read_sql("""
-            SELECT quo_num, order_number
-            FROM fin_order
-            WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-        """, task_engine)
-
-        # ✅ โหลดเฉพาะข้อมูลที่มี order_number ใน df_order
+        # ✅ โหลด finance และ bill data
+        df_finance = pd.DataFrame()
+        df_bill = pd.DataFrame()
         if not df_order.empty:
-            order_nums = "','".join(df_order['order_number'].dropna().astype(str))
-            df_finance = pd.read_sql(f"""
-                SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
-                       datepay_five, datepay_six, datepay_seven, datepay_eight,
-                       datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
-                       moneypay_one, moneypay_two, moneypay_three, moneypay_four,
-                       moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
-                       moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
-                       numpay
-                FROM fin_finance
-                WHERE order_number IN ('{order_nums}')
-            """, task_engine)
+            print("📊 Loading finance and bill data...")
+            fresh_task_2 = create_fresh_engine(task_url, "task_2")
+            if fresh_task_2:
+                try:
+                    order_nums = "','".join(df_order['order_number'].dropna().astype(str))
+                    
+                    df_finance = pd.read_sql(f"""
+                        SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
+                               datepay_five, datepay_six, datepay_seven, datepay_eight,
+                               datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
+                               moneypay_one, moneypay_two, moneypay_three, moneypay_four,
+                               moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
+                               moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
+                               numpay
+                        FROM fin_finance
+                        WHERE order_number IN ('{order_nums}')
+                    """, fresh_task_2)
 
-            df_bill = pd.read_sql(f"""
-                SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
-                       bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
-                       bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
-                FROM fin_bill
-                WHERE order_number IN ('{order_nums}')
-            """, task_engine)
+                    df_bill = pd.read_sql(f"""
+                        SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
+                               bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
+                               bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
+                        FROM fin_bill
+                        WHERE order_number IN ('{order_nums}')
+                    """, fresh_task_2)
+                    fresh_task_2.dispose()
+                except Exception as e:
+                    print(f"❌ Error loading finance/bill data: {e}")
+                    fresh_task_2.dispose()
+                    df_finance = pd.DataFrame()
+                    df_bill = pd.DataFrame()
+
+        # ✅ โหลด late fee data
+        print("📊 Loading late fee data...")
+        fresh_task_3 = create_fresh_engine(task_url, "task_3")
+        if fresh_task_3:
+            try:
+                df_late_fee = pd.read_sql("""
+                    SELECT orderNumber, penaltyPay, numPay
+                    FROM FIN_Account_AttachSlip_PathImageSlip
+                    WHERE checkPay IN ('ค่าปรับ', 'ค่างวด/ค่าปรับ')
+                """, fresh_task_3)
+                fresh_task_3.dispose()
+            except Exception as e:
+                print(f"❌ Error loading late fee data: {e}")
+                fresh_task_3.dispose()
+                df_late_fee = pd.DataFrame()
         else:
-            df_finance = pd.DataFrame()
-            df_bill = pd.DataFrame()
+            df_late_fee = pd.DataFrame()
 
-        df_late_fee = pd.read_sql("""
-            SELECT orderNumber, penaltyPay, numPay
-            FROM FIN_Account_AttachSlip_PathImageSlip
-            WHERE checkPay IN ('ค่าปรับ', 'ค่างวด/ค่าปรับ')
-        """, task_engine)
-
-        df_test = pd.read_sql("""
-            SELECT quo_num
-            FROM fin_system_select_plan
-            WHERE name IN ('ทดสอบ','test')
-              AND type_insure IN ('ประกันรถ', 'ตรอ')
-        """, source_engine)
+        # ✅ โหลด test data
+        print("📊 Loading test data...")
+        fresh_source_3 = create_fresh_engine(source_url, "source_3")
+        if fresh_source_3:
+            try:
+                df_test = pd.read_sql("""
+                    SELECT quo_num
+                    FROM fin_system_select_plan
+                    WHERE name IN ('ทดสอบ','test')
+                      AND type_insure IN ('ประกันรถ', 'ตรอ')
+                """, fresh_source_3)
+                fresh_source_3.dispose()
+            except Exception as e:
+                print(f"❌ Error loading test data: {e}")
+                fresh_source_3.dispose()
+                df_test = pd.DataFrame()
+        else:
+            df_test = pd.DataFrame()
         
         # ✅ ลด memory usage โดยการลบข้อมูลที่ไม่จำเป็น
-        import gc
         gc.collect()
         
     except Exception as e:
         print(f"❌ Error during data extraction: {e}")
-        # ✅ Rollback connections เพื่อแก้ปัญหา PendingRollbackError
-        for engine_name, engine in [("source", source_engine), ("task", task_engine), ("target", target_engine)]:
-            try:
-                with engine.connect() as conn:
-                    conn.rollback()
-                print(f"✅ Rollback successful for {engine_name} engine")
-            except Exception as rollback_error:
-                print(f"⚠️ Rollback failed for {engine_name} engine: {rollback_error}")
+        # ✅ ปิด engines ทั้งหมดในกรณีที่เกิด error
+        engines_to_dispose = []
         
-        # ✅ ปิด connections ทั้งหมด
+        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+        for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
+                         'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
+            if var_name in locals():
+                engine = locals()[var_name]
+                if engine is not None:
+                    engines_to_dispose.append((var_name, engine))
+        
+        for engine_name, engine in engines_to_dispose:
+            try:
+                engine.dispose()
+                print(f"✅ {engine_name} engine disposed successfully")
+            except Exception as dispose_error:
+                print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
+        
+        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
         try:
-            source_engine.dispose()
-            task_engine.dispose()
-            target_engine.dispose()
-            print("✅ All engines disposed successfully")
-        except Exception as dispose_error:
-            print(f"⚠️ Engine disposal failed: {dispose_error}")
+            # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+            for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
+                             'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
+                if var_name in locals():
+                    engine = locals()[var_name]
+                    if engine is not None:
+                        try:
+                            engine.dispose()
+                            print(f"✅ {var_name} engine disposed successfully in exception handler")
+                        except Exception as dispose_error:
+                            print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error}")
+        except Exception as cleanup_error:
+            print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
         
         raise e
 
@@ -160,6 +261,40 @@ def extract_installment_data():
     print(f"📦 Data loaded: plan({df_plan.shape[0]}), installment({df_installment.shape[0]}), "
           f"order({df_order.shape[0]}), finance({df_finance.shape[0]}), "
           f"bill({df_bill.shape[0]}), late_fee({df_late_fee.shape[0]}), test({df_test.shape[0]})")
+
+    # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิด
+    engines_to_check = []
+    
+    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+    for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
+                     'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
+        if var_name in locals():
+            engine = locals()[var_name]
+            if engine is not None:
+                engines_to_check.append((var_name, engine))
+    
+    for engine_name, engine in engines_to_check:
+        try:
+            engine.dispose()
+            print(f"✅ {engine_name} engine disposed successfully")
+        except Exception as dispose_error:
+            print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
+
+    # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วนท้าย
+    try:
+        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+        for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
+                         'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
+            if var_name in locals():
+                engine = locals()[var_name]
+                if engine is not None:
+                    try:
+                        engine.dispose()
+                        print(f"✅ {var_name} engine disposed successfully")
+                    except Exception as dispose_error:
+                        print(f"⚠️ {var_name} engine disposal failed: {dispose_error}")
+    except Exception as e:
+        print(f"⚠️ Error during final engine cleanup: {e}")
 
     return df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test
 
@@ -573,17 +708,48 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
     today_str = datetime.now().strftime('%Y-%m-%d')
 
+    # ✅ สร้าง fresh target engine สำหรับการโหลดข้อมูล
+    target_url = f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    
+    def create_fresh_target_engine():
+        """สร้าง fresh target engine สำหรับ PostgreSQL"""
+        try:
+            fresh_target = create_engine(
+                target_url,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=1800,
+                pool_pre_ping=True,
+                echo=False,
+                connect_args={
+                    "connect_timeout": 30,
+                    "application_name": "fact_installment_payments_etl",
+                    "options": "-c statement_timeout=300000 -c idle_in_transaction_session_timeout=300000"
+                }
+            )
+            return fresh_target
+        except Exception as e:
+            print(f"❌ Error creating fresh target engine: {e}")
+            return None
+
     # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL - เพิ่มการจัดการ connection
     df_existing = pd.DataFrame()
     max_retries = 3
     retry_count = 0
     
     while retry_count < max_retries:
+        fresh_target = create_fresh_target_engine()
+        if not fresh_target:
+            print("⚠️ Failed to create fresh target engine. Proceeding without existing data comparison.")
+            df_existing = pd.DataFrame()
+            break
+            
         try:
             print(f"🔄 Attempting to load existing data (attempt {retry_count + 1}/{max_retries})...")
             
             # สร้าง connection ใหม่ทุกครั้ง
-            with target_engine.connect() as conn:
+            with fresh_target.connect() as conn:
                 # ตั้งค่า timeout และ connection parameters
                 conn.execute("SET statement_timeout = 300000")  # 5 minutes
                 conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
@@ -594,11 +760,34 @@ def load_installment_data(df: pd.DataFrame):
                 )
             
             print(f"📊 Existing data loaded successfully: {len(df_existing)} rows")
+            fresh_target.dispose()
             break
             
         except Exception as e:
             retry_count += 1
             print(f"❌ Error loading existing data (attempt {retry_count}/{max_retries}): {e}")
+            
+            # ปิด fresh engine ทันทีเมื่อเกิด error
+            try:
+                fresh_target.dispose()
+                print("✅ Fresh target engine disposed successfully after error")
+            except Exception as dispose_error:
+                print(f"⚠️ Error disposing fresh target engine: {dispose_error}")
+                
+                # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
+                try:
+                    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+                    for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
+                        if var_name in locals():
+                            engine = locals()[var_name]
+                            if engine is not None:
+                                try:
+                                    engine.dispose()
+                                    print(f"✅ {var_name} engine disposed successfully in exception handler")
+                                except Exception as dispose_error2:
+                                    print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
+                except Exception as cleanup_error:
+                    print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
             
             if retry_count >= max_retries:
                 print("⚠️ Max retries reached. Proceeding without existing data comparison.")
@@ -654,8 +843,46 @@ def load_installment_data(df: pd.DataFrame):
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff)} rows")
 
+    # ✅ สร้าง fresh target engine สำหรับ metadata และ operations
+    fresh_target_ops = create_fresh_target_engine()
+    if not fresh_target_ops:
+        print("❌ Failed to create fresh target engine for operations. Exiting.")
+        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิด
+        engines_to_check = []
+        
+        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+        for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update']:
+            if var_name in locals():
+                engine = locals()[var_name]
+                if engine is not None:
+                    engines_to_check.append((var_name, engine))
+        
+        for engine_name, engine in engines_to_check:
+            try:
+                engine.dispose()
+                print(f"✅ {engine_name} engine disposed successfully")
+            except Exception as dispose_error:
+                print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
+        
+        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
+        try:
+            # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+            for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
+                if var_name in locals():
+                    engine = locals()[var_name]
+                    if engine is not None:
+                        try:
+                            engine.dispose()
+                            print(f"✅ {var_name} engine disposed successfully in exception handler")
+                        except Exception as dispose_error:
+                            print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error}")
+        except Exception as cleanup_error:
+            print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
+        
+        return
+    
     # ✅ Load table metadata
-    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+    metadata = Table(table_name, MetaData(), autoload_with=fresh_target_ops)
 
     # ✅ Insert - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_to_insert.empty:
@@ -694,13 +921,19 @@ def load_installment_data(df: pd.DataFrame):
                 # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
                 records = clean_records_for_db(records)
                 
+                # ✅ สร้าง fresh engine สำหรับแต่ละ batch
+                fresh_target_batch = create_fresh_target_engine()
+                if not fresh_target_batch:
+                    print(f"    ❌ Failed to create fresh target engine for batch {batch_num}. Skipping this batch.")
+                    continue
+                
                 # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
                 max_retries = 3
                 retry_count = 0
                 
                 while retry_count < max_retries:
                     try:
-                        with target_engine.begin() as conn:
+                        with fresh_target_batch.begin() as conn:
                             # ตั้งค่า timeout
                             conn.execute("SET statement_timeout = 300000")  # 5 minutes
                             conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
@@ -720,6 +953,7 @@ def load_installment_data(df: pd.DataFrame):
                             conn.execute(stmt)
                         
                         print(f"    ✅ Batch {batch_num} inserted successfully")
+                        fresh_target_batch.dispose()
                         break
                         
                     except Exception as e:
@@ -728,6 +962,26 @@ def load_installment_data(df: pd.DataFrame):
                         
                         if retry_count >= max_retries:
                             print(f"    ⚠️ Max retries reached for batch {batch_num}. Skipping this batch.")
+                            try:
+                                fresh_target_batch.dispose()
+                                print(f"    ✅ Fresh target batch engine disposed successfully after max retries")
+                            except Exception as dispose_error:
+                                print(f"    ⚠️ Error disposing fresh target engine for batch {batch_num}: {dispose_error}")
+                                
+                                # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
+                                try:
+                                    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+                                    for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
+                                        if var_name in locals():
+                                            engine = locals()[var_name]
+                                            if engine is not None:
+                                                try:
+                                                    engine.dispose()
+                                                    print(f"    ✅ {var_name} engine disposed successfully in exception handler")
+                                                except Exception as dispose_error2:
+                                                    print(f"    ⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
+                                except Exception as cleanup_error:
+                                    print(f"    ⚠️ Error during exception handler engine cleanup: {cleanup_error}")
                             break
                         
                         # รอสักครู่ก่อนลองใหม่
@@ -764,13 +1018,19 @@ def load_installment_data(df: pd.DataFrame):
             # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
             records = clean_records_for_db(records)
             
+            # ✅ สร้าง fresh engine สำหรับแต่ละ update batch
+            fresh_target_update = create_fresh_target_engine()
+            if not fresh_target_update:
+                print(f"    ❌ Failed to create fresh target engine for update batch {batch_num}. Skipping this batch.")
+                continue
+            
             # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
             max_retries = 3
             retry_count = 0
             
             while retry_count < max_retries:
                 try:
-                    with target_engine.begin() as conn:
+                    with fresh_target_update.begin() as conn:
                         # ตั้งค่า timeout
                         conn.execute("SET statement_timeout = 300000")  # 5 minutes
                         conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
@@ -788,6 +1048,7 @@ def load_installment_data(df: pd.DataFrame):
                         conn.execute(stmt)
                     
                     print(f"    ✅ Update batch {batch_num} completed successfully")
+                    fresh_target_update.dispose()
                     break
                     
                 except Exception as e:
@@ -796,6 +1057,26 @@ def load_installment_data(df: pd.DataFrame):
                     
                     if retry_count >= max_retries:
                         print(f"    ⚠️ Max retries reached for update batch {batch_num}. Skipping this batch.")
+                        try:
+                            fresh_target_update.dispose()
+                            print(f"    ✅ Fresh target update engine disposed successfully after max retries")
+                        except Exception as dispose_error:
+                            print(f"    ⚠️ Error disposing fresh target engine for update batch {batch_num}: {dispose_error}")
+                            
+                            # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
+                            try:
+                                # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+                                for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
+                                    if var_name in locals():
+                                        engine = locals()[var_name]
+                                        if engine is not None:
+                                            try:
+                                                engine.dispose()
+                                                print(f"    ✅ {var_name} engine disposed successfully in exception handler")
+                                            except Exception as dispose_error2:
+                                                print(f"    ⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
+                            except Exception as cleanup_error:
+                                print(f"    ⚠️ Error during exception handler engine cleanup: {cleanup_error}")
                         break
                     
                     # รอสักครู่ก่อนลองใหม่
@@ -803,14 +1084,45 @@ def load_installment_data(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
     
-    # ✅ ปิด connections หลังจากเสร็จสิ้น
+    # ✅ ปิด fresh target engine หลังจากเสร็จสิ้น
     try:
-        source_engine.dispose()
-        task_engine.dispose()
-        target_engine.dispose()
-        print("✅ All database connections closed successfully")
+        if 'fresh_target_ops' in locals() and fresh_target_ops:
+            fresh_target_ops.dispose()
+            print("✅ Fresh target engine disposed successfully")
     except Exception as e:
-        print(f"⚠️ Error closing database connections: {e}")
+        print(f"⚠️ Error disposing fresh target engine: {e}")
+    
+    # ✅ ตรวจสอบและปิด engines อื่นๆ ที่อาจยังไม่ได้ปิด
+    engines_to_check = []
+    
+    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+    for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update']:
+        if var_name in locals():
+            engine = locals()[var_name]
+            if engine is not None:
+                engines_to_check.append((var_name, engine))
+    
+    for engine_name, engine in engines_to_check:
+        try:
+            engine.dispose()
+            print(f"✅ {engine_name} engine disposed successfully")
+        except Exception as dispose_error:
+            print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
+    
+    # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วนท้าย
+    try:
+        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
+        for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
+            if var_name in locals():
+                engine = locals()[var_name]
+                if engine is not None:
+                    try:
+                        engine.dispose()
+                        print(f"✅ {var_name} engine disposed successfully")
+                    except Exception as dispose_error:
+                        print(f"⚠️ {var_name} engine disposal failed: {dispose_error}")
+    except Exception as e:
+        print(f"⚠️ Error during final engine cleanup: {e}")
 
 @job
 def fact_installment_payments_etl():
