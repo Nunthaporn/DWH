@@ -278,7 +278,7 @@ def clean_commission_data(data_tuple):
     nan_counts = df.isnull().sum()
     if nan_counts.sum() > 0:
         print("\n⚠️ Found NaN values after cleaning:")
-        for col, count in nan_counts[nan_counts.sum() > 0].items():
+        for col, count in nan_counts[nan_counts > 0].items():
             print(f"  - {col}: {count} NaN values")
     
     # Check for infinite values
