@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text, inspect
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
+from datetime import datetime, timedelta
 
 # ✅ Load .env
 load_dotenv()
@@ -58,10 +59,18 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 
 @op
 def extract_car_data():
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+
     query_pay = """
         SELECT quo_num, id_motor1, id_motor2, datestart
         FROM fin_system_pay
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query_pay, source_engine)
@@ -71,7 +80,7 @@ def extract_car_data():
                yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
                weight_car, cc_car, color_car, datestart
         FROM fin_system_select_plan
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_plan = pd.read_sql(query_plan, source_engine)
@@ -377,12 +386,15 @@ def load_car_data(df: pd.DataFrame):
     
     print(f"📊 Final data shape after NaN check: {df.shape}")
 
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
-    def load_existing_data():
-        with target_engine.connect() as conn:
-            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
-    
-    df_existing = retry_db_operation(load_existing_data)
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
 
     # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
