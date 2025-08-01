@@ -26,13 +26,14 @@ def extract_order_type_data():
     query_plan = """
         SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     query_order = """
         SELECT quo_num, worksend
         FROM fin_order
     """
+    
     df_plan = pd.read_sql(query_plan, source_engine)
     df_order = pd.read_sql(query_order, source_engine_task)
 

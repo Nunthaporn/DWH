@@ -25,7 +25,7 @@ def extract_payment_data():
     query1 = """
         SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
         FROM fin_system_pay
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query1, source_engine)
