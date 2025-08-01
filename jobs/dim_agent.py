@@ -534,22 +534,21 @@ def load_to_wh(df: pd.DataFrame):
             df_diff_renamed = pd.DataFrame()
         else:
             update_cols = [f"{col}_new" for col in compare_cols]
-        all_cols = [pk_column] + update_cols
+            all_cols = [pk_column] + update_cols
                 
-
-    # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
-    missing_cols = [col for col in all_cols if col not in df_diff.columns]
-    if missing_cols:
-        print(f"⚠️ Missing columns in df_diff: {missing_cols}")
-        # ใช้เฉพาะคอลัมน์ที่มีอยู่
-        available_cols = [col for col in all_cols if col in df_diff.columns]
-        df_diff_renamed = df_diff[available_cols].copy()
-        # แปลงชื่อคอลัมน์กลับ
-        available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
-        df_diff_renamed.columns = [pk_column] + available_compare_cols
-    else:
-        df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols
+            # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
+            missing_cols = [col for col in all_cols if col not in df_diff.columns]
+            if missing_cols:
+                print(f"⚠️ Missing columns in df_diff: {missing_cols}")
+                # ใช้เฉพาะคอลัมน์ที่มีอยู่
+                available_cols = [col for col in all_cols if col in df_diff.columns]
+                df_diff_renamed = df_diff[available_cols].copy()
+                # แปลงชื่อคอลัมน์กลับ
+                available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
+                df_diff_renamed.columns = [pk_column] + available_compare_cols
+            else:
+                df_diff_renamed = df_diff[all_cols].copy()
+            df_diff_renamed.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
