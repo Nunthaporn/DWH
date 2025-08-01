@@ -92,12 +92,80 @@ def extract_agent_data():
 
     query_career = "SELECT cuscode, career FROM policy_register"
     df_career = pd.read_sql(query_career, source_engine)
+    
+    # ✅ Debug: ตรวจสอบข้อมูลในตาราง policy_register
+    print(f"🔍 Policy register analysis:")
+    print(f"   - Total records in policy_register: {len(df_career)}")
+    print(f"   - Unique cuscode in policy_register: {df_career['cuscode'].nunique()}")
+    print(f"   - Career values: {df_career['career'].value_counts().head(10)}")
+    
+    # ✅ ตรวจสอบ cuscode ที่ซ้ำกันใน policy_register
+    duplicate_cuscode = df_career[df_career['cuscode'].duplicated(keep=False)]
+    if len(duplicate_cuscode) > 0:
+        print(f"   - Duplicate cuscode in policy_register: {len(duplicate_cuscode)}")
+        print(f"   - Sample duplicates:")
+        print(duplicate_cuscode.head(5))
+    
+    # ✅ ตรวจสอบความสัมพันธ์ระหว่าง cuscode
+    main_cuscode_set = set(df_main['cuscode'])
+    career_cuscode_set = set(df_career['cuscode'])
+    
+    print(f"🔍 Cuscode relationship analysis:")
+    print(f"   - Unique cuscode in wp_users: {len(main_cuscode_set)}")
+    print(f"   - Unique cuscode in policy_register: {len(career_cuscode_set)}")
+    print(f"   - Cuscode in both tables: {len(main_cuscode_set & career_cuscode_set)}")
+    print(f"   - Cuscode only in wp_users: {len(main_cuscode_set - career_cuscode_set)}")
+    print(f"   - Cuscode only in policy_register: {len(career_cuscode_set - main_cuscode_set)}")
+    
+    # แสดงตัวอย่าง cuscode ที่มีเฉพาะใน wp_users
+    only_in_main = main_cuscode_set - career_cuscode_set
+    if len(only_in_main) > 0:
+        sample_only_main = df_main[df_main['cuscode'].isin(list(only_in_main)[:5])][['cuscode', 'name']]
+        print(f"🔍 Sample cuscode only in wp_users:")
+        print(sample_only_main)
 
     df_merged = pd.merge(df_main, df_career, on='cuscode', how='left')
 
     print("📦 df_main:", df_main.shape)
     print("📦 df_career:", df_career.shape)
     print("📦 df_merged:", df_merged.shape)
+    
+    # ✅ Debug: ตรวจสอบข้อมูล career
+    career_null_count = df_merged['career'].isna().sum()
+    career_total_count = len(df_merged)
+    print(f"🔍 Career data analysis:")
+    print(f"   - Total records: {career_total_count}")
+    print(f"   - Records with career: {career_total_count - career_null_count}")
+    print(f"   - Records without career (NaN): {career_null_count}")
+    print(f"   - Percentage with career: {((career_total_count - career_null_count) / career_total_count * 100):.2f}%")
+    
+    # ✅ แสดงตัวอย่างข้อมูลที่ไม่มี career
+    if career_null_count > 0:
+        sample_null_career = df_merged[df_merged['career'].isna()][['cuscode', 'name']].head(5)
+        print(f"🔍 Sample records without career:")
+        print(sample_null_career)
+    
+    # ✅ แสดงตัวอย่างข้อมูลที่มี career
+    career_not_null = df_merged[df_merged['career'].notna()]
+    if len(career_not_null) > 0:
+        sample_with_career = career_not_null[['cuscode', 'name', 'career']].head(5)
+        print(f"🔍 Sample records with career:")
+        print(sample_with_career)
+    
+    # ✅ ทำความสะอาดข้อมูล career
+    print(f"🔍 Cleaning career data...")
+    
+    # แปลง career เป็น string และทำความสะอาด
+    df_merged['career'] = df_merged['career'].astype(str)
+    df_merged['career'] = df_merged['career'].str.strip()
+    
+    # ตั้งค่า default สำหรับ career ที่เป็น NaN หรือ 'nan'
+    df_merged.loc[df_merged['career'].isin(['nan', 'None', '', 'NULL']), 'career'] = 'ไม่ระบุ'
+    
+    # แสดงผลลัพธ์หลังทำความสะอาด
+    career_after_clean = df_merged['career'].value_counts()
+    print(f"🔍 Career values after cleaning:")
+    print(career_after_clean.head(10))
 
     return df_merged
 
