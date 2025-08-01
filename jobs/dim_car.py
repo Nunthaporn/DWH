@@ -363,12 +363,15 @@ def clean_car_data(df: pd.DataFrame):
         print("✅ No NaN values found after cleaning")
     
     # ✅ ตรวจสอบ car_id ที่เป็น NaN (สำคัญที่สุด)
-    car_id_nan = df_cleaned['car_id'].isna().sum()
-    if car_id_nan > 0:
-        print(f"⚠️ WARNING: {car_id_nan} records have NaN car_id")
-        # ลบข้อมูลที่มี car_id เป็น NaN
-        df_cleaned = df_cleaned[df_cleaned['car_id'].notna()].copy()
-        print(f"✅ Removed {car_id_nan} records with NaN car_id")
+    if 'car_id' in df_cleaned.columns:
+        car_id_nan = df_cleaned['car_id'].isna().sum()
+        if car_id_nan > 0:
+            print(f"⚠️ WARNING: {car_id_nan} records have NaN car_id")
+            # ลบข้อมูลที่มี car_id เป็น NaN
+            df_cleaned = df_cleaned[df_cleaned['car_id'].notna()].copy()
+            print(f"✅ Removed {car_id_nan} records with NaN car_id")
+    else:
+        print("⚠️ Column 'car_id' not found in DataFrame (skip NaN check and removal)")
     
     print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
 
@@ -574,16 +577,16 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_car_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_car_data()
+    print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_car_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_car_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_car.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    output_path = "dim_car.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
 
 #     load_car_data(df_clean)
 #     print("🎉 Test completed! Data upserted to dim_car.")
