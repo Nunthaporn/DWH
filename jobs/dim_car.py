@@ -408,26 +408,43 @@ def load_car_data(df: pd.DataFrame):
         and f"{col}_old" in merged.columns
     ]
 
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
-    def is_different(row):
-        for col in compare_cols:
-            val_new = row.get(f"{col}_new")
-            val_old = row.get(f"{col}_old")
-            if pd.isna(val_new) and pd.isna(val_old):
-                continue
-            if val_new != val_old:
-                return True
-        return False
+    # ✅ ตรวจสอบว่ามีคอลัมน์ที่สามารถเปรียบเทียบได้หรือไม่
+    if not compare_cols:
+        print("⚠️ No comparable columns found for update")
+        df_diff_renamed = pd.DataFrame()
+    else:
+        # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
+        def is_different(row):
+            for col in compare_cols:
+                val_new = row.get(f"{col}_new")
+                val_old = row.get(f"{col}_old")
+                if pd.isna(val_new) and pd.isna(val_old):
+                    continue
+                if val_new != val_old:
+                    return True
+            return False
 
-    # ✅ ตรวจหาความแตกต่างจริง
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+        # ✅ ตรวจหาความแตกต่างจริง
+        df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
+        if not df_diff.empty:
+            # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
+            update_cols = [f"{col}_new" for col in compare_cols]
+            all_cols = [pk_column] + update_cols
 
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols  # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+            # ✅ ตรวจสอบว่าคอลัมน์ที่ต้องการมีอยู่ใน df_diff หรือไม่
+            available_cols = [col for col in all_cols if col in df_diff.columns]
+            if len(available_cols) != len(all_cols):
+                missing_cols = set(all_cols) - set(df_diff.columns)
+                print(f"⚠️ Missing columns in df_diff: {missing_cols}")
+                print(f"🔍 Available columns: {list(df_diff.columns)}")
+            
+            df_diff_renamed = df_diff[available_cols].copy()
+            # ✅ เปลี่ยนชื่อ column ให้ตรงกับตารางจริง (ลบ _new ออก)
+            new_column_names = [pk_column] + [col.replace('_new', '') for col in available_cols if col != pk_column]
+            df_diff_renamed.columns = new_column_names
+        else:
+            df_diff_renamed = pd.DataFrame()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
