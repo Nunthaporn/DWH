@@ -207,10 +207,20 @@ def clean_car_data(df: pd.DataFrame):
             return value
         return None
 
-    df_cleaned['car_province'] = df_cleaned['car_province'].apply(clean_province)
+    if 'car_province' in df_cleaned.columns:
+        df_cleaned['car_province'] = df_cleaned['car_province'].apply(clean_province)
+    else:
+        print("⚠️ Column 'car_province' not found in DataFrame")
+        
     df_cleaned = df_cleaned.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
-    df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
+    
+    if 'car_no' in df_cleaned.columns:
+        df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
+    else:
+        print("⚠️ Column 'car_no' not found in DataFrame")
+        
+    if 'car_brand' in df_cleaned.columns:
+        df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
 
     def has_thai_chars(value):
         if pd.isnull(value):
@@ -219,10 +229,18 @@ def clean_car_data(df: pd.DataFrame):
 
     df_cleaned = df_cleaned[~df_cleaned['car_id'].apply(has_thai_chars)]
     
-    series_noise_pattern = r"^[-–_\.\/\+].*|^<=200CC$|^>250CC$|^‘NQR 75$"
+    series_noise_pattern = r"^[-–_\.\/\+].*|^<=200CC$|^>250CC$|^'NQR 75$"
 
-    df_cleaned['car_series'] = df_cleaned['car_series'].replace(series_noise_pattern, np.nan, regex=True)
-    df_cleaned['car_subseries'] = df_cleaned['car_subseries'].replace(series_noise_pattern, np.nan, regex=True)
+    # ✅ ตรวจสอบว่าคอลัมน์ car_series และ car_subseries มีอยู่หรือไม่
+    if 'car_series' in df_cleaned.columns:
+        df_cleaned['car_series'] = df_cleaned['car_series'].replace(series_noise_pattern, np.nan, regex=True)
+    else:
+        print("⚠️ Column 'car_series' not found in DataFrame")
+        
+    if 'car_subseries' in df_cleaned.columns:
+        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].replace(series_noise_pattern, np.nan, regex=True)
+    else:
+        print("⚠️ Column 'car_subseries' not found in DataFrame")
 
     def remove_leading_vowels(value):
         if pd.isnull(value):
@@ -230,11 +248,16 @@ def clean_car_data(df: pd.DataFrame):
         # ลบสระและเครื่องหมายกำกับไทยต้นข้อความ
         return re.sub(r"^[\u0E30-\u0E39\u0E47-\u0E4E\u0E3A]+", "", value.strip())
 
-    df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
-    df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
+    if 'car_series' in df_cleaned.columns:
+        df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
+    if 'car_subseries' in df_cleaned.columns:
+        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
     
     # ✅ ทำความสะอาด car_brand - ลบสระและเครื่องหมายกำกับไทยที่อยู่ด้านหน้า
-    df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(remove_leading_vowels)
+    if 'car_brand' in df_cleaned.columns:
+        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(remove_leading_vowels)
+    else:
+        print("⚠️ Column 'car_brand' not found in DataFrame")
     
     # ✅ ทำความสะอาด car_brand เพิ่มเติม - ลบเครื่องหมายพิเศษและข้อมูลที่ไม่ต้องการ
     def clean_car_brand(value):
@@ -259,19 +282,20 @@ def clean_car_data(df: pd.DataFrame):
         
         return value
     
-    df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(clean_car_brand)
+    if 'car_brand' in df_cleaned.columns:
+        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(clean_car_brand)
 
-    # ✅ Debug: แสดงตัวอย่างการทำความสะอาด car_brand
-    print("🔍 Car brand cleaning examples:")
-    sample_brands = df_cleaned['car_brand'].dropna().head(10)
-    for brand in sample_brands:
-        print(f"   - {brand}")
-    
-    # ✅ แสดงสถิติ car_brand
-    brand_stats = df_cleaned['car_brand'].value_counts().head(10)
-    print("🔍 Top 10 car brands:")
-    for brand, count in brand_stats.items():
-        print(f"   - {brand}: {count}")
+        # ✅ Debug: แสดงตัวอย่างการทำความสะอาด car_brand
+        print("🔍 Car brand cleaning examples:")
+        sample_brands = df_cleaned['car_brand'].dropna().head(10)
+        for brand in sample_brands:
+            print(f"   - {brand}")
+        
+        # ✅ แสดงสถิติ car_brand
+        brand_stats = df_cleaned['car_brand'].value_counts().head(10)
+        print("🔍 Top 10 car brands:")
+        for brand, count in brand_stats.items():
+            print(f"   - {brand}: {count}")
 
     def clean_engine_capacity(value):
         if pd.isnull(value):
@@ -286,7 +310,10 @@ def clean_car_data(df: pd.DataFrame):
         except ValueError:
             return None
 
-    df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_engine_capacity)
+    if 'engine_capacity' in df_cleaned.columns:
+        df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_engine_capacity)
+    else:
+        print("⚠️ Column 'engine_capacity' not found in DataFrame")
 
     def clean_float_only(value):
         if pd.isnull(value):
@@ -300,13 +327,25 @@ def clean_car_data(df: pd.DataFrame):
         except ValueError:
             return None
 
-    df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_float_only)
-    df_cleaned['vehicle_weight'] = df_cleaned['vehicle_weight'].apply(clean_float_only)
-    df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
-    df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+    if 'engine_capacity' in df_cleaned.columns:
+        df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_float_only)
+    if 'vehicle_weight' in df_cleaned.columns:
+        df_cleaned['vehicle_weight'] = df_cleaned['vehicle_weight'].apply(clean_float_only)
+    else:
+        print("⚠️ Column 'vehicle_weight' not found in DataFrame")
+    if 'seat_count' in df_cleaned.columns:
+        df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+    else:
+        print("⚠️ Column 'seat_count' not found in DataFrame")
+    if 'car_year' in df_cleaned.columns:
+        df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
+    else:
+        print("⚠️ Column 'car_year' not found in DataFrame")
 
-    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce').astype('Int64')
-    df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
+    if 'seat_count' in df_cleaned.columns:
+        df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce').astype('Int64')
+    if 'car_year' in df_cleaned.columns:
+        df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
     df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True)
     df_cleaned = df_cleaned.drop_duplicates()
 
