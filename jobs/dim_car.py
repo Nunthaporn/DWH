@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np
 import re
 import os
+import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError, DisconnectionError
 
 # ✅ Load .env
 load_dotenv()
@@ -30,8 +32,29 @@ target_port = os.getenv('DB_PORT_test')
 target_db = 'fininsurance'
 
 target_engine = create_engine(
-    f"postgresql+psycopg2://{target_user}:{target_password}@{target_host}:{target_port}/{target_db}"
+    f"postgresql+psycopg2://{target_user}:{target_password}@{target_host}:{target_port}/{target_db}",
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    connect_args={
+        "connect_timeout": 30,
+        "application_name": "dim_car_etl"
+    }
 )
+
+def retry_db_operation(operation, max_retries=3, delay=2):
+    """Retry database operation with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except (OperationalError, DisconnectionError) as e:
+            if attempt == max_retries - 1:
+                raise e
+            print(f"⚠️ Database connection error (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"⏳ Retrying in {delay} seconds...")
+            time.sleep(delay)
+            delay *= 2  # Exponential backoff
 
 @op
 def extract_car_data():
@@ -309,12 +332,16 @@ def load_car_data(df: pd.DataFrame):
     pk_column = 'car_id'
 
     # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
-    with target_engine.connect() as conn:
-        inspector = inspect(conn)
-        columns = [col['name'] for col in inspector.get_columns(table_name)]
-        if 'quotation_num' not in columns:
-            print("➕ Adding missing column 'quotation_num' to dim_car")
-            conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
+    def check_and_add_column():
+        with target_engine.connect() as conn:
+            inspector = inspect(conn)
+            columns = [col['name'] for col in inspector.get_columns(table_name)]
+            if 'quotation_num' not in columns:
+                print("➕ Adding missing column 'quotation_num' to dim_car")
+                conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
+                conn.commit()
+    
+    retry_db_operation(check_and_add_column)
 
     # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
@@ -351,8 +378,11 @@ def load_car_data(df: pd.DataFrame):
     print(f"📊 Final data shape after NaN check: {df.shape}")
 
     # ✅ Load ข้อมูลเดิมจาก PostgreSQL
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    def load_existing_data():
+        with target_engine.connect() as conn:
+            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    
+    df_existing = retry_db_operation(load_existing_data)
 
     # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
@@ -403,7 +433,10 @@ def load_car_data(df: pd.DataFrame):
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
     # ✅ Load table metadata
-    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+    def load_table_metadata():
+        return Table(table_name, MetaData(), autoload_with=target_engine)
+    
+    metadata = retry_db_operation(load_table_metadata)
 
     # ✅ Insert (กรอง car_id ที่เป็น NaN)
     if not df_to_insert.empty:
@@ -421,8 +454,20 @@ def load_car_data(df: pd.DataFrame):
         if dropped > 0:
             print(f"⚠️ Skipped {dropped} records with NaN {pk_column}")
         if not df_to_insert_valid.empty:
-            with target_engine.begin() as conn:
-                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+            # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
+            df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
+            
+            def insert_operation():
+                with target_engine.begin() as conn:
+                    # ✅ แบ่งข้อมูลเป็น batch เล็กๆ เพื่อลดภาระ
+                    batch_size = 5000
+                    records = df_to_insert_clean.to_dict(orient='records')
+                    for i in range(0, len(records), batch_size):
+                        batch = records[i:i + batch_size]
+                        conn.execute(metadata.insert(), batch)
+                        print(f"✅ Inserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size}")
+            
+            retry_db_operation(insert_operation)
 
     # ✅ Update
     if not df_diff_renamed.empty:
@@ -435,19 +480,25 @@ def load_car_data(df: pd.DataFrame):
             for col, count in update_nan_cols.items():
                 print(f"   - {col}: {count} NaN values")
         
-        with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
-                stmt = pg_insert(metadata).values(**record)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name != pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_columns
-                )
-                conn.execute(stmt)
+        # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
+        df_diff_renamed_clean = df_diff_renamed.replace({np.nan: None})
+        
+        def update_operation():
+            with target_engine.begin() as conn:
+                for record in df_diff_renamed_clean.to_dict(orient='records'):
+                    stmt = pg_insert(metadata).values(**record)
+                    update_columns = {
+                        c.name: stmt.excluded[c.name]
+                        for c in metadata.columns
+                        if c.name != pk_column
+                    }
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[pk_column],
+                        set_=update_columns
+                    )
+                    conn.execute(stmt)
+        
+        retry_db_operation(update_operation)
 
     print("✅ Insert/update completed.")
 
