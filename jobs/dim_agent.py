@@ -46,8 +46,8 @@ target_engine = create_engine(
 def extract_agent_data():
     now = datetime.now()
 
-    start_time = now.replace(minute=0, second=0, microsecond=0)  
-    end_time = now.replace(minute=59, second=59, microsecond=999999) 
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
@@ -57,9 +57,9 @@ def extract_agent_data():
            user_registered,
            status, fin_new_group, fin_new_mem,
            type_agent, typebuy, user_email, name_store, address, city, district,
-           province, province_cur, area_cur, postcode, tel,date_active,card_ins_type,file_card_ins,
-           card_ins_type_life,file_card_ins_life
-    FROM wp_users 
+           province, province_cur, area_cur, postcode, tel, date_active, card_ins_type, file_card_ins,
+           card_ins_type_life, file_card_ins_life
+    FROM wp_users
     WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
         AND user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
         AND name NOT LIKE '%%ทดสอบ%%'
@@ -87,12 +87,11 @@ def extract_agent_data():
         AND cuscode NOT LIKE '%%FIN-Tester2%%';
     """
 
-
     df_main = pd.read_sql(query_main, source_engine)
 
     query_career = "SELECT cuscode, career FROM policy_register"
     df_career = pd.read_sql(query_career, source_engine)
-    
+
     # ✅ Debug: ตรวจสอบข้อมูลในตาราง policy_register
     print(f"🔍 Policy register analysis:")
     print(f"   - Total records in policy_register: {len(df_career)}")
@@ -169,6 +168,7 @@ def extract_agent_data():
 
     return df_merged
 
+
 @op
 def clean_agent_data(df: pd.DataFrame):
     # Combine region columns
@@ -187,7 +187,7 @@ def clean_agent_data(df: pd.DataFrame):
             return f"{a_str} + {b_str}"
 
     df['agent_region'] = df.apply(lambda row: combine_columns(row['fin_new_group'], row['fin_new_mem']), axis=1)
-        # ✅ กรอง row ที่ agent_region = 'TEST' ออก
+    # ✅ กรอง row ที่ agent_region = 'TEST' ออก
     df = df[df['agent_region'] != 'TEST']
     df = df.drop(columns=['fin_new_group', 'fin_new_mem'])
 
@@ -308,7 +308,7 @@ def clean_agent_data(df: pd.DataFrame):
         
         # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าชื่อ (ไม่ลบสระในชื่อจริง)
         # ตรวจสอบว่าสระด้านหน้าเป็นสระพิเศษหรือไม่
-        if name_str.startswith(('ิ', 'ี', 'ึ', 'ื', 'ุ', 'ู', '่', '้', '๊', '๋')):
+        if name_str.startswith(('ิ', 'ี', 'ึ', 'ื', 'ุ', 'ู', '่', '้', '๊', '๋')): 
             # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าเท่านั้น
             cleaned_name = re.sub(r'^[ิีึืุู่้๊๋]+', '', name_str)
         else:
@@ -440,6 +440,7 @@ def clean_agent_data(df: pd.DataFrame):
 
     return df_cleaned
 
+
 @op
 def load_to_wh(df: pd.DataFrame):
     table_name = 'dim_agent'
@@ -492,62 +493,63 @@ def load_to_wh(df: pd.DataFrame):
         print(f"🔍 Merged columns: {list(merged.columns)}")
         print(f"🔍 New data columns: {list(df.columns)}")
 
-        exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
-        compare_cols = [
-            col for col in df.columns
-            if col not in exclude_columns
-            and f"{col}_new" in merged.columns
-            and f"{col}_old" in merged.columns
-        ]
+    exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
+    ]
 
-        # ✅ Debug: แสดงคอลัมน์ที่จะเปรียบเทียบ
-        print(f"🔍 Compare columns: {compare_cols}")
+    # ✅ Debug: แสดงคอลัมน์ที่จะเปรียบเทียบ
+    print(f"🔍 Compare columns: {compare_cols}")
         
-        # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน df และ merged
-        print(f"🔍 df columns: {list(df.columns)}")
-        print(f"🔍 merged columns with _new suffix: {[col for col in merged.columns if col.endswith('_new')]}")
-        print(f"🔍 merged columns with _old suffix: {[col for col in merged.columns if col.endswith('_old')]}")
-        
-        # ✅ ตรวจสอบว่ามีคอลัมน์ที่จะเปรียบเทียบหรือไม่
-        if not compare_cols:
-            print("⚠️ No columns to compare, skipping update")
+    # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน df และ merged
+    print(f"🔍 df columns: {list(df.columns)}")
+    print(f"🔍 merged columns with _new suffix: {[col for col in merged.columns if col.endswith('_new')]}") 
+    print(f"🔍 merged columns with _old suffix: {[col for col in merged.columns if col.endswith('_old')]}")
+
+    # ✅ ตรวจสอบว่ามีคอลัมน์ที่จะเปรียบเทียบหรือไม่
+    if not compare_cols:
+        print("⚠️ No columns to compare, skipping update")
+        df_diff_renamed = pd.DataFrame()
+    else:
+        def is_different(row):
+            for col in compare_cols:
+                val_new = row.get(f"{col}_new")
+                val_old = row.get(f"{col}_old")
+                if pd.isna(val_new) and pd.isna(val_old):
+                    continue
+                elif pd.isna(val_new) or pd.isna(val_old):
+                    return True
+                elif val_new != val_old:
+                    return True
+            return False
+
+        df_diff = merged[merged.apply(is_different, axis=1)].copy()
+            
+        # ✅ ตรวจสอบว่ามีข้อมูลที่แตกต่างหรือไม่
+        if df_diff.empty:
+            print("ℹ️ No differences found, skipping update")
             df_diff_renamed = pd.DataFrame()
         else:
-            def is_different(row):
-                for col in compare_cols:
-                    val_new = row.get(f"{col}_new")
-                    val_old = row.get(f"{col}_old")
-                    if pd.isna(val_new) and pd.isna(val_old):
-                        continue
-                    elif pd.isna(val_new) or pd.isna(val_old):
-                        return True
-                    elif val_new != val_old:
-                        return True
-                return False
-
-            df_diff = merged[merged.apply(is_different, axis=1)].copy()
-            
-            # ✅ ตรวจสอบว่ามีข้อมูลที่แตกต่างหรือไม่
-            if df_diff.empty:
-                print("ℹ️ No differences found, skipping update")
-                df_diff_renamed = pd.DataFrame()
-            else:
-                update_cols = [f"{col}_new" for col in compare_cols]
-                all_cols = [pk_column] + update_cols
+            update_cols = [f"{col}_new" for col in compare_cols]
+        all_cols = [pk_column] + update_cols
                 
-                # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
-                missing_cols = [col for col in all_cols if col not in df_diff.columns]
-                if missing_cols:
-                    print(f"⚠️ Missing columns in df_diff: {missing_cols}")
-                    # ใช้เฉพาะคอลัมน์ที่มีอยู่
-                    available_cols = [col for col in all_cols if col in df_diff.columns]
-                    df_diff_renamed = df_diff[available_cols].copy()
-                    # แปลงชื่อคอลัมน์กลับ
-                    available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
-                    df_diff_renamed.columns = [pk_column] + available_compare_cols
-                else:
-                    df_diff_renamed = df_diff[all_cols].copy()
-                    df_diff_renamed.columns = [pk_column] + compare_cols
+
+    # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
+    missing_cols = [col for col in all_cols if col not in df_diff.columns]
+    if missing_cols:
+        print(f"⚠️ Missing columns in df_diff: {missing_cols}")
+        # ใช้เฉพาะคอลัมน์ที่มีอยู่
+        available_cols = [col for col in all_cols if col in df_diff.columns]
+        df_diff_renamed = df_diff[available_cols].copy()
+        # แปลงชื่อคอลัมน์กลับ
+        available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
+        df_diff_renamed.columns = [pk_column] + available_compare_cols
+    else:
+        df_diff_renamed = df_diff[all_cols].copy()
+    df_diff_renamed.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
@@ -603,7 +605,6 @@ def load_to_wh(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
 
-    
 @job
 def dim_agent_etl():
     load_to_wh(clean_agent_data(extract_agent_data()))

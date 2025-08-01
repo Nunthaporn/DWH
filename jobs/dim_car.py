@@ -38,7 +38,7 @@ def extract_car_data():
     query_pay = """
         SELECT quo_num, id_motor1, id_motor2, datestart
         FROM fin_system_pay
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query_pay, source_engine)
@@ -48,12 +48,29 @@ def extract_car_data():
                yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
                weight_car, cc_car, color_car, datestart
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_plan = pd.read_sql(query_plan, source_engine)
 
     df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
+    
+    # ✅ ตรวจสอบค่า NaN ในข้อมูลที่ extract
+    print("🔍 NaN check in extracted data:")
+    print(f"📦 df_pay shape: {df_pay.shape}")
+    print(f"📦 df_plan shape: {df_plan.shape}")
+    print(f"📦 df_merged shape: {df_merged.shape}")
+    
+    # ตรวจสอบ NaN ในคอลัมน์สำคัญ
+    important_cols = ['id_motor2', 'idcar', 'quo_num']
+    for col in important_cols:
+        if col in df_merged.columns:
+            nan_count = df_merged[col].isna().sum()
+            if nan_count > 0:
+                print(f"⚠️ {col}: {nan_count} NaN values")
+            else:
+                print(f"✅ {col}: No NaN values")
+    
     return df_merged
 
 @op
@@ -183,6 +200,46 @@ def clean_car_data(df: pd.DataFrame):
 
     df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
     df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
+    
+    # ✅ ทำความสะอาด car_brand - ลบสระและเครื่องหมายกำกับไทยที่อยู่ด้านหน้า
+    df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(remove_leading_vowels)
+    
+    # ✅ ทำความสะอาด car_brand เพิ่มเติม - ลบเครื่องหมายพิเศษและข้อมูลที่ไม่ต้องการ
+    def clean_car_brand(value):
+        if pd.isnull(value):
+            return None
+        
+        value = str(value).strip()
+        
+        # ลบเครื่องหมายพิเศษที่อยู่ด้านหน้าและท้าย
+        value = re.sub(r'^[-–_\.\/\+"\']+', '', value)  # ลบเครื่องหมายพิเศษด้านหน้า
+        value = re.sub(r'[-–_\.\/\+"\']+$', '', value)  # ลบเครื่องหมายพิเศษด้านท้าย
+        
+        # ลบช่องว่างที่ซ้ำกัน
+        value = re.sub(r'\s+', ' ', value)
+        
+        # ลบช่องว่างที่ต้นและท้าย
+        value = value.strip()
+        
+        # ตรวจสอบว่าค่าที่เหลือมีความหมายหรือไม่
+        if value in ['', 'nan', 'None', 'NULL', 'undefined', 'UNDEFINED']:
+            return None
+        
+        return value
+    
+    df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(clean_car_brand)
+
+    # ✅ Debug: แสดงตัวอย่างการทำความสะอาด car_brand
+    print("🔍 Car brand cleaning examples:")
+    sample_brands = df_cleaned['car_brand'].dropna().head(10)
+    for brand in sample_brands:
+        print(f"   - {brand}")
+    
+    # ✅ แสดงสถิติ car_brand
+    brand_stats = df_cleaned['car_brand'].value_counts().head(10)
+    print("🔍 Top 10 car brands:")
+    for brand, count in brand_stats.items():
+        print(f"   - {brand}: {count}")
 
     def clean_engine_capacity(value):
         if pd.isnull(value):
@@ -221,6 +278,29 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True)
     df_cleaned = df_cleaned.drop_duplicates()
 
+    # ✅ ตรวจสอบค่า NaN หลังการทำความสะอาด
+    print("🔍 NaN check after cleaning:")
+    final_nan_check = df_cleaned.isna().sum()
+    final_nan_cols = final_nan_check[final_nan_check > 0]
+    
+    if len(final_nan_cols) > 0:
+        print("⚠️ Columns with NaN after cleaning:")
+        for col, count in final_nan_cols.items():
+            percentage = (count / len(df_cleaned)) * 100
+            print(f"   - {col}: {count} NaN values ({percentage:.2f}%)")
+    else:
+        print("✅ No NaN values found after cleaning")
+    
+    # ✅ ตรวจสอบ car_id ที่เป็น NaN (สำคัญที่สุด)
+    car_id_nan = df_cleaned['car_id'].isna().sum()
+    if car_id_nan > 0:
+        print(f"⚠️ WARNING: {car_id_nan} records have NaN car_id")
+        # ลบข้อมูลที่มี car_id เป็น NaN
+        df_cleaned = df_cleaned[df_cleaned['car_id'].notna()].copy()
+        print(f"✅ Removed {car_id_nan} records with NaN car_id")
+    
+    print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
+
     return df_cleaned
 
 @op
@@ -238,6 +318,37 @@ def load_car_data(df: pd.DataFrame):
 
     # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
+
+    # ✅ ตรวจสอบค่า NaN ในข้อมูลก่อนเข้า database
+    print("🔍 Checking for NaN values before database insertion:")
+    nan_check = df.isna().sum()
+    columns_with_nan = nan_check[nan_check > 0]
+    
+    if len(columns_with_nan) > 0:
+        print("⚠️ Columns with NaN values:")
+        for col, count in columns_with_nan.items():
+            print(f"   - {col}: {count} NaN values")
+        
+        # แสดงตัวอย่างข้อมูลที่มี NaN
+        print("🔍 Sample records with NaN values:")
+        for col in columns_with_nan.index:
+            sample_nan = df[df[col].isna()][[pk_column, col]].head(3)
+            if not sample_nan.empty:
+                print(f"   {col} NaN examples:")
+                for _, row in sample_nan.iterrows():
+                    print(f"     - {pk_column}: {row[pk_column]}, {col}: NaN")
+    else:
+        print("✅ No NaN values found in the data")
+    
+    # ✅ ตรวจสอบข้อมูลที่สำคัญ (car_id ไม่ควรเป็น NaN)
+    critical_nan = df[pk_column].isna().sum()
+    if critical_nan > 0:
+        print(f"⚠️ WARNING: {critical_nan} records have NaN in {pk_column} (primary key)")
+        # ลบข้อมูลที่มี car_id เป็น NaN
+        df = df[df[pk_column].notna()].copy()
+        print(f"✅ Removed {critical_nan} records with NaN {pk_column}")
+    
+    print(f"📊 Final data shape after NaN check: {df.shape}")
 
     # ✅ Load ข้อมูลเดิมจาก PostgreSQL
     with target_engine.connect() as conn:
@@ -296,16 +407,34 @@ def load_car_data(df: pd.DataFrame):
 
     # ✅ Insert (กรอง car_id ที่เป็น NaN)
     if not df_to_insert.empty:
+        # ✅ ตรวจสอบ NaN ในข้อมูลที่จะ Insert
+        print("🔍 Checking NaN in data to insert:")
+        insert_nan_check = df_to_insert.isna().sum()
+        insert_nan_cols = insert_nan_check[insert_nan_check > 0]
+        if len(insert_nan_cols) > 0:
+            print("⚠️ Insert data has NaN in columns:")
+            for col, count in insert_nan_cols.items():
+                print(f"   - {col}: {count} NaN values")
+        
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped}")
+            print(f"⚠️ Skipped {dropped} records with NaN {pk_column}")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
     # ✅ Update
     if not df_diff_renamed.empty:
+        # ✅ ตรวจสอบ NaN ในข้อมูลที่จะ Update
+        print("🔍 Checking NaN in data to update:")
+        update_nan_check = df_diff_renamed.isna().sum()
+        update_nan_cols = update_nan_check[update_nan_check > 0]
+        if len(update_nan_cols) > 0:
+            print("⚠️ Update data has NaN in columns:")
+            for col, count in update_nan_cols.items():
+                print(f"   - {col}: {count} NaN values")
+        
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
@@ -326,16 +455,18 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_car_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_car_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_car_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_car_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "dim_car.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_car.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    # load_car_data(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_car.")
+#     load_car_data(df_clean)
+#     print("🎉 Test completed! Data upserted to dim_car.")
+
+
