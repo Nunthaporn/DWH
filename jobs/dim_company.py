@@ -6,6 +6,8 @@ from sqlalchemy import create_engine, MetaData
 from sqlalchemy.dialects.postgresql import insert
 import numpy as np
 import re
+from sqlalchemy import create_engine, MetaData, Table, inspect
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # ✅ โหลด .env
 load_dotenv()
@@ -156,40 +158,85 @@ def clean_company_data(df: pd.DataFrame):
 
     return df_cleaned
 
-
-def upsert_dataframe(df, engine, table_name, pk_column):
-    meta = MetaData()
-    meta.reflect(bind=engine)
-    table = meta.tables[table_name]
-
-    # ✅ Fetch existing keys before upsert
-    existing_df = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", engine)
-    existing_keys = set(existing_df[pk_column].unique())
-    incoming_keys = set(df[pk_column].unique())
-
-    new_keys = incoming_keys - existing_keys
-    update_keys = incoming_keys & existing_keys
-
-    print(f"🟢 Insert (new): {len(new_keys)}")
-    print(f"📝 Update (existing): {len(update_keys)}")
-    print(f"✅ Total incoming: {len(incoming_keys)}")
-
-    with engine.begin() as conn:
-        for _, row in df.iterrows():
-            stmt = insert(table).values(row.to_dict())
-            update_dict = {c.name: stmt.excluded[c.name] for c in table.columns if c.name != pk_column}
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[pk_column],
-                set_=update_dict
-            )
-            conn.execute(stmt)
-
 @op
-def load_to_wh_company(df: pd.DataFrame):
-    upsert_dataframe(df, target_engine, "dim_company", "company_name")
-    print("✅ Upserted to dim_company successfully!")
+def load_to_company(df: pd.DataFrame):
+    table_name = 'dim_company'
+    pk_columns = ['company_name', 'logo_path']
+
+    # ✅ Drop duplicates ตาม composite key
+    df = df.drop_duplicates(subset=pk_columns).copy()
+
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+    df_existing = df_existing.drop_duplicates(subset=pk_columns).copy()
+
+    # ✅ สร้าง key เพื่อเปรียบเทียบและจัดการ insert/update
+    def make_key(df):
+        return df[pk_columns].astype(str).agg('|'.join, axis=1)
+
+    df['merge_key'] = make_key(df)
+    df_existing['merge_key'] = make_key(df_existing)
+
+    new_keys = set(df['merge_key']) - set(df_existing['merge_key'])
+    common_keys = set(df['merge_key']) & set(df_existing['merge_key'])
+
+    df_to_insert = df[df['merge_key'].isin(new_keys)].copy()
+    df_common_new = df[df['merge_key'].isin(common_keys)].copy()
+    df_common_old = df_existing[df_existing['merge_key'].isin(common_keys)].copy()
+
+    # ✅ 🔥 แปลง NaT → None สำหรับทุก datetime column ก่อน insert
+    for col in df_to_insert.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
+        df_to_insert[col] = df_to_insert[col].apply(lambda x: x if pd.notna(x) else None)
+
+    merged = df_common_new.merge(df_common_old, on=pk_columns, suffixes=('_new', '_old'))
+
+    exclude_columns = pk_columns + ['id_company', 'create_at', 'update_at']
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
+    ]
+
+    def is_different(row):
+        for col in compare_cols:
+            if pd.isna(row[f"{col}_new"]) and pd.isna(row[f"{col}_old"]):
+                continue
+            if row[f"{col}_new"] != row[f"{col}_old"]:
+                return True
+        return False
+
+    df_diff = merged[merged.apply(is_different, axis=1)].copy()
+    update_cols = [f"{col}_new" for col in compare_cols]
+    df_diff_renamed = df_diff[pk_columns + update_cols].copy()
+    df_diff_renamed.columns = pk_columns + compare_cols
+
+    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+
+    if not df_to_insert.empty:
+        with target_engine.begin() as conn:
+            conn.execute(metadata.insert(), df_to_insert.drop(columns=['merge_key']).to_dict(orient='records'))
+
+    if not df_diff_renamed.empty:
+        with target_engine.begin() as conn:
+            for record in df_diff_renamed.to_dict(orient='records'):
+                stmt = pg_insert(metadata).values(**record)
+                update_columns = {
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata.columns
+                    if c.name not in pk_columns
+                }
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=pk_columns,
+                    set_=update_columns
+                )
+                conn.execute(stmt)
+
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
 @job
 def dim_company_etl():
-    load_to_wh_company(clean_company_data(extract_company_data()))
+    load_to_company(clean_company_data(extract_company_data()))
 
