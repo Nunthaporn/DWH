@@ -398,33 +398,79 @@ def load_to_wh(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+    # ✅ ตรวจสอบว่ามีข้อมูลที่ซ้ำกันหรือไม่
+    if df_common_new.empty or df_common_old.empty:
+        print("ℹ️ No common data to compare, skipping update logic")
+        merged = pd.DataFrame()
+    else:
+        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
-    ]
+    # ✅ ตรวจสอบว่า merged DataFrame ว่างเปล่าหรือไม่
+    if merged.empty:
+        print("ℹ️ No merged data, skipping comparison")
+        df_diff = pd.DataFrame()
+        df_diff_renamed = pd.DataFrame()
+    else:
+        # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน merged DataFrame
+        print(f"🔍 Merged columns: {list(merged.columns)}")
+        print(f"🔍 New data columns: {list(df.columns)}")
 
-    def is_different(row):
-        for col in compare_cols:
-            val_new = row.get(f"{col}_new")
-            val_old = row.get(f"{col}_old")
-            if pd.isna(val_new) and pd.isna(val_old):
-                continue
-            elif pd.isna(val_new) or pd.isna(val_old):
-                return True
-            elif val_new != val_old:
-                return True
-        return False
+        exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
+        compare_cols = [
+            col for col in df.columns
+            if col not in exclude_columns
+            and f"{col}_new" in merged.columns
+            and f"{col}_old" in merged.columns
+        ]
 
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
-    update_cols = [f"{col}_new" for col in compare_cols]
-    all_cols = [pk_column] + update_cols
-    df_diff_renamed = df_diff[all_cols].copy()
-    df_diff_renamed.columns = [pk_column] + compare_cols
+        # ✅ Debug: แสดงคอลัมน์ที่จะเปรียบเทียบ
+        print(f"🔍 Compare columns: {compare_cols}")
+        
+        # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน df และ merged
+        print(f"🔍 df columns: {list(df.columns)}")
+        print(f"🔍 merged columns with _new suffix: {[col for col in merged.columns if col.endswith('_new')]}")
+        print(f"🔍 merged columns with _old suffix: {[col for col in merged.columns if col.endswith('_old')]}")
+        
+        # ✅ ตรวจสอบว่ามีคอลัมน์ที่จะเปรียบเทียบหรือไม่
+        if not compare_cols:
+            print("⚠️ No columns to compare, skipping update")
+            df_diff_renamed = pd.DataFrame()
+        else:
+            def is_different(row):
+                for col in compare_cols:
+                    val_new = row.get(f"{col}_new")
+                    val_old = row.get(f"{col}_old")
+                    if pd.isna(val_new) and pd.isna(val_old):
+                        continue
+                    elif pd.isna(val_new) or pd.isna(val_old):
+                        return True
+                    elif val_new != val_old:
+                        return True
+                return False
+
+            df_diff = merged[merged.apply(is_different, axis=1)].copy()
+            
+            # ✅ ตรวจสอบว่ามีข้อมูลที่แตกต่างหรือไม่
+            if df_diff.empty:
+                print("ℹ️ No differences found, skipping update")
+                df_diff_renamed = pd.DataFrame()
+            else:
+                update_cols = [f"{col}_new" for col in compare_cols]
+                all_cols = [pk_column] + update_cols
+                
+                # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
+                missing_cols = [col for col in all_cols if col not in df_diff.columns]
+                if missing_cols:
+                    print(f"⚠️ Missing columns in df_diff: {missing_cols}")
+                    # ใช้เฉพาะคอลัมน์ที่มีอยู่
+                    available_cols = [col for col in all_cols if col in df_diff.columns]
+                    df_diff_renamed = df_diff[available_cols].copy()
+                    # แปลงชื่อคอลัมน์กลับ
+                    available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
+                    df_diff_renamed.columns = [pk_column] + available_compare_cols
+                else:
+                    df_diff_renamed = df_diff[all_cols].copy()
+                    df_diff_renamed.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
