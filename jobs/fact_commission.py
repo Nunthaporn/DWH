@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime, timedelta
 
 def clean_nan_values(df):
     """
@@ -70,10 +71,18 @@ target_engine = create_engine(
 
 @op
 def extract_commission_data():
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+
     df_select_plan = pd.read_sql("""
         SELECT quo_num,id_cus,no_car,current_campaign 
         FROM fin_system_select_plan 
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
     """, source_engine)
 
     df_fin_order = pd.read_sql("""
@@ -87,13 +96,12 @@ def extract_commission_data():
                show_price_com_count,show_com_addon,condition_install,
                percent_install,chanel_main
         FROM fin_system_pay 
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
     """, source_engine)
 
     df_com_rank = pd.read_sql("""
         SELECT quo_num,com_invite,com_rank
         FROM fin_com_rank 
-        # WHERE date_add >= '2025-01-01' AND date_add < '2025-07-01'
     """, source_engine)
 
     df_fin_finance = pd.read_sql("""
@@ -347,10 +355,15 @@ def load_commission_data(df: pd.DataFrame):
             else:
                 print(f"  - ✅ {col}: No comma values found")
 
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
 
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", conn)
+        df_existing = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
 
     df_existing = df_existing.drop_duplicates(subset=[pk_column])
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
