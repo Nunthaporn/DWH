@@ -303,86 +303,149 @@ def clean_installment_data(inputs):
     df_plan, df_inst, df_order, df_fin, df_bill, df_fee, df_test = inputs
 
     print("🔄 Processing installment data...")
+    
+    # ✅ ตรวจสอบข้อมูลที่ได้รับ
+    print(f"📊 Input data summary:")
+    print(f"  - Plan: {df_plan.shape[0]} records, columns: {list(df_plan.columns) if not df_plan.empty else 'empty'}")
+    print(f"  - Installment: {df_inst.shape[0]} records, columns: {list(df_inst.columns) if not df_inst.empty else 'empty'}")
+    print(f"  - Order: {df_order.shape[0]} records, columns: {list(df_order.columns) if not df_order.empty else 'empty'}")
+    print(f"  - Finance: {df_fin.shape[0]} records, columns: {list(df_fin.columns) if not df_fin.empty else 'empty'}")
+    print(f"  - Bill: {df_bill.shape[0]} records, columns: {list(df_bill.columns) if not df_bill.empty else 'empty'}")
+    print(f"  - Late fee: {df_fee.shape[0]} records, columns: {list(df_fee.columns) if not df_fee.empty else 'empty'}")
+    print(f"  - Test: {df_test.shape[0]} records, columns: {list(df_test.columns) if not df_test.empty else 'empty'}")
 
     # 1. เตรียมข้อมูลค่างวด + วันที่
-    df_inst['numpay'] = pd.to_numeric(df_inst['numpay'], errors='coerce')
-    df_filtered = df_inst[df_inst['numpay'].notna() & (df_inst['numpay'] > 0)]
+    if df_inst.empty:
+        print("⚠️ Installment DataFrame is empty. Creating empty combined records.")
+        df_combined = pd.DataFrame(columns=['quo_num', 'numpay', 'installment_period', 'installment_amount', 'due_date', 'installment_number'])
+    elif 'numpay' not in df_inst.columns:
+        print("⚠️ Installment DataFrame does not have 'numpay' column. Creating empty combined records.")
+        df_combined = pd.DataFrame(columns=['quo_num', 'numpay', 'installment_period', 'installment_amount', 'due_date', 'installment_number'])
+    elif 'quo_num' not in df_inst.columns:
+        print("⚠️ Installment DataFrame does not have 'quo_num' column. Creating empty combined records.")
+        df_combined = pd.DataFrame(columns=['quo_num', 'numpay', 'installment_period', 'installment_amount', 'due_date', 'installment_number'])
+    else:
+        df_inst['numpay'] = pd.to_numeric(df_inst['numpay'], errors='coerce')
+        df_filtered = df_inst[df_inst['numpay'].notna() & (df_inst['numpay'] > 0)]
 
-    money_cols = [f'money_{n}' for n in ['one', 'two', 'three', 'four', 'five', 'six',
-                                         'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']]
-    date_cols = [f'date_{n}' for n in ['one', 'two', 'three', 'four', 'five', 'six',
-                                       'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']]
+        money_cols = [f'money_{n}' for n in ['one', 'two', 'three', 'four', 'five', 'six',
+                                             'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']]
+        date_cols = [f'date_{n}' for n in ['one', 'two', 'three', 'four', 'five', 'six',
+                                           'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']]
 
-    # ✅ ลด debug prints เหลือแค่ข้อมูลสำคัญ
-    print(f"📊 Processing {df_filtered.shape[0]} installment records")
+        # ✅ ลด debug prints เหลือแค่ข้อมูลสำคัญ
+        print(f"📊 Processing {df_filtered.shape[0]} installment records")
 
-    df_money = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=money_cols,
-                                 var_name='installment_period', value_name='installment_amount')
-    df_date = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=date_cols,
-                                var_name='due_date_period', value_name='due_date')
+        df_money = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=money_cols,
+                                     var_name='installment_period', value_name='installment_amount')
+        df_date = df_filtered.melt(id_vars=['quo_num', 'numpay'], value_vars=date_cols,
+                                    var_name='due_date_period', value_name='due_date')
 
-    df_combined = pd.concat([df_money.reset_index(drop=True), df_date['due_date']], axis=1)
-    df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
-    df_combined = df_combined[df_combined['installment_number'] <= df_combined['numpay']]
-    df_combined = df_combined.sort_values(by=['quo_num', 'due_date'])
-    df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
+        df_combined = pd.concat([df_money.reset_index(drop=True), df_date['due_date']], axis=1)
+        df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
+        df_combined = df_combined[df_combined['installment_number'] <= df_combined['numpay']]
+        df_combined = df_combined.sort_values(by=['quo_num', 'due_date'])
+        df_combined['installment_number'] = df_combined.groupby('quo_num').cumcount() + 1
 
-    print(f"📊 Combined {df_combined.shape[0]} installment records")
+        print(f"📊 Combined {df_combined.shape[0]} installment records")
 
     # 2. ผูก order_number
-    df_join = pd.merge(df_combined, df_order, on='quo_num', how='left')
-    print(f"📊 Joined with orders: {df_join.shape[0]} records")
+    if df_order.empty:
+        print("⚠️ Order DataFrame is empty. Creating empty joined records.")
+        df_join = df_combined.copy()
+        df_join['order_number'] = None
+    elif 'quo_num' not in df_order.columns:
+        print("⚠️ Order DataFrame does not have 'quo_num' column. Creating empty joined records.")
+        df_join = df_combined.copy()
+        df_join['order_number'] = None
+    elif 'order_number' not in df_order.columns:
+        print("⚠️ Order DataFrame does not have 'order_number' column. Creating empty joined records.")
+        df_join = df_combined.copy()
+        df_join['order_number'] = None
+    else:
+        df_join = pd.merge(df_combined, df_order, on='quo_num', how='left')
+        print(f"📊 Joined with orders: {df_join.shape[0]} records")
 
     # 3. เตรียมข้อมูลการชำระ
     num_to_name = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
                    'nine', 'ten', 'eleven', 'twelve']
     
-    df_fin['numpay'] = pd.to_numeric(df_fin['numpay'], errors='coerce')
-    df_fin = df_fin[df_fin['numpay'].notna() & (df_fin['numpay'] > 0)]
+    # ✅ ตรวจสอบว่า df_fin มีข้อมูลและมีคอลัมน์ที่จำเป็นหรือไม่
+    if df_fin.empty:
+        print("⚠️ Finance DataFrame is empty. Creating empty payment records.")
+        df_payment = pd.DataFrame(columns=['order_number', 'payment_amount', 'payment_date', 'installment_number'])
+    elif 'numpay' not in df_fin.columns:
+        print("⚠️ Finance DataFrame does not have 'numpay' column. Creating empty payment records.")
+        df_payment = pd.DataFrame(columns=['order_number', 'payment_amount', 'payment_date', 'installment_number'])
+    elif 'order_number' not in df_fin.columns:
+        print("⚠️ Finance DataFrame does not have 'order_number' column. Creating empty payment records.")
+        df_payment = pd.DataFrame(columns=['order_number', 'payment_amount', 'payment_date', 'installment_number'])
+    else:
+        df_fin['numpay'] = pd.to_numeric(df_fin['numpay'], errors='coerce')
+        df_fin = df_fin[df_fin['numpay'].notna() & (df_fin['numpay'] > 0)]
 
-    print(f"📊 Processing {df_fin.shape[0]} finance records")
+        print(f"📊 Processing {df_fin.shape[0]} finance records")
 
-    # ใช้ vectorized operations แทน iterrows()
-    rows_list = []
-    for i, sfx in enumerate(num_to_name, start=1):
-        money_col = f'moneypay_{sfx}'
-        date_col = f'datepay_{sfx}'
-        
-        # สร้าง DataFrame สำหรับแต่ละ installment
-        temp_df = df_fin[['order_number', money_col, date_col]].copy()
-        temp_df['installment_number'] = i
-        temp_df['payment_amount'] = temp_df[money_col]
-        
-        # ทำความสะอาดวันที่
-        temp_df['raw_date'] = temp_df[date_col].astype(str)
-        temp_df['payment_date'] = pd.to_datetime(
-            temp_df['raw_date'].str.extract(r'(\d{4}-\d{1,2}-\d{1,2})')[0], 
-            errors='coerce'
-        )
-        
-        # แก้ไขปี 2026 เป็น 2025 - ใช้ vectorized operations
-        mask_2026 = temp_df['payment_date'].dt.year == 2026
-        if mask_2026.any():
-            # ใช้ pd.to_datetime() แทน apply
-            temp_df.loc[mask_2026, 'payment_date'] = pd.to_datetime(
-                temp_df.loc[mask_2026, 'payment_date'].dt.strftime('2025-%m-%d'),
+        # ใช้ vectorized operations แทน iterrows()
+        rows_list = []
+        for i, sfx in enumerate(num_to_name, start=1):
+            money_col = f'moneypay_{sfx}'
+            date_col = f'datepay_{sfx}'
+            
+            # ✅ ตรวจสอบว่าคอลัมน์ที่จำเป็นมีอยู่หรือไม่
+            if money_col not in df_fin.columns or date_col not in df_fin.columns:
+                print(f"⚠️ Missing columns {money_col} or {date_col} in finance data. Skipping installment {i}.")
+                continue
+            
+            # สร้าง DataFrame สำหรับแต่ละ installment
+            temp_df = df_fin[['order_number', money_col, date_col]].copy()
+            temp_df['installment_number'] = i
+            temp_df['payment_amount'] = temp_df[money_col]
+            
+            # ทำความสะอาดวันที่
+            temp_df['raw_date'] = temp_df[date_col].astype(str)
+            temp_df['payment_date'] = pd.to_datetime(
+                temp_df['raw_date'].str.extract(r'(\d{4}-\d{1,2}-\d{1,2})')[0], 
                 errors='coerce'
             )
-        
-        rows_list.append(temp_df[['order_number', 'payment_amount', 'payment_date', 'installment_number']])
+            
+            # แก้ไขปี 2026 เป็น 2025 - ใช้ vectorized operations
+            mask_2026 = temp_df['payment_date'].dt.year == 2026
+            if mask_2026.any():
+                # ใช้ pd.to_datetime() แทน apply
+                temp_df.loc[mask_2026, 'payment_date'] = pd.to_datetime(
+                    temp_df.loc[mask_2026, 'payment_date'].dt.strftime('2025-%m-%d'),
+                    errors='coerce'
+                )
+            
+            rows_list.append(temp_df[['order_number', 'payment_amount', 'payment_date', 'installment_number']])
 
-    df_payment = pd.concat(rows_list, ignore_index=True)
-    print(f"📊 Created {df_payment.shape[0]} payment records")
+        df_payment = pd.concat(rows_list, ignore_index=True)
+        print(f"📊 Created {df_payment.shape[0]} payment records")
 
     # 4. เตรียม payment proof
-    df_proof = df_bill.melt(id_vars=['order_number'],
-        value_vars=[f'bill_receipt{i if i > 1 else ""}' for i in range(1, 13)],
-        value_name='payment_proof')
-    df_proof = df_proof[df_proof['payment_proof'].notna()].reset_index()
-    df_proof['installment_number'] = df_proof.groupby('order_number').cumcount() + 1
-    df_proof = df_proof[['order_number', 'installment_number', 'payment_proof']]
+    if df_bill.empty:
+        print("⚠️ Bill DataFrame is empty. Creating empty proof records.")
+        df_proof = pd.DataFrame(columns=['order_number', 'installment_number', 'payment_proof'])
+    elif 'order_number' not in df_bill.columns:
+        print("⚠️ Bill DataFrame does not have 'order_number' column. Creating empty proof records.")
+        df_proof = pd.DataFrame(columns=['order_number', 'installment_number', 'payment_proof'])
+    else:
+        # ✅ ตรวจสอบว่ามีคอลัมน์ bill_receipt หรือไม่
+        bill_receipt_cols = [f'bill_receipt{i if i > 1 else ""}' for i in range(1, 13)]
+        missing_cols = [col for col in bill_receipt_cols if col not in df_bill.columns]
+        if missing_cols:
+            print(f"⚠️ Bill DataFrame missing columns: {missing_cols}. Creating empty proof records.")
+            df_proof = pd.DataFrame(columns=['order_number', 'installment_number', 'payment_proof'])
+        else:
+            df_proof = df_bill.melt(id_vars=['order_number'],
+                value_vars=[f'bill_receipt{i if i > 1 else ""}' for i in range(1, 13)],
+                value_name='payment_proof')
+            df_proof = df_proof[df_proof['payment_proof'].notna()].reset_index()
+            df_proof['installment_number'] = df_proof.groupby('order_number').cumcount() + 1
+            df_proof = df_proof[['order_number', 'installment_number', 'payment_proof']]
 
-    print(f"📊 Created {df_proof.shape[0]} proof records")
+            print(f"📊 Created {df_proof.shape[0]} proof records")
 
     # 5. รวมทั้งหมด
     df = pd.merge(df_join, df_payment, on=['order_number', 'installment_number'], how='left')
@@ -391,16 +454,23 @@ def clean_installment_data(inputs):
     print(f"📊 Final merged data: {df.shape[0]} records")
 
     # 6. เพิ่ม late_fee
-    df_fee = df_fee.rename(columns={
-        'orderNumber': 'order_number',
-        'penaltyPay': 'late_fee',
-        'numPay': 'installment_number'
-    })
-    df_fee = df_fee.drop_duplicates()
-    df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
-    df_fee['installment_number'] = pd.to_numeric(df_fee['installment_number'], errors='coerce')
-    df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
-    df['late_fee'] = df['late_fee'].fillna(0).astype(int)
+    if df_fee.empty:
+        print("⚠️ Late fee DataFrame is empty. Adding empty late_fee column.")
+        df['late_fee'] = 0
+    elif 'orderNumber' not in df_fee.columns or 'penaltyPay' not in df_fee.columns or 'numPay' not in df_fee.columns:
+        print("⚠️ Late fee DataFrame missing required columns. Adding empty late_fee column.")
+        df['late_fee'] = 0
+    else:
+        df_fee = df_fee.rename(columns={
+            'orderNumber': 'order_number',
+            'penaltyPay': 'late_fee',
+            'numPay': 'installment_number'
+        })
+        df_fee = df_fee.drop_duplicates()
+        df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce')
+        df_fee['installment_number'] = pd.to_numeric(df_fee['installment_number'], errors='coerce')
+        df = pd.merge(df, df_fee, on=['order_number', 'installment_number'], how='left')
+        df['late_fee'] = df['late_fee'].fillna(0).astype(int)
     
     # 7. คำนวณ total_paid - ใช้ vectorized operations แทน apply
     # ✅ ลบ comma ออกจากข้อมูลก่อนแปลงเป็น numeric
@@ -477,7 +547,11 @@ def clean_installment_data(inputs):
     df.loc[has_payment & is_late_payment, 'payment_status'] = 'ชำระล่าช้า'
 
     # 9. ล้าง test และ undefined
-    df = df[~df['quo_num'].isin(df_test['quo_num'])]
+    if not df_test.empty and 'quo_num' in df_test.columns:
+        df = df[~df['quo_num'].isin(df_test['quo_num'])]
+        print(f"📊 Filtered out {len(df_test)} test records")
+    else:
+        print("⚠️ Test DataFrame is empty or missing 'quo_num' column. Skipping test record filtering.")
     
     # ลบแถวที่มี quo_num เป็น undefined
     df = df[df['quo_num'] != 'undefined']
