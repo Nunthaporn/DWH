@@ -119,6 +119,15 @@ def load_order_type_data(df: pd.DataFrame):
         """))
         has_quotation_num = result.fetchone() is not None
         
+        # ตรวจสอบ unique constraint ที่มีอยู่จริง
+        result = conn.execute(text(f"""
+            SELECT conname, contype
+            FROM pg_constraint
+            WHERE conrelid = '{table_name}'::regclass
+            AND contype = 'u'
+        """))
+        unique_constraints = result.fetchall()
+        
         # ตรวจสอบ primary key
         result = conn.execute(text(f"""
             SELECT column_name
@@ -128,21 +137,29 @@ def load_order_type_data(df: pd.DataFrame):
         """))
         has_order_type_id = result.fetchone() is not None
 
-    if has_quotation_num:
-        # กรณีที่ยังมี quotation_num column (กรณีเก่า)
+    print(f"🔍 Debug: has_quotation_num = {has_quotation_num}")
+    print(f"🔍 Debug: unique_constraints = {unique_constraints}")
+    print(f"🔍 Debug: has_order_type_id = {has_order_type_id}")
+
+    if has_quotation_num and unique_constraints:
+        # กรณีที่ยังมี quotation_num column และมี unique constraint (กรณีเก่า)
         pk_column = 'quotation_num'
         
-        # Ensure the unique constraint on quotation_num
-        with target_engine.connect() as conn:
-            conn.execute(text(f"""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
-                        ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
-                    END IF;
-                END $$;
-            """))
-            conn.commit()
+        # ตรวจสอบว่ามี unique constraint บน quotation_num หรือไม่
+        has_quotation_unique = any('quotation_num' in str(constraint) for constraint in unique_constraints)
+        
+        if not has_quotation_unique:
+            # ถ้าไม่มี unique constraint บน quotation_num ให้สร้างใหม่
+            with target_engine.connect() as conn:
+                conn.execute(text(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
+                            ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
+                        END IF;
+                    END $$;
+                """))
+                conn.commit()
 
         df = df[~df[pk_column].duplicated(keep='first')].copy()
 
@@ -233,8 +250,8 @@ def load_order_type_data(df: pd.DataFrame):
                     conn.execute(stmt)
 
     else:
-        # กรณีที่ไม่มี quotation_num column (กรณีใหม่) - ใช้ INSERT แบบปกติ
-        print("📝 No quotation_num column found, using simple INSERT")
+        # กรณีที่ไม่มี quotation_num column หรือไม่มี unique constraint (กรณีใหม่) - ใช้ INSERT แบบปกติ
+        print("📝 No quotation_num column or unique constraint found, using simple INSERT")
         
         metadata = Table(table_name, MetaData(), autoload_with=target_engine)
         
