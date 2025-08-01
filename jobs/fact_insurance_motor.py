@@ -2,6 +2,7 @@ from dagster import op, job
 import pandas as pd
 import numpy as np
 import os
+import re
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -22,12 +23,37 @@ target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
+def remove_commas_from_numeric(value):
+    """ลบลูกน้ำออกจากค่าตัวเลข"""
+    if pd.isna(value) or value is None:
+        return value
+    
+    # แปลงเป็น string ก่อน
+    value_str = str(value).strip()
+    
+    # ลบลูกน้ำออก
+    value_str = value_str.replace(',', '')
+    
+    # ลบช่องว่าง
+    value_str = value_str.strip()
+    
+    # ตรวจสอบว่าเป็นตัวเลขหรือไม่
+    if value_str == '' or value_str.lower() in ['nan', 'none', 'null']:
+        return None
+    
+    # ตรวจสอบว่าเป็นตัวเลขหรือไม่ (รวมทศนิยม)
+    if re.match(r'^-?\d*\.?\d+$', value_str):
+        return value_str
+    
+    return value
+
 @op
 def extract_motor_data():
     df_plan = pd.read_sql("""
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01' AND type_insure = 'ประกันรถ'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01' 
+        AND type_insure = 'ประกันรถ'
     """, source_engine)
 
     df_order = pd.read_sql("""
@@ -36,13 +62,12 @@ def extract_motor_data():
                IF(sendtype = 'ที่อยู่ใหม่', provincenew, province) AS delivery_province,
                show_ems_price, show_ems_type
         FROM fin_order
-        WHERE datekey >= '2025-01-01' AND datekey < '2025-07-01'
     """, task_engine)
 
     df_pay = pd.read_sql("""
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
+        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
     """, source_engine)
 
     print("📦 df_plan:", df_plan.shape)
@@ -202,6 +227,7 @@ def clean_motor_data(data_tuple):
         df['delivery_type'] = df['delivery_type'].replace('nor', 'normal')
         print(f"📦 Cleaned delivery_type column - changed 'nor' to 'normal'")
 
+    # ✅ ลบลูกน้ำออกจากคอลัมน์ตัวเลขก่อนแปลงเป็นตัวเลข
     numeric_columns = [
         "sum_insured", "human_coverage_person", "human_coverage_atime", "property_coverage",
         "deductible", "vehicle_damage", "deductible_amount", "vehicle_theft_fire",
@@ -209,14 +235,12 @@ def clean_motor_data(data_tuple):
         "medical_coverage", "driver_coverage", "ems_amount"
     ]
 
+    print("🧹 Removing commas from numeric columns...")
     for col in numeric_columns:
         if col in df.columns:
-            # ทำความสะอาดข้อมูลก่อนแปลงเป็นตัวเลข
-            df[col] = df[col].astype(str).str.replace(",", "", regex=False).str.strip()
-            # กรองเฉพาะค่าที่เป็นตัวเลขหรือค่าว่าง
-            df[col] = df[col].apply(lambda x: x if x in ["", "None", "nan", "NaN"] or 
-                                   (x.replace(".", "").replace("-", "").isdigit() and x != "ซ่อมอู่") 
-                                   else None)
+            # ลบลูกน้ำออกจากข้อมูลก่อน
+            df[col] = df[col].apply(remove_commas_from_numeric)
+            
             # แปลงเป็นตัวเลขและจัดการกับ NaN values
             df[col] = pd.to_numeric(df[col], errors="coerce")
             # ใช้ float64 แทน Int64 เพื่อหลีกเลี่ยงปัญหา casting
@@ -240,6 +264,7 @@ def clean_motor_data(data_tuple):
     if 'sum_insured' in df.columns:
         df['sum_insured'] = df['sum_insured'].replace(190000050, 1900000)
         df['sum_insured'] = df['sum_insured'].replace(250000093, 2500000)
+        print(f"🔧 Fixed sum_insured: corrected abnormal values")
     
     df = df.where(pd.notnull(df), None)
 
