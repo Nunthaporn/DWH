@@ -200,6 +200,7 @@ def load_payment_data(df: pd.DataFrame):
                 return True
         return False
 
+    # Filter rows that have differences
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
     if not df_diff.empty and compare_cols:
@@ -224,6 +225,7 @@ def load_payment_data(df: pd.DataFrame):
 
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
+    # Insert only the new records
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
@@ -233,6 +235,7 @@ def load_payment_data(df: pd.DataFrame):
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
+    # Update only the records where there is a change
     if not df_diff_renamed.empty and compare_cols:
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
@@ -249,7 +252,6 @@ def load_payment_data(df: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
-
 
 @job
 def dim_payment_plan_etl():

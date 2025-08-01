@@ -33,7 +33,7 @@ def extract_order_type_data():
         SELECT quo_num, worksend
         FROM fin_order
     """
-    
+
     df_plan = pd.read_sql(query_plan, source_engine)
     df_order = pd.read_sql(query_order, source_engine_task)
 
@@ -130,25 +130,21 @@ def load_order_type_data(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Merge ด้วย suffix (_new, _old)
     merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'order_type_id', 'create_at', 'update_at']
+    exclude_columns = [pk_column, 'payment_plan_id', 'create_at', 'update_at']
+
+    # ✅ คำนวณ column ที่เหมือนกันทั้ง df และ df_existing เท่านั้น
+    all_columns = set(df_common_new.columns) & set(df_common_old.columns)
     compare_cols = [
-        col for col in df.columns
+        col for col in all_columns
         if col not in exclude_columns
+        and f"{col}_new" in merged.columns
+        and f"{col}_old" in merged.columns
     ]
 
-    # ✅ ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
-    available_cols = []
-    for col in compare_cols:
-        if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
-            available_cols.append(col)
-
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
     def is_different(row):
-        for col in available_cols:
+        for col in compare_cols:
             val_new = row.get(f"{col}_new")
             val_old = row.get(f"{col}_old")
             if pd.isna(val_new) and pd.isna(val_old):
@@ -157,18 +153,18 @@ def load_order_type_data(df: pd.DataFrame):
                 return True
         return False
 
-    # ✅ ตรวจหาความแตกต่างจริง
+    # Filter rows that have differences
     df_diff = merged[merged.apply(is_different, axis=1)].copy()
 
-    if not df_diff.empty and available_cols:
-        update_cols = [f"{col}_new" for col in available_cols]
+    if not df_diff.empty and compare_cols:
+        update_cols = [f"{col}_new" for col in compare_cols]
         all_cols = [pk_column] + update_cols
 
-        # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
-        existing_cols = [col for col in all_cols if col in df_diff.columns]
+        # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
+        existing_cols = [c for c in all_cols if c in df_diff.columns]
         
         if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
-            df_diff_renamed = df_diff[existing_cols].copy()
+            df_diff_renamed = df_diff.loc[:, existing_cols].copy()
             # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
             new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
             df_diff_renamed.columns = new_col_names
@@ -180,10 +176,9 @@ def load_order_type_data(df: pd.DataFrame):
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
-    # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง quotation_num ที่เป็น NaN)
+    # Insert only the new records
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
@@ -193,8 +188,8 @@ def load_order_type_data(df: pd.DataFrame):
             with target_engine.begin() as conn:
                 conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
 
-    # ✅ Update
-    if not df_diff_renamed.empty:
+    # Update only the records where there is a change
+    if not df_diff_renamed.empty and compare_cols:
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
