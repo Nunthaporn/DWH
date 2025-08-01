@@ -17,7 +17,7 @@ source_engine = create_engine(
 
 # ✅ DB target (PostgreSQL)
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance?connect_timeout=60"
 )
 
 @op
@@ -264,20 +264,20 @@ def load_payment_data(df: pd.DataFrame):
 def dim_payment_plan_etl():
     load_payment_data(clean_payment_data(extract_payment_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_payment_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_payment_data()
+    print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_payment_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_payment_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_payment_plan.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_payment_plan.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "dim_payment_plan.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_payment_plan.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_payment_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_payment_plan.")
+    load_payment_data(df_clean)
+    print("🎉 completed! Data upserted to dim_payment_plan.")

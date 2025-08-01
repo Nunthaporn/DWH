@@ -18,7 +18,7 @@ source_engine_task  = create_engine(
 )
 # ✅ Target: PostgreSQL
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance?connect_timeout=60"
 )
 
 @op
