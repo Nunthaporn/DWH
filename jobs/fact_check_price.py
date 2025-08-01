@@ -8,70 +8,98 @@ import gc
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, inspect, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
+import logging
+
+# ตั้งค่า logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 # DB: Source (MariaDB)
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=3600
 )
 
 # DB: Target (PostgreSQL)
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=3600
 )
 
 @op
 def extract_fact_check_price():
     """Extract data with better memory management"""
     try:
+        logger.info("📊 Starting data extraction...")
+        
         # Process logs data in smaller chunks
-        print("📊 Extracting logs data...")
+        logger.info("📊 Extracting logs data...")
         chunks_logs = []
         chunk_count = 0
-        for chunk in pd.read_sql("""
+        
+        # ใช้ query ที่มี LIMIT เพื่อป้องกัน memory overflow
+        query_logs = """
             SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                    assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
             FROM fin_customer_logs_B2B
             WHERE create_at BETWEEN '2024-01-01' AND '2024-12-31'
-        """, source_engine, chunksize=5000):  # ลด chunksize
+            ORDER BY create_at
+        """
+        
+        for chunk in pd.read_sql(query_logs, source_engine, chunksize=1000):  # ลด chunksize ลง
             chunks_logs.append(chunk)
             chunk_count += 1
-            if chunk_count % 10 == 0:
-                print(f"   Processed {chunk_count} chunks...")
+            if chunk_count % 5 == 0:  # ลดความถี่ของ logging
+                logger.info(f"   Processed {chunk_count} chunks...")
                 gc.collect()  # Force garbage collection
         
-        print(f"✅ Concatenating {len(chunks_logs)} chunks...")
+        logger.info(f"✅ Concatenating {len(chunks_logs)} chunks...")
         df_logs = pd.concat(chunks_logs, ignore_index=True)
         del chunks_logs  # Free memory
         gc.collect()
-        print(f"✅ Logs shape: {df_logs.shape}")
+        logger.info(f"✅ Logs shape: {df_logs.shape}")
 
         # Process checkprice data in smaller chunks
-        print("📊 Extracting checkprice data...")
+        logger.info("📊 Extracting checkprice data...")
         chunks_check = []
         chunk_count = 0
-        for chunk in pd.read_sql("""
+        
+        query_check = """
             SELECT id_cus, datekey, brand, model, submodel, yearcar, idcar, nocar, type_ins,
                    company, tunprakan, deduct, status, type_driver, type_camera, type_addon, status_send
             FROM fin_checkprice
-        """, source_engine, chunksize=5000):  # ลด chunksize
+            ORDER BY datekey
+        """
+        
+        for chunk in pd.read_sql(query_check, source_engine, chunksize=1000):  # ลด chunksize ลง
             chunks_check.append(chunk)
             chunk_count += 1
-            if chunk_count % 10 == 0:
-                print(f"   Processed {chunk_count} chunks...")
+            if chunk_count % 5 == 0:  # ลดความถี่ของ logging
+                logger.info(f"   Processed {chunk_count} chunks...")
                 gc.collect()
         
-        print(f"✅ Concatenating {len(chunks_check)} chunks...")
+        logger.info(f"✅ Concatenating {len(chunks_check)} chunks...")
         df_checkprice = pd.concat(chunks_check, ignore_index=True)
         del chunks_check  # Free memory
         gc.collect()
-        print(f"✅ Checkprice shape: {df_checkprice.shape}")
+        logger.info(f"✅ Checkprice shape: {df_checkprice.shape}")
 
         return df_logs, df_checkprice
     
+    except SQLAlchemyError as e:
+        logger.error(f"❌ Database error in extract_fact_check_price: {str(e)}")
+        raise
     except Exception as e:
-        print(f"❌ Error in extract_fact_check_price: {str(e)}")
+        logger.error(f"❌ Error in extract_fact_check_price: {str(e)}")
         raise
 
 @op
@@ -79,7 +107,7 @@ def clean_fact_check_price(data):
     """Clean data with better memory management"""
     try:
         df_logs, df_checkprice = data
-        print(f"🧹 Cleaning data - Logs: {df_logs.shape}, Checkprice: {df_checkprice.shape}")
+        logger.info(f"🧹 Cleaning data - Logs: {df_logs.shape}, Checkprice: {df_checkprice.shape}")
 
         province_list = ["กรุงเทพมหานคร", "กระบี่", "กาญจนบุรี", "กาฬสินธุ์", "กำแพงเพชร",
         "ขอนแก่น", "จันทบุรี", "ฉะเชิงเทรา", "ชลบุรี", "ชัยนาท", "ชัยภูมิ",
@@ -115,9 +143,17 @@ def clean_fact_check_price(data):
             except:
                 return None
 
-        print("🧹 Processing logs data...")
+        logger.info("🧹 Processing logs data...")
         logs = df_logs.copy()
-        logs[['company_name1', 'company_name2', 'company_name3', 'company_name4']] = logs['results'].apply(extract_company_names).apply(pd.Series)
+        
+        # แยกการประมวลผลเพื่อลด memory usage
+        logger.info("   Extracting company names...")
+        company_names = logs['results'].apply(extract_company_names).apply(pd.Series)
+        logs[['company_name1', 'company_name2', 'company_name3', 'company_name4']] = company_names
+        del company_names
+        gc.collect()
+        
+        logger.info("   Extracting selected companies...")
         logs['selecteds'] = logs['selected'].apply(extract_selected)
 
         logs['camera'] = logs['camera'].map({'yes': 'มีกล้องหน้ารถ', 'no': 'ไม่มีกล้องหน้ารถ'})
@@ -150,9 +186,17 @@ def clean_fact_check_price(data):
             except:
                 return None
 
-        print("🧹 Processing checkprice data...")
+        logger.info("🧹 Processing checkprice data...")
         check = df_checkprice.copy()
-        check[['company_name1', 'company_name2', 'company_name3', 'company_name4']] = check['company'].apply(split_company).apply(pd.Series)
+        
+        # แยกการประมวลผลเพื่อลด memory usage
+        logger.info("   Splitting company names...")
+        company_names = check['company'].apply(split_company).apply(pd.Series)
+        check[['company_name1', 'company_name2', 'company_name3', 'company_name4']] = company_names
+        del company_names
+        gc.collect()
+        
+        logger.info("   Extracting car plates...")
         check['id_car'] = check['idcar'].apply(extract_plate)
         check['province_car'] = check['idcar'].apply(lambda x: next((p for p in province_list if p in str(x)), None))
         check.drop(columns=['company', 'idcar'], inplace=True)
@@ -163,7 +207,7 @@ def clean_fact_check_price(data):
         }, inplace=True)
         check['input_type'] = 'manual'
 
-        print("🧹 Combining datasets...")
+        logger.info("🧹 Combining datasets...")
         df_combined = pd.concat([logs, check], ignore_index=True, sort=False)
         del logs, check  # Free memory
         gc.collect()
@@ -182,11 +226,11 @@ def clean_fact_check_price(data):
         df_combined['transaction_date'] = df_combined['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
         df_combined = df_combined.drop_duplicates()
 
-        print(f"✅ Cleaned data shape: {df_combined.shape}")
+        logger.info(f"✅ Cleaned data shape: {df_combined.shape}")
         return df_combined
     
     except Exception as e:
-        print(f"❌ Error in clean_fact_check_price: {str(e)}")
+        logger.error(f"❌ Error in clean_fact_check_price: {str(e)}")
         raise
 
 @op
@@ -199,24 +243,28 @@ def load_fact_check_price(df: pd.DataFrame):
                      'province_car', 'company_name1', 'company_name2', 'company_name3',
                      'company_name4', 'selecteds', 'type_insurance', 'id_car']
 
-        print(f"💾 Loading data - Input shape: {df.shape}")
+        logger.info(f"💾 Loading data - Input shape: {df.shape}")
 
         # ✅ กรองซ้ำจาก DataFrame ใหม่
         df = df[~df[pk_column].duplicated(keep='first')].copy()
-        print(f"✅ After deduplication: {df.shape}")
+        logger.info(f"✅ After deduplication: {df.shape}")
 
         # ✅ Load ข้อมูลเดิมจาก PostgreSQL แบบ streaming
-        print("📊 Loading existing data from PostgreSQL...")
+        logger.info("📊 Loading existing data from PostgreSQL...")
         existing_keys = set()
         
         # ใช้ query แยกเพื่อลด memory usage
-        with target_engine.connect() as conn:
-            # โหลดเฉพาะ primary keys ที่มีอยู่
-            result = conn.execute(text(f"SELECT {', '.join(pk_column)} FROM {table_name}"))
-            for row in result:
-                existing_keys.add(tuple(row))
+        try:
+            with target_engine.connect() as conn:
+                # โหลดเฉพาะ primary keys ที่มีอยู่
+                result = conn.execute(text(f"SELECT {', '.join(pk_column)} FROM {table_name}"))
+                for row in result:
+                    existing_keys.add(tuple(row))
+        except SQLAlchemyError as e:
+            logger.warning(f"⚠️ Could not load existing data: {str(e)}")
+            existing_keys = set()
         
-        print(f"✅ Found {len(existing_keys)} existing records")
+        logger.info(f"✅ Found {len(existing_keys)} existing records")
 
         # ✅ สร้าง tuple key สำหรับเปรียบเทียบ
         df['pk_tuple'] = df[pk_column].apply(lambda row: tuple(row), axis=1)
@@ -230,50 +278,54 @@ def load_fact_check_price(df: pd.DataFrame):
         df_common_new = df[df['pk_tuple'].isin(common_keys)].copy()
 
         # โหลดข้อมูลเดิมเฉพาะที่ต้องเปรียบเทียบ
-        if not df_common_new.empty:
-            print("📊 Loading existing data for comparison...")
-            pk_conditions = []
-            for key in common_keys:
-                conditions = []
-                for i, col in enumerate(pk_column):
-                    conditions.append(f"{col} = '{key[i]}'")
-                pk_conditions.append(f"({' AND '.join(conditions)})")
-            
-            where_clause = " OR ".join(pk_conditions[:100])  # จำกัดจำนวน conditions
-            if len(pk_conditions) > 100:
-                print(f"⚠️ Limiting comparison to first 100 records due to query size")
-            
-            with target_engine.connect() as conn:
-                df_common_old = pd.read_sql(f"SELECT * FROM {table_name} WHERE {where_clause}", conn)
-        else:
-            df_common_old = pd.DataFrame()
+        df_diff = pd.DataFrame()
+        if not df_common_new.empty and len(common_keys) <= 1000:  # จำกัดจำนวน records ที่เปรียบเทียบ
+            logger.info("📊 Loading existing data for comparison...")
+            try:
+                pk_conditions = []
+                for key in list(common_keys)[:1000]:  # จำกัดจำนวน conditions
+                    conditions = []
+                    for i, col in enumerate(pk_column):
+                        conditions.append(f"{col} = '{key[i]}'")
+                    pk_conditions.append(f"({' AND '.join(conditions)})")
+                
+                where_clause = " OR ".join(pk_conditions[:100])  # จำกัดจำนวน conditions
+                if len(pk_conditions) > 100:
+                    logger.warning(f"⚠️ Limiting comparison to first 100 records due to query size")
+                
+                with target_engine.connect() as conn:
+                    df_common_old = pd.read_sql(f"SELECT * FROM {table_name} WHERE {where_clause}", conn)
+                
+                if not df_common_old.empty:
+                    # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
+                    for col in pk_column:
+                        if col in df_common_new.columns and col in df_common_old.columns:
+                            try:
+                                df_common_new[col] = df_common_new[col].astype(df_common_old[col].dtype)
+                            except Exception:
+                                df_common_new[col] = df_common_new[col].astype(str)
+                                df_common_old[col] = df_common_old[col].astype(str)
 
-        # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
-        if not df_common_old.empty:
-            for col in pk_column:
-                if col in df_common_new.columns and col in df_common_old.columns:
-                    try:
-                        df_common_new[col] = df_common_new[col].astype(df_common_old[col].dtype)
-                    except Exception:
-                        df_common_new[col] = df_common_new[col].astype(str)
-                        df_common_old[col] = df_common_old[col].astype(str)
+                    df_common_new['pk_tuple'] = df_common_new[pk_column].apply(lambda row: tuple(row), axis=1)
+                    df_common_old['pk_tuple'] = df_common_old[pk_column].apply(lambda row: tuple(row), axis=1)
 
-            df_common_new['pk_tuple'] = df_common_new[pk_column].apply(lambda row: tuple(row), axis=1)
-            df_common_old['pk_tuple'] = df_common_old[pk_column].apply(lambda row: tuple(row), axis=1)
+                    df_common_new.set_index(pk_column, inplace=True)
+                    df_common_old.set_index(pk_column, inplace=True)
 
-            df_common_new.set_index(pk_column, inplace=True)
-            df_common_old.set_index(pk_column, inplace=True)
+                    df_common_new = df_common_new.sort_index()
+                    df_common_old = df_common_old.sort_index()
 
-            df_common_new = df_common_new.sort_index()
-            df_common_old = df_common_old.sort_index()
+                    df_diff_mask = ~(df_common_new.eq(df_common_old, axis=1).all(axis=1))
+                    df_diff = df_common_new[df_diff_mask].reset_index()
+                    
+                    del df_common_old  # Free memory
+                    gc.collect()
+            except SQLAlchemyError as e:
+                logger.warning(f"⚠️ Could not compare existing data: {str(e)}")
+                df_diff = pd.DataFrame()
 
-            df_diff_mask = ~(df_common_new.eq(df_common_old, axis=1).all(axis=1))
-            df_diff = df_common_new[df_diff_mask].reset_index()
-        else:
-            df_diff = pd.DataFrame()
-
-        print(f"🆕 Insert: {len(df_to_insert)} rows")
-        print(f"🔄 Update: {len(df_diff)} rows")
+        logger.info(f"🆕 Insert: {len(df_to_insert)} rows")
+        logger.info(f"🔄 Update: {len(df_diff)} rows")
 
         # ✅ Load table metadata
         metadata = Table(table_name, MetaData(), autoload_with=target_engine)
@@ -284,46 +336,56 @@ def load_fact_check_price(df: pd.DataFrame):
             df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
             dropped = len(df_to_insert) - len(df_to_insert_valid)
             if dropped > 0:
-                print(f"⚠️ Skipped {dropped} rows with null primary keys")
+                logger.warning(f"⚠️ Skipped {dropped} rows with null primary keys")
             
             if not df_to_insert_valid.empty:
-                print("💾 Inserting new records...")
+                logger.info("💾 Inserting new records...")
                 # Insert แบบ batch เพื่อลด memory
-                batch_size = 1000
+                batch_size = 500  # ลด batch size
                 for i in range(0, len(df_to_insert_valid), batch_size):
                     batch = df_to_insert_valid.iloc[i:i+batch_size]
-                    with target_engine.begin() as conn:
-                        conn.execute(metadata.insert(), batch.to_dict(orient='records'))
-                    print(f"   Inserted batch {i//batch_size + 1}/{(len(df_to_insert_valid)-1)//batch_size + 1}")
+                    try:
+                        with target_engine.begin() as conn:
+                            conn.execute(metadata.insert(), batch.to_dict(orient='records'))
+                        logger.info(f"   Inserted batch {i//batch_size + 1}/{(len(df_to_insert_valid)-1)//batch_size + 1}")
+                    except SQLAlchemyError as e:
+                        logger.error(f"❌ Error inserting batch {i//batch_size + 1}: {str(e)}")
+                        continue
 
         # ✅ Update
         if not df_diff.empty:
-            print("💾 Updating existing records...")
-            with target_engine.begin() as conn:
-                for i, record in enumerate(df_diff.to_dict(orient='records')):
-                    stmt = pg_insert(metadata).values(**record)
-                    update_columns = {
-                        c.name: stmt.excluded[c.name]
-                        for c in metadata.columns
-                        if c.name not in pk_column
-                    }
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=pk_column,
-                        set_=update_columns
-                    )
-                    conn.execute(stmt)
-                    
-                    if (i + 1) % 100 == 0:
-                        print(f"   Updated {i + 1}/{len(df_diff)} records")
+            logger.info("💾 Updating existing records...")
+            try:
+                with target_engine.begin() as conn:
+                    for i, record in enumerate(df_diff.to_dict(orient='records')):
+                        stmt = pg_insert(metadata).values(**record)
+                        update_columns = {
+                            c.name: stmt.excluded[c.name]
+                            for c in metadata.columns
+                            if c.name not in pk_column
+                        }
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=pk_column,
+                            set_=update_columns
+                        )
+                        conn.execute(stmt)
+                        
+                        if (i + 1) % 50 == 0:  # ลดความถี่ของ logging
+                            logger.info(f"   Updated {i + 1}/{len(df_diff)} records")
+            except SQLAlchemyError as e:
+                logger.error(f"❌ Error updating records: {str(e)}")
 
         # Free memory
         del df, df_to_insert, df_diff, existing_keys
         gc.collect()
 
-        print("✅ Insert/update completed.")
+        logger.info("✅ Insert/update completed.")
     
+    except SQLAlchemyError as e:
+        logger.error(f"❌ Database error in load_fact_check_price: {str(e)}")
+        raise
     except Exception as e:
-        print(f"❌ Error in load_fact_check_price: {str(e)}")
+        logger.error(f"❌ Error in load_fact_check_price: {str(e)}")
         raise
 
 @job
