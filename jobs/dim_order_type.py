@@ -107,108 +107,157 @@ def clean_order_type_data(df: pd.DataFrame):
 @op
 def load_order_type_data(df: pd.DataFrame):
     table_name = 'dim_order_type'
-    pk_column = 'quotation_num'
-
-    # Ensure the unique constraint on quotation_num
+    
+    # ตรวจสอบโครงสร้างตารางปัจจุบัน
     with target_engine.connect() as conn:
-        # Check if the unique constraint exists, and add if not
-        conn.execute(text(f"""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
-                    ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
-                END IF;
-            END $$;
+        # ตรวจสอบว่ามีคอลัมน์ quotation_num หรือไม่
+        result = conn.execute(text(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = '{table_name}'
+            AND column_name = 'quotation_num'
         """))
-        conn.commit()
-
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
-
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
-
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
-
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-
-    exclude_columns = [pk_column, 'payment_plan_id', 'create_at', 'update_at']
-
-    # ✅ คำนวณ column ที่เหมือนกันทั้ง df และ df_existing เท่านั้น
-    all_columns = set(df_common_new.columns) & set(df_common_old.columns)
-    compare_cols = [
-        col for col in all_columns
-        if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
-    ]
-
-    def is_different(row):
-        for col in compare_cols:
-            val_new = row.get(f"{col}_new")
-            val_old = row.get(f"{col}_old")
-            if pd.isna(val_new) and pd.isna(val_old):
-                continue
-            if val_new != val_old:
-                return True
-        return False
-
-    # Filter rows that have differences
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-    if not df_diff.empty and compare_cols:
-        update_cols = [f"{col}_new" for col in compare_cols]
-        all_cols = [pk_column] + update_cols
-
-        # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
-        existing_cols = [c for c in all_cols if c in df_diff.columns]
+        has_quotation_num = result.fetchone() is not None
         
-        if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
-            df_diff_renamed = df_diff.loc[:, existing_cols].copy()
-            # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
-            new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
-            df_diff_renamed.columns = new_col_names
+        # ตรวจสอบ primary key
+        result = conn.execute(text(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = '{table_name}'
+            AND column_name = 'order_type_id'
+        """))
+        has_order_type_id = result.fetchone() is not None
+
+    if has_quotation_num:
+        # กรณีที่ยังมี quotation_num column (กรณีเก่า)
+        pk_column = 'quotation_num'
+        
+        # Ensure the unique constraint on quotation_num
+        with target_engine.connect() as conn:
+            conn.execute(text(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_quotation_num') THEN
+                        ALTER TABLE {table_name} ADD CONSTRAINT unique_quotation_num UNIQUE ({pk_column});
+                    END IF;
+                END $$;
+            """))
+            conn.commit()
+
+        df = df[~df[pk_column].duplicated(keep='first')].copy()
+
+        with target_engine.connect() as conn:
+            df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+
+        df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+
+        new_ids = set(df[pk_column]) - set(df_existing[pk_column])
+        df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+
+        common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+        df_common_new = df[df[pk_column].isin(common_ids)].copy()
+        df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+
+        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+
+        exclude_columns = [pk_column, 'order_type_id', 'create_at', 'update_at']
+
+        # ✅ คำนวณ column ที่เหมือนกันทั้ง df และ df_existing เท่านั้น
+        all_columns = set(df_common_new.columns) & set(df_common_old.columns)
+        compare_cols = [
+            col for col in all_columns
+            if col not in exclude_columns
+            and f"{col}_new" in merged.columns
+            and f"{col}_old" in merged.columns
+        ]
+
+        def is_different(row):
+            for col in compare_cols:
+                val_new = row.get(f"{col}_new")
+                val_old = row.get(f"{col}_old")
+                if pd.isna(val_new) and pd.isna(val_old):
+                    continue
+                if val_new != val_old:
+                    return True
+            return False
+
+        # Filter rows that have differences
+        df_diff = merged[merged.apply(is_different, axis=1)].copy()
+
+        if not df_diff.empty and compare_cols:
+            update_cols = [f"{col}_new" for col in compare_cols]
+            all_cols = [pk_column] + update_cols
+
+            # ✅ เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
+            existing_cols = [c for c in all_cols if c in df_diff.columns]
+            
+            if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
+                df_diff_renamed = df_diff.loc[:, existing_cols].copy()
+                # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+                new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
+                df_diff_renamed.columns = new_col_names
+            else:
+                df_diff_renamed = pd.DataFrame()
         else:
             df_diff_renamed = pd.DataFrame()
-    else:
-        df_diff_renamed = pd.DataFrame()
 
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+        print(f"🆕 Insert: {len(df_to_insert)} rows")
+        print(f"🔄 Update: {len(df_diff_renamed)} rows")
 
-    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+        metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # Insert only the new records
-    if not df_to_insert.empty:
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped}")
-        if not df_to_insert_valid.empty:
+        # Insert only the new records
+        if not df_to_insert.empty:
+            df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
+            dropped = len(df_to_insert) - len(df_to_insert_valid)
+            if dropped > 0:
+                print(f"⚠️ Skipped {dropped}")
+            if not df_to_insert_valid.empty:
+                with target_engine.begin() as conn:
+                    conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+
+        # Update only the records where there is a change
+        if not df_diff_renamed.empty and compare_cols:
             with target_engine.begin() as conn:
-                conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
+                for record in df_diff_renamed.to_dict(orient='records'):
+                    stmt = pg_insert(metadata).values(**record)
+                    update_columns = {
+                        c.name: stmt.excluded[c.name]
+                        for c in metadata.columns
+                        if c.name != pk_column
+                    }
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[pk_column],
+                        set_=update_columns
+                    )
+                    conn.execute(stmt)
 
-    # Update only the records where there is a change
-    if not df_diff_renamed.empty and compare_cols:
-        with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
-                stmt = pg_insert(metadata).values(**record)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name != pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_columns
-                )
-                conn.execute(stmt)
+    else:
+        # กรณีที่ไม่มี quotation_num column (กรณีใหม่) - ใช้ INSERT แบบปกติ
+        print("📝 No quotation_num column found, using simple INSERT")
+        
+        metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+        
+        # เพิ่ม timestamp columns ถ้าไม่มี
+        if 'create_at' not in df.columns:
+            df['create_at'] = pd.Timestamp.now()
+        if 'update_at' not in df.columns:
+            df['update_at'] = pd.Timestamp.now()
+        
+        # ตรวจสอบว่าคอลัมน์ใน DataFrame ตรงกับตารางหรือไม่
+        table_columns = [c.name for c in metadata.columns]
+        df_columns = [col for col in df.columns if col in table_columns]
+        df_filtered = df[df_columns].copy()
+        
+        # ลบ duplicates ถ้ามี
+        df_filtered = df_filtered.drop_duplicates()
+        
+        print(f"🆕 Insert: {len(df_filtered)} rows")
+        
+        # Insert records
+        if not df_filtered.empty:
+            with target_engine.begin() as conn:
+                conn.execute(metadata.insert(), df_filtered.to_dict(orient='records'))
 
     print("✅ Insert/update completed.")
 

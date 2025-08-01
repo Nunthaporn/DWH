@@ -6,6 +6,7 @@ import re
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime, timedelta
 
 # ✅ Load .env
 load_dotenv()
@@ -22,10 +23,18 @@ target_engine = create_engine(
 
 @op
 def extract_payment_data():
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
     query1 = """
         SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
         FROM fin_system_pay
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query1, source_engine)
@@ -171,8 +180,15 @@ def load_payment_data(df: pd.DataFrame):
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df_existing = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
 
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
@@ -264,20 +280,20 @@ def load_payment_data(df: pd.DataFrame):
 def dim_payment_plan_etl():
     load_payment_data(clean_payment_data(extract_payment_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_payment_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_payment_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_payment_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_payment_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_payment_plan.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_payment_plan.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "dim_payment_plan.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_payment_plan.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_payment_data(df_clean)
-    print("🎉 completed! Data upserted to dim_payment_plan.")
+#     load_payment_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_payment_plan.")
