@@ -905,9 +905,11 @@ def load_installment_data(df: pd.DataFrame):
         print(f"Available columns: {list(df_existing.columns)}")
         # สร้าง empty composite key สำหรับ existing data
         df_existing['composite_key'] = ''
+        print("📊 Created empty composite key for existing DataFrame due to missing primary key columns")
     elif df_existing.empty:
         print("⚠️ Existing DataFrame is empty. Creating empty composite key.")
         df_existing['composite_key'] = ''
+        print("📊 Created empty composite key for empty existing DataFrame")
     else:
         # ✅ ตรวจสอบว่าข้อมูลในคอลัมน์ primary key ของ existing data มีค่า None หรือ NaN หรือไม่
         for col in pk_column:
@@ -926,6 +928,7 @@ def load_installment_data(df: pd.DataFrame):
         if df_existing.empty:
             print("⚠️ Existing DataFrame is empty after filtering null primary key values.")
             df_existing['composite_key'] = ''
+            print("📊 Created empty composite key for existing DataFrame after filtering")
         else:
             # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
             for col in pk_column:
@@ -935,11 +938,38 @@ def load_installment_data(df: pd.DataFrame):
                     df_existing[col] = df_existing[col].astype(str)
 
             # ✅ สร้าง composite key สำหรับเปรียบเทียบ - แปลงเป็น string ก่อนและจัดการ None/NaN
-            df['composite_key'] = df[pk_column[0]].fillna('').astype(str) + '|' + df[pk_column[1]].fillna('').astype(str)
-            df_existing['composite_key'] = df_existing[pk_column[0]].fillna('').astype(str) + '|' + df_existing[pk_column[1]].fillna('').astype(str)
+            # ตรวจสอบว่า composite_key ยังไม่มีใน df หรือไม่
+            if 'composite_key' not in df.columns:
+                df['composite_key'] = df[pk_column[0]].fillna('').astype(str) + '|' + df[pk_column[1]].fillna('').astype(str)
+                print(f"📊 Created composite key for main DataFrame in existing data section: {len(df)} records")
+            
+            # ตรวจสอบว่า composite_key ยังไม่มีใน df_existing หรือไม่
+            if 'composite_key' not in df_existing.columns:
+                df_existing['composite_key'] = df_existing[pk_column[0]].fillna('').astype(str) + '|' + df_existing[pk_column[1]].fillna('').astype(str)
+                print(f"📊 Created composite key for existing DataFrame: {len(df_existing)} records")
+            else:
+                print(f"📊 Composite key already exists in existing DataFrame: {len(df_existing)} records")
+
+    # ✅ สร้าง composite key สำหรับ df หลักเสมอ (ไม่ว่าจะมี existing data หรือไม่)
+    if 'composite_key' not in df.columns:
+        # แปลง dtype ให้ตรงกันก่อนสร้าง composite key
+        for col in pk_column:
+            if col in df.columns:
+                df[col] = df[col].astype(str)
+        
+        # สร้าง composite key สำหรับ df หลัก
+        df['composite_key'] = df[pk_column[0]].fillna('').astype(str) + '|' + df[pk_column[1]].fillna('').astype(str)
+        print(f"📊 Created composite key for main DataFrame: {len(df)} records")
+    else:
+        print(f"📊 Composite key already exists in main DataFrame: {len(df)} records")
+    
+    # ✅ ตรวจสอบว่า composite_key สร้างได้ถูกต้องหรือไม่
+    if 'composite_key' not in df.columns:
+        print("❌ Failed to create composite_key for main DataFrame. Exiting.")
+        return
 
     # ✅ หาข้อมูลใหม่ที่ยังไม่มีในฐานข้อมูล
-    existing_keys = set(df_existing['composite_key'])
+    existing_keys = set(df_existing['composite_key']) if not df_existing.empty else set()
     df_to_insert = df[~df['composite_key'].isin(existing_keys)].copy()
     
     # ✅ ตรวจสอบว่า composite key สร้างได้ถูกต้องหรือไม่
@@ -950,29 +980,33 @@ def load_installment_data(df: pd.DataFrame):
     print(f"  - Records to update: {len(df) - len(df_to_insert)}")
 
     # ✅ หาข้อมูลที่มีอยู่แล้ว และเปรียบเทียบว่าเปลี่ยนแปลงหรือไม่
-    common_keys = set(df['composite_key']) & existing_keys
-    df_common_new = df[df['composite_key'].isin(common_keys)].copy()
-    df_common_old = df_existing[df_existing['composite_key'].isin(common_keys)].copy()
+    common_keys = set(df['composite_key']) & existing_keys if existing_keys else set()
+    df_common_new = df[df['composite_key'].isin(common_keys)].copy() if common_keys else pd.DataFrame()
+    df_common_old = df_existing[df_existing['composite_key'].isin(common_keys)].copy() if common_keys and not df_existing.empty else pd.DataFrame()
 
     # ตรวจสอบว่ามีข้อมูลที่ซ้ำกันหรือไม่
     if not df_common_new.empty and not df_common_old.empty:
-        # ตั้ง index ด้วย composite_key
-        df_common_new.set_index('composite_key', inplace=True)
-        df_common_old.set_index('composite_key', inplace=True)
+        try:
+            # ตั้ง index ด้วย composite_key
+            df_common_new.set_index('composite_key', inplace=True)
+            df_common_old.set_index('composite_key', inplace=True)
 
-        # เปรียบเทียบข้อมูล (ไม่รวม pk columns และ composite_key)
-        compare_cols = [col for col in df_common_new.columns if col not in pk_column + ['composite_key']]
-        # ตรวจสอบว่าคอลัมน์ที่ต้องการเปรียบเทียบมีอยู่ในทั้งสอง DataFrame หรือไม่
-        available_cols = [col for col in compare_cols if col in df_common_old.columns]
-        
-        if available_cols:
-            df_common_new_compare = df_common_new[available_cols]
-            df_common_old_compare = df_common_old[available_cols]
+            # เปรียบเทียบข้อมูล (ไม่รวม pk columns และ composite_key)
+            compare_cols = [col for col in df_common_new.columns if col not in pk_column + ['composite_key']]
+            # ตรวจสอบว่าคอลัมน์ที่ต้องการเปรียบเทียบมีอยู่ในทั้งสอง DataFrame หรือไม่
+            available_cols = [col for col in compare_cols if col in df_common_old.columns]
+            
+            if available_cols:
+                df_common_new_compare = df_common_new[available_cols]
+                df_common_old_compare = df_common_old[available_cols]
 
-            # หาแถวที่มีการเปลี่ยนแปลง
-            df_diff_mask = ~(df_common_new_compare.eq(df_common_old_compare, axis=1).all(axis=1))
-            df_diff = df_common_new[df_diff_mask].reset_index()
-        else:
+                # หาแถวที่มีการเปลี่ยนแปลง
+                df_diff_mask = ~(df_common_new_compare.eq(df_common_old_compare, axis=1).all(axis=1))
+                df_diff = df_common_new[df_diff_mask].reset_index()
+            else:
+                df_diff = pd.DataFrame()
+        except Exception as e:
+            print(f"⚠️ Error during data comparison: {e}")
             df_diff = pd.DataFrame()
     else:
         df_diff = pd.DataFrame()
@@ -983,6 +1017,16 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ ตรวจสอบว่ามีข้อมูลที่จะ insert หรือ update หรือไม่
     if df_to_insert.empty and df_diff.empty:
         print("⚠️ No new data to insert or update. Exiting.")
+        return
+    
+    # ✅ ตรวจสอบว่า composite_key มีอยู่ใน DataFrame ทั้งหมดที่จำเป็น
+    if 'composite_key' not in df.columns:
+        print("❌ composite_key not found in main DataFrame. This should not happen.")
+        return
+    
+    # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_existing หรือไม่
+    if 'composite_key' not in df_existing.columns:
+        print("❌ composite_key not found in existing DataFrame. This should not happen.")
         return
 
     # ✅ สร้าง fresh target engine สำหรับ metadata และ operations
@@ -1029,7 +1073,11 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ Insert - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_to_insert.empty:
         print(f"📤 Starting insert process for {len(df_to_insert)} records...")
-        df_to_insert = df_to_insert.drop(columns=['composite_key'])
+        # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_to_insert หรือไม่
+        if 'composite_key' in df_to_insert.columns:
+            df_to_insert = df_to_insert.drop(columns=['composite_key'])
+        else:
+            print("⚠️ composite_key not found in df_to_insert. Proceeding without dropping.")
         
         # ✅ ทำความสะอาดข้อมูลก่อน insert - แปลง NaN เป็น None
         for col in df_to_insert.columns:
@@ -1133,7 +1181,11 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ Update - ใช้ Batch UPSERT เพื่อความเร็ว
     if not df_diff.empty:
         print(f"📝 Starting update process for {len(df_diff)} records...")
-        df_diff = df_diff.drop(columns=['composite_key'])
+        # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_diff หรือไม่
+        if 'composite_key' in df_diff.columns:
+            df_diff = df_diff.drop(columns=['composite_key'])
+        else:
+            print("⚠️ composite_key not found in df_diff. Proceeding without dropping.")
         
         # ✅ ทำความสะอาดข้อมูลก่อน update - แปลง NaN เป็น None
         for col in df_diff.columns:
@@ -1274,9 +1326,9 @@ if __name__ == "__main__":
 
     df_clean = clean_installment_data((df_raw))
 
-    output_path = "fact_installment_payments.csv"
-    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    print(f"💾 Saved to {output_path}")
+    # output_path = "fact_installment_payments.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_installment_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_installment_payments.")
+    load_installment_data(df_clean)
+    print("🎉 completed! Data upserted to fact_installment_payments.")
