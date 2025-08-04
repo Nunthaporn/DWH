@@ -50,6 +50,10 @@ def extract_sales_quotation_data():
           AND type_insure IN ('ประกันรถ', 'ตรอ')
     """, source_engine)
 
+    print(f"📦 df_plan shape: {df_plan.shape}")
+    print(f"📦 df_order shape: {df_order.shape}")
+    print(f"📦 df_pay shape: {df_pay.shape}")
+
     return df_plan, df_order, df_pay
 
 
@@ -230,6 +234,8 @@ def clean_sales_quotation_data(inputs):
             # แปลงเป็น pd.Int64Dtype() เพื่อให้ NULL/None รองรับและเป็น integer จริง
             df_merged[col] = df_merged[col].astype('Int64')
 
+    print("\n📊 Cleaning completed")
+
     return df_merged
 
 @op
@@ -364,32 +370,32 @@ def load_sales_quotation_data(df: pd.DataFrame):
 def fact_sales_quotation_etl():
     load_sales_quotation_data(clean_sales_quotation_data(extract_sales_quotation_data()))
 
-if __name__ == "__main__":
-    df_plan, df_order, df_pay = extract_sales_quotation_data()
+# if __name__ == "__main__":
+#     df_plan, df_order, df_pay = extract_sales_quotation_data()
 
-    # print(f"- df_plan: {df_plan.shape}")
-    # print(f"- df_order: {df_order.shape}")
-    # print(f"- df_pay: {df_pay.shape}")
+#     # print(f"- df_plan: {df_plan.shape}")
+#     # print(f"- df_order: {df_order.shape}")
+#     # print(f"- df_pay: {df_pay.shape}")
 
-    df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
-    # print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+#     # print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_sales_quotation.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_sales_quotation.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    # ทำความสะอาดข้อมูลครั้งสุดท้ายก่อนส่งไป database
-    df_clean = df_clean.where(pd.notnull(df_clean), None)
-    df_clean = df_clean.replace([np.inf, -np.inf], None)
+#     # ทำความสะอาดข้อมูลครั้งสุดท้ายก่อนส่งไป database
+#     df_clean = df_clean.where(pd.notnull(df_clean), None)
+#     df_clean = df_clean.replace([np.inf, -np.inf], None)
     
-    # ตรวจสอบว่ายังมี NaN string อยู่หรือไม่
-    for col in df_clean.columns:
-        if df_clean[col].dtype == object:
-            mask = df_clean[col].astype(str).str.lower().str.strip() == 'nan'
-            if mask.any():
-                print(f"⚠️ พบ 'nan' string ในคอลัมน์ {col}: {mask.sum()} แถว")
-                # แทนที่ NaN string ด้วย None
-                df_clean.loc[mask, col] = None
+#     # ตรวจสอบว่ายังมี NaN string อยู่หรือไม่
+#     for col in df_clean.columns:
+#         if df_clean[col].dtype == object:
+#             mask = df_clean[col].astype(str).str.lower().str.strip() == 'nan'
+#             if mask.any():
+#                 print(f"⚠️ พบ 'nan' string ในคอลัมน์ {col}: {mask.sum()} แถว")
+#                 # แทนที่ NaN string ด้วย None
+#                 df_clean.loc[mask, col] = None
 
-    load_sales_quotation_data(df_clean)
-    print("🎉 completed! Data upserted to fact_sales_quotation.")
+#     load_sales_quotation_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_sales_quotation.")
