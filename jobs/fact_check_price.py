@@ -132,8 +132,8 @@ def load_fact_check_price(df: pd.DataFrame):
 def fact_check_price_etl():
     load_fact_check_price(
         clean_fact_check_price(
-            extract_logs_data().output,
-            extract_checkprice_data().output
+            extract_logs_data(),
+            extract_checkprice_data()
         )
     )
 
