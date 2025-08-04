@@ -118,19 +118,24 @@ def load_card_agent_data(df: pd.DataFrame):
 
     # ✅ โหลดเฉพาะ agent_id ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
     agent_ids = df[pk_column].tolist()
-    placeholders = ','.join(['%s'] * len(agent_ids))
     
-    query_existing = f"""
-        SELECT * FROM {table_name} 
-        WHERE {pk_column} IN ({placeholders})
-    """
-    
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(
-            text(query_existing), 
-            conn, 
-            params=agent_ids
-        )
+    if not agent_ids:
+        df_existing = pd.DataFrame()
+    else:
+        # แปลง agent_ids เป็น tuple เพื่อให้ SQLAlchemy รับได้
+        agent_ids_tuple = tuple(agent_ids)
+        
+        query_existing = f"""
+            SELECT * FROM {table_name} 
+            WHERE {pk_column} IN %s
+        """
+        
+        with target_engine.connect() as conn:
+            df_existing = pd.read_sql(
+                text(query_existing), 
+                conn, 
+                params=(agent_ids_tuple,)
+            )
 
     print(f"📊 New data: {len(df)} rows")
     print(f"📊 Existing data found: {len(df_existing)} rows")
