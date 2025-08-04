@@ -184,6 +184,7 @@ def extract_car_data():
     # ✅ Merge ข้อมูล
     if not df_pay.empty and not df_plan.empty:
         df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
+        print(f"📊 After merge: {df_merged.shape}")
     elif not df_pay.empty:
         print("⚠️ Only fin_system_pay has data, using it alone")
         df_merged = df_pay.copy()
@@ -193,6 +194,11 @@ def extract_car_data():
     else:
         print("❌ No data found in both tables")
         df_merged = pd.DataFrame()
+    
+    # ✅ ลบ duplicates หลังจาก merge
+    if not df_merged.empty:
+        df_merged = df_merged.drop_duplicates()
+        print(f"📊 After removing duplicates: {df_merged.shape}")
     
     # ✅ ตรวจสอบค่า NaN ในข้อมูลที่ extract
     print("🔍 NaN check in extracted data:")
@@ -225,6 +231,28 @@ def extract_car_data():
         print(df_pay.head())
         print("🔍 Sample data from df_plan:")
         print(df_plan.head())
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่ extract
+    if 'id_motor2' in df_merged.columns:
+        car_id_duplicates = df_merged['id_motor2'].duplicated()
+        if car_id_duplicates.any():
+            print(f"⚠️ WARNING: Found {car_id_duplicates.sum()} duplicate id_motor2 in extracted data!")
+            duplicate_ids = df_merged[car_id_duplicates]['id_motor2'].tolist()
+            print(f"🔍 Sample duplicate id_motor2: {duplicate_ids[:5]}")
+            # ลบ duplicates
+            df_merged = df_merged.drop_duplicates(subset=['id_motor2'], keep='first')
+            print(f"📊 After removing id_motor2 duplicates: {df_merged.shape}")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่ extract (อีกครั้ง)
+    if 'id_motor2' in df_merged.columns:
+        car_id_duplicates = df_merged['id_motor2'].duplicated()
+        if car_id_duplicates.any():
+            print(f"⚠️ WARNING: Still found {car_id_duplicates.sum()} duplicate id_motor2!")
+            duplicate_ids = df_merged[car_id_duplicates]['id_motor2'].tolist()
+            print(f"🔍 Sample duplicate id_motor2: {duplicate_ids[:5]}")
+            # ลบ duplicates อีกครั้ง
+            df_merged = df_merged.drop_duplicates(subset=['id_motor2'], keep='first')
+            print(f"📊 After removing id_motor2 duplicates again: {df_merged.shape}")
     
     return df_merged
 
@@ -259,10 +287,13 @@ def clean_car_data(df: pd.DataFrame):
             return pd.DataFrame()
     
     # ✅ ลบ duplicates เฉพาะคอลัมน์ที่มีอยู่
+    print(f"📊 Before removing duplicates: {df.shape}")
     if 'id_motor2' in df.columns:
         df = df.drop_duplicates(subset=['id_motor2'])
+        print(f"📊 After removing id_motor2 duplicates: {df.shape}")
     if 'idcar' in df.columns:
         df = df.drop_duplicates(subset=['idcar'])
+        print(f"📊 After removing idcar duplicates: {df.shape}")
     
     # ✅ ลบคอลัมน์ datestart ที่ซ้ำ
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
@@ -317,7 +348,12 @@ def clean_car_data(df: pd.DataFrame):
     valid_mask = df['car_id'].astype(str).str.strip().ne('') & df['car_id'].notna()
     df_with_id = df[valid_mask]
     df_without_id = df[~valid_mask]
+    print(f"📊 Records with valid car_id: {len(df_with_id)}")
+    print(f"📊 Records without car_id: {len(df_without_id)}")
+    
     df_with_id_cleaned = df_with_id.sort_values('non_empty_count', ascending=False).drop_duplicates(subset='car_id', keep='first')
+    print(f"📊 After removing car_id duplicates: {len(df_with_id_cleaned)}")
+    
     df_cleaned = pd.concat([df_with_id_cleaned, df_without_id], ignore_index=True)
     df_cleaned = df_cleaned.drop(columns=['non_empty_count'])
 
@@ -559,6 +595,17 @@ def clean_car_data(df: pd.DataFrame):
         df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
     df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True)
     df_cleaned = df_cleaned.drop_duplicates()
+    
+    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งหลังจากทำความสะอาดทั้งหมด
+    if 'car_id' in df_cleaned.columns:
+        car_id_duplicates = df_cleaned['car_id'].duplicated()
+        if car_id_duplicates.any():
+            print(f"⚠️ WARNING: Found {car_id_duplicates.sum()} duplicate car_ids after cleaning!")
+            duplicate_ids = df_cleaned[car_id_duplicates]['car_id'].tolist()
+            print(f"🔍 Sample duplicate car_ids: {duplicate_ids[:5]}")
+            # ลบ duplicates
+            df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
+            print(f"📊 After removing final car_id duplicates: {df_cleaned.shape}")
 
     # ✅ ตรวจสอบค่า NaN หลังการทำความสะอาด
     print("🔍 NaN check after cleaning:")
@@ -622,6 +669,19 @@ def clean_car_data(df: pd.DataFrame):
             print(df_cleaned['car_id'].head(10))
         else:
             print("🔍 DataFrame is empty")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งก่อนส่งข้อมูล
+    if 'car_id' in df_cleaned.columns:
+        df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
+        print(f"📊 Final records after removing all car_id duplicates: {len(df_cleaned)}")
+        
+        # แสดงตัวอย่าง car_id ที่ซ้ำ (ถ้ามี)
+        car_id_counts = df_cleaned['car_id'].value_counts()
+        duplicates = car_id_counts[car_id_counts > 1]
+        if not duplicates.empty:
+            print("⚠️ WARNING: Found duplicate car_ids:")
+            for car_id, count in duplicates.head(5).items():
+                print(f"   - {car_id}: {count} times")
 
     return df_cleaned
 
@@ -662,6 +722,7 @@ def load_car_data(df: pd.DataFrame):
 
     # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
+    print(f"📊 After removing duplicates: {df.shape}")
 
     # ✅ ตรวจสอบค่า NaN ในข้อมูลก่อนเข้า database
     print("🔍 Checking for NaN values before database insertion:")
@@ -703,12 +764,15 @@ def load_car_data(df: pd.DataFrame):
     # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
+    # ✅ Load ข้อมูลทั้งหมดจาก PostgreSQL เพื่อตรวจสอบ car_id ที่มีอยู่แล้ว
+    print("🔍 Loading existing data from database...")
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(
-            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            f"SELECT {pk_column} FROM {table_name}",
             conn
         )
+
+    print(f"📊 Existing records in database: {len(df_existing)}")
 
     # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
@@ -716,23 +780,50 @@ def load_car_data(df: pd.DataFrame):
     # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
     new_ids = set(df[pk_column]) - set(df_existing[pk_column])
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+    print(f"🆕 New car_ids to insert: {len(df_to_insert)}")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่จะ insert
+    if not df_to_insert.empty:
+        duplicate_check = df_to_insert[pk_column].duplicated()
+        if duplicate_check.any():
+            print(f"⚠️ WARNING: Found {duplicate_check.sum()} duplicate car_ids in insert data!")
+            duplicate_ids = df_to_insert[duplicate_check][pk_column].tolist()
+            print(f"🔍 Duplicate car_ids: {duplicate_ids[:5]}...")
+            # ลบ duplicates
+            df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
+            print(f"📊 After removing duplicates: {len(df_to_insert)} records to insert")
+        
+        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้ง
+        duplicate_check_again = df_to_insert[pk_column].duplicated()
+        if duplicate_check_again.any():
+            print(f"⚠️ WARNING: Still found {duplicate_check_again.sum()} duplicate car_ids!")
+            duplicate_ids_again = df_to_insert[duplicate_check_again][pk_column].tolist()
+            print(f"🔍 Duplicate car_ids: {duplicate_ids_again[:5]}...")
+            # ลบ duplicates อีกครั้ง
+            df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
+            print(f"📊 After removing duplicates again: {len(df_to_insert)} records to insert")
 
     # ✅ Identify car_id ที่มีอยู่แล้ว
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+    print(f"🔄 Existing car_ids to update: {len(df_common_new)}")
 
-    # ✅ Merge ด้วย suffix (_new, _old)
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
-    ]
+    # ✅ Merge ด้วย suffix (_new, _old) - เฉพาะเมื่อมีข้อมูลที่จะ update
+    if not df_common_new.empty and not df_common_old.empty:
+        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+        
+        # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
+        exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
+        compare_cols = [
+            col for col in df.columns
+            if col not in exclude_columns
+            and f"{col}_new" in merged.columns
+            and f"{col}_old" in merged.columns
+        ]
+    else:
+        merged = pd.DataFrame()
+        compare_cols = []
 
     # ✅ ตรวจสอบว่ามีคอลัมน์ที่สามารถเปรียบเทียบได้หรือไม่
     if not compare_cols:
@@ -774,6 +865,58 @@ def load_car_data(df: pd.DataFrame):
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด
+    all_car_ids = []
+    if not df_to_insert.empty:
+        all_car_ids.extend(df_to_insert[pk_column].tolist())
+    if not df_diff_renamed.empty:
+        all_car_ids.extend(df_diff_renamed[pk_column].tolist())
+    
+    if all_car_ids:
+        from collections import Counter
+        car_id_counts = Counter(all_car_ids)
+        duplicates = {car_id: count for car_id, count in car_id_counts.items() if count > 1}
+        if duplicates:
+            print(f"⚠️ WARNING: Found {len(duplicates)} duplicate car_ids in all data!")
+            for car_id, count in list(duplicates.items())[:5]:
+                print(f"   - {car_id}: {count} times")
+        else:
+            print("✅ No duplicate car_ids found in all data")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (อีกครั้ง)
+    all_car_ids_again = []
+    if not df_to_insert.empty:
+        all_car_ids_again.extend(df_to_insert[pk_column].tolist())
+    if not df_diff_renamed.empty:
+        all_car_ids_again.extend(df_diff_renamed[pk_column].tolist())
+    
+    if all_car_ids_again:
+        car_id_counts_again = Counter(all_car_ids_again)
+        duplicates_again = {car_id: count for car_id, count in car_id_counts_again.items() if count > 1}
+        if duplicates_again:
+            print(f"⚠️ WARNING: Still found {len(duplicates_again)} duplicate car_ids in all data!")
+            for car_id, count in list(duplicates_again.items())[:5]:
+                print(f"   - {car_id}: {count} times")
+        else:
+            print("✅ No duplicate car_ids found in all data (final check)")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (ครั้งสุดท้าย)
+    all_car_ids_final = []
+    if not df_to_insert.empty:
+        all_car_ids_final.extend(df_to_insert[pk_column].tolist())
+    if not df_diff_renamed.empty:
+        all_car_ids_final.extend(df_diff_renamed[pk_column].tolist())
+    
+    if all_car_ids_final:
+        car_id_counts_final = Counter(all_car_ids_final)
+        duplicates_final = {car_id: count for car_id, count in car_id_counts_final.items() if count > 1}
+        if duplicates_final:
+            print(f"⚠️ WARNING: Still found {len(duplicates_final)} duplicate car_ids in all data!")
+            for car_id, count in list(duplicates_final.items())[:5]:
+                print(f"   - {car_id}: {count} times")
+        else:
+            print("✅ No duplicate car_ids found in all data (final check)")
 
     # ✅ Load table metadata
     def load_table_metadata():
@@ -801,19 +944,74 @@ def load_car_data(df: pd.DataFrame):
             print("⚠️ WARNING: No valid data to insert after NaN check!")
             return
         
-        if not df_to_insert_valid.empty:
-            # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
-            df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
+            # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งก่อน insert
+    df_to_insert_valid = df_to_insert_valid[~df_to_insert_valid[pk_column].duplicated(keep='first')].copy()
+    print(f"📊 Final records to insert after duplicate check: {len(df_to_insert_valid)}")
+    
+    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งในข้อมูลที่ clean แล้ว
+    if not df_to_insert_valid.empty:
+        # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
+        df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
+        
+        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งหลังจาก clean
+        df_to_insert_clean = df_to_insert_clean.drop_duplicates(subset=[pk_column], keep='first')
+        print(f"📊 Final clean records to insert: {len(df_to_insert_clean)}")
+        
+        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้ง
+        duplicate_check_final = df_to_insert_clean[pk_column].duplicated()
+        if duplicate_check_final.any():
+            print(f"⚠️ WARNING: Found {duplicate_check_final.sum()} duplicate car_ids in final clean data!")
+            duplicate_ids_final = df_to_insert_clean[duplicate_check_final][pk_column].tolist()
+            print(f"🔍 Duplicate car_ids: {duplicate_ids_final[:5]}...")
+            # ลบ duplicates อีกครั้ง
+            df_to_insert_clean = df_to_insert_clean.drop_duplicates(subset=[pk_column], keep='first')
+            print(f"📊 After removing final duplicates: {len(df_to_insert_clean)} records to insert")
+        
+        # ✅ แสดงตัวอย่าง car_id ที่จะ insert
+        if len(df_to_insert_clean) > 0:
+            sample_car_ids = df_to_insert_clean[pk_column].head(5).tolist()
+            print(f"🔍 Sample car_ids to insert: {sample_car_ids}")
             
             def insert_operation():
                 with target_engine.begin() as conn:
-                    # ✅ แบ่งข้อมูลเป็น batch เล็กๆ เพื่อลดภาระ
-                    batch_size = 5000
+                    # ✅ ใช้ UPSERT (INSERT ... ON CONFLICT DO UPDATE) เพื่อป้องกัน duplicate key error
+                    batch_size = 1000  # ลดขนาด batch เพื่อลดโอกาสเกิด error
                     records = df_to_insert_clean.to_dict(orient='records')
                     for i in range(0, len(records), batch_size):
                         batch = records[i:i + batch_size]
-                        conn.execute(metadata.insert(), batch)
-                        print(f"✅ Inserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size}")
+                        try:
+                            # ใช้ UPSERT สำหรับแต่ละ record ใน batch
+                            for record in batch:
+                                stmt = pg_insert(metadata).values(**record)
+                                update_columns = {
+                                    c.name: stmt.excluded[c.name]
+                                    for c in metadata.columns
+                                    if c.name != pk_column
+                                }
+                                stmt = stmt.on_conflict_do_update(
+                                    index_elements=[pk_column],
+                                    set_=update_columns
+                                )
+                                conn.execute(stmt)
+                            print(f"✅ Upserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size}")
+                        except Exception as e:
+                            print(f"❌ Error upserting batch {i//batch_size + 1}: {e}")
+                            # ถ้าเกิด error ให้ upsert ทีละ record
+                            for record in batch:
+                                try:
+                                    stmt = pg_insert(metadata).values(**record)
+                                    update_columns = {
+                                        c.name: stmt.excluded[c.name]
+                                        for c in metadata.columns
+                                        if c.name != pk_column
+                                    }
+                                    stmt = stmt.on_conflict_do_update(
+                                        index_elements=[pk_column],
+                                        set_=update_columns
+                                    )
+                                    conn.execute(stmt)
+                                except Exception as single_error:
+                                    print(f"❌ Failed to upsert record with {pk_column}: {record.get(pk_column)} - {single_error}")
             
             retry_db_operation(insert_operation)
 
