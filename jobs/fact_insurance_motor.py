@@ -511,11 +511,7 @@ def load_motor_data(df: pd.DataFrame):
     today_str = datetime.now().strftime('%Y-%m-%d')
 
     # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
-    with target_engine.connect() as conn:
-        existing_query = pd.read_sql(
-            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
-            conn
-        )
+    existing_query = f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'"
     df_existing = execute_query_with_retry(target_engine, existing_query)
 
     existing_ids = set(df_existing[pk_column])
