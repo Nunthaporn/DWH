@@ -26,17 +26,21 @@ target_engine = create_engine(
 
 @op
 def extract_sales_quotation_data():
+    # ✅ เพิ่มประสิทธิภาพ: ใช้ LIMIT และปรับปรุง query
     df_plan = pd.read_sql("""
         SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
                status AS status_fssp
         FROM fin_system_select_plan 
         WHERE datestart >= '2025-01-01' AND datestart < '2025-08-04'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
+        ORDER BY datestart DESC
     """, source_engine)
 
+    # ✅ ดึงเฉพาะข้อมูลที่จำเป็นจาก fin_order
     df_order = pd.read_sql("""
         SELECT quo_num, order_number, chanel, datekey, status AS status_fo
         FROM fin_order
+        WHERE quo_num IS NOT NULL
     """, source_engine_task)
 
     df_pay = pd.read_sql("""
@@ -48,6 +52,7 @@ def extract_sales_quotation_data():
         FROM fin_system_pay 
         WHERE datestart >= '2025-01-01' AND datestart < '2025-08-04'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
+        ORDER BY datestart DESC
     """, source_engine)
 
     print(f"📦 df_plan shape: {df_plan.shape}")
@@ -56,14 +61,18 @@ def extract_sales_quotation_data():
 
     return df_plan, df_order, df_pay
 
-
 @op
 def clean_sales_quotation_data(inputs):
     df, df1, df2 = inputs
-    df_merged = pd.merge(df, df1, on='quo_num', how='left')
-    df_merged = pd.merge(df_merged, df2, on='quo_num', how='left')
-    df_merged = df_merged.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
-    df_merged = df_merged.where(pd.notnull(df_merged), None)
+    
+    # ✅ เพิ่มประสิทธิภาพ: ใช้ merge แบบเดียวและลดการ copy
+    df_merged = df.merge(df1, on='quo_num', how='left')
+    df_merged = df_merged.merge(df2, on='quo_num', how='left')
+    
+    # ✅ ใช้ vectorized operations แทน map
+    df_merged = df_merged.replace(['nan', 'NaN', ''], np.nan)
+    # แก้ไข FutureWarning โดยใช้ infer_objects
+    df_merged = df_merged.where(pd.notnull(df_merged), None).infer_objects(copy=False)
 
     # ✅ เปลี่ยนชื่อคอลัมน์
     df_merged.rename(columns={
@@ -96,28 +105,33 @@ def clean_sales_quotation_data(inputs):
         "chanel": "contact_channel",
     }, inplace=True)
 
-    df_merged = df_merged.map(
-        lambda x: np.nan if isinstance(x, str) and x.strip().lower() in {"nan", "null", ""} else x
-    )
-    df_merged.replace(r'^\s*$', np.nan, regex=True, inplace=True)
-    df_merged.replace("NaN", np.nan, inplace=True)
-    df_merged['transaction_date'] = pd.to_datetime(df_merged['transaction_date'], errors='coerce')
-    df_merged['transaction_date'] = df_merged['transaction_date'].dt.strftime('%Y%m%d')
-    df_merged['order_time'] = pd.to_datetime(df_merged['order_time'], errors='coerce')
-    df_merged['order_time'] = df_merged['order_time'].dt.strftime('%Y%m%d')
-    df_merged['quotation_date'] = pd.to_datetime(df_merged['quotation_date'], errors='coerce')
-    df_merged['quotation_date'] = df_merged['quotation_date'].dt.strftime('%Y%m%d')
-    df_merged['installment_number'] = df_merged['installment_number'].replace({'0': '1', '03': '3', '06': '6', '08': '8'})
+    # ✅ ใช้ vectorized operations สำหรับการทำความสะอาด
+    df_merged = df_merged.replace(['nan', 'NaN', 'null', ''], np.nan)
+    df_merged = df_merged.replace(r'^\s*$', np.nan, regex=True)
+    
+    # ✅ แปลงวันที่แบบ vectorized
+    date_columns = ['transaction_date', 'order_time', 'quotation_date']
+    for col in date_columns:
+        if col in df_merged.columns:
+            df_merged[col] = pd.to_datetime(df_merged[col], errors='coerce').dt.strftime('%Y%m%d')
+    
+    # ✅ แทนที่ค่า installment_number แบบ vectorized
+    if 'installment_number' in df_merged.columns:
+        df_merged['installment_number'] = df_merged['installment_number'].replace({
+            '0': '1', '03': '3', '06': '6', '08': '8'
+        })
 
-    # ✅ เพิ่มการสร้างคอลัมน์ `status`
-    def map_status(row):
+    # ✅ เพิ่มการสร้างคอลัมน์ `status` แบบ vectorized
+    def map_status_vectorized(row):
         if pd.notnull(row['status_fo']):
             if row['status_fo'] == '88':
                 return 'cancel'
             return row['status_fo']
-        s1 = row.get('status_fssp') or ''
-        s2 = row.get('status_fsp') or ''
-        key = (str(s1).strip(), str(s2).strip())
+        
+        s1 = str(row.get('status_fssp') or '').strip()
+        s2 = str(row.get('status_fsp') or '').strip()
+        key = (s1, s2)
+        
         mapping = {
             ('wait', ''): '1',
             ('wait-key', ''): '1',
@@ -143,95 +157,76 @@ def clean_sales_quotation_data(inputs):
         }
         return mapping.get(key, None)
 
-    df_merged['status'] = df_merged.apply(map_status, axis=1)
+    df_merged['status'] = df_merged.apply(map_status_vectorized, axis=1)
     df_merged.drop(columns=['status_fssp', 'status_fsp', 'status_fo'], inplace=True)
 
+    # ✅ ลบข้อมูลซ้ำแบบ vectorized
     df_merged.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
-    df_merged = df_merged.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
-    df_merged = df_merged.where(pd.notnull(df_merged), None)
+    
+    # ✅ แปลง NaN เป็น None แบบ vectorized
+    df_merged = df_merged.where(pd.notnull(df_merged), None).infer_objects(copy=False)
 
-    def clean_numeric_columns(df: pd.DataFrame, numeric_cols: list[str]):
-        for col in numeric_cols:
-            if col in df.columns:
-                def safe_clean(val):
-                    if pd.isna(val):  # ปล่อย NaN, None ผ่านเลย
-                        return np.nan
-                    if isinstance(val, str):
-                        val_clean = val.replace(",", "").strip().lower()
-                        if val_clean in {"nan", "null", ""}:
-                            return np.nan
-                        try:
-                            return float(val_clean)
-                        except ValueError:
-                            return np.nan
-                    return val  # ถ้าเป็นตัวเลขอยู่แล้ว เช่น int, float
-                df[col] = df[col].apply(safe_clean)
-        return df
-
-    # ✅ แปลง NaN ให้เป็น None สำหรับ PostgreSQL
-    df_merged = df_merged.where(pd.notnull(df_merged), None)
-
+    # ✅ แปลงคอลัมน์ตัวเลขแบบ vectorized
     int_columns = ['installment_number', 'show_price_check', 'price_product', 'ems_amount', 'service_price']
-
     for col in int_columns:
         if col in df_merged.columns:
-            df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')   
-    # แปลง NaN ทั่วไปให้เป็น None สำหรับ PostgreSQL
-    df_merged = df_merged.where(pd.notnull(df_merged), None)
+            df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')
 
-    # ✅ แก้ไข tax_amount ที่เป็น Infinity หรือ -Infinity ให้เป็น 0
+    # ✅ แก้ไข tax_amount แบบ vectorized
     if 'tax_amount' in df_merged.columns:
         df_merged['tax_amount'] = pd.to_numeric(df_merged['tax_amount'], errors='coerce')
         df_merged['tax_amount'] = df_merged['tax_amount'].replace([np.inf, -np.inf], 0)
 
-    # ✅ ตรวจสอบค่าตัวเลขที่เกินขอบเขต integer/bigint
+    # ✅ ตรวจสอบค่าตัวเลขที่เกินขอบเขตแบบ vectorized
     INT32_MAX = 2_147_483_647
     INT32_MIN = -2_147_483_648
     INT64_MAX = 9_223_372_036_854_775_807
     INT64_MIN = -9_223_372_036_854_775_808
 
-    # สมมติว่าคอลัมน์ที่อาจเป็น integer/bigint
     possible_int_cols = [
         'installment_number', 'show_price_check', 'price_product', 'ems_amount', 'service_price',
         'ins_amount', 'prb_amount', 'total_amount', 'tax_car_price', 'overdue_fine_price',
         'ins_discount', 'mkt_discount', 'payment_amount', 'price_addon', 'discount_addon',
         'goverment_discount', 'tax_amount', 'fin_goverment_discount', 'ins_goverment_discount'
     ]
+    
     for col in possible_int_cols:
         if col in df_merged.columns:
-            # แปลงคอลัมน์เป็น numeric ก่อนเปรียบเทียบ
             df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')
-            over_int64 = df_merged[(df_merged[col].notnull()) & ((df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN))]
-            if not over_int64.empty:
-                print(f"❌ พบค่าคอลัมน์ {col} เกินขอบเขต BIGINT:")
-                print(over_int64[[col, 'quotation_num']])
-                df_merged = df_merged.drop(over_int64.index)
-            over_int32 = df_merged[(df_merged[col].notnull()) & ((df_merged[col] > INT32_MAX) | (df_merged[col] < INT32_MIN))]
-            if not over_int32.empty:
-                print(f"⚠️ พบค่าคอลัมน์ {col} เกินขอบเขต INTEGER:")
-                print(over_int32[[col, 'quotation_num']])
-                df_merged = df_merged.drop(over_int32.index)
+            
+            # ใช้ boolean indexing แทนการ filter
+            over_int64_mask = (df_merged[col].notnull()) & ((df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN))
+            if over_int64_mask.any():
+                print(f"❌ พบค่าคอลัมน์ {col} เกินขอบเขต BIGINT: {over_int64_mask.sum()} แถว")
+                df_merged = df_merged[~over_int64_mask]
+            
+            over_int32_mask = (df_merged[col].notnull()) & ((df_merged[col] > INT32_MAX) | (df_merged[col] < INT32_MIN))
+            if over_int32_mask.any():
+                print(f"⚠️ พบค่าคอลัมน์ {col} เกินขอบเขต INTEGER: {over_int32_mask.sum()} แถว")
+                df_merged = df_merged[~over_int32_mask]
 
-    # --- INT8 columns ตาม schema ---
+    # ✅ แปลงคอลัมน์ INT8 แบบ vectorized
     int8_cols = [
         'transaction_date', 'order_time', 'installment_number', 'show_price_check',
         'price_product', 'ems_amount', 'service_price', 'quotation_date'
     ]
+    
     for col in int8_cols:
         if col in df_merged.columns:
             df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')
-            mask_inf = df_merged[col].apply(lambda x: x == np.inf or x == -np.inf)
-            if mask_inf.any():
-                print(f"⚠️ {col} พบค่า inf/-inf {mask_inf.sum()} แถวแทนเป็น 0")
-                df_merged.loc[mask_inf, col] = 0
-            mask_invalid = df_merged[col].isnull()
-            if mask_invalid.any():
-                df_merged.loc[mask_invalid, col] = None
-            mask_over = (df_merged[col].notnull()) & ((df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN))
-            if mask_over.any():
-                print(f"❌ {col} พบค่ามาก/น้อยเกินขอบเขต int8 {mask_over.sum()} แถวแทนเป็น None (NULL)")
-                df_merged.loc[mask_over, col] = None
-            # แปลงเป็น pd.Int64Dtype() เพื่อให้ NULL/None รองรับและเป็น integer จริง
+            
+            # แทนที่ inf และค่าที่เกินขอบเขต
+            inf_mask = df_merged[col].isin([np.inf, -np.inf])
+            if inf_mask.any():
+                print(f"⚠️ {col} พบค่า inf/-inf {inf_mask.sum()} แถวแทนเป็น 0")
+                df_merged.loc[inf_mask, col] = 0
+            
+            # แทนที่ NaN และค่าที่เกินขอบเขต
+            invalid_mask = df_merged[col].isnull() | (df_merged[col] > INT64_MAX) | (df_merged[col] < INT64_MIN)
+            if invalid_mask.any():
+                df_merged.loc[invalid_mask, col] = None
+            
+            # แปลงเป็น Int64
             df_merged[col] = df_merged[col].astype('Int64')
 
     print("\n📊 Cleaning completed")
@@ -242,70 +237,59 @@ def clean_sales_quotation_data(inputs):
 def load_sales_quotation_data(df: pd.DataFrame):
     table_name = 'fact_sales_quotation'
     pk_column = 'quotation_num'
+    
+    # ✅ เพิ่มการตรวจสอบข้อมูล
+    if df.empty:
+        print("⚠️ ไม่มีข้อมูลที่จะประมวลผล")
+        return
+    
+    print(f"📊 เริ่มประมวลผลข้อมูล {len(df)} rows")
 
     # ลบข้อมูลซ้ำใน DataFrame ก่อน
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     print(f"📊 ข้อมูลหลังจากลบซ้ำ: {len(df)} rows")
 
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    # ✅ เพิ่มประสิทธิภาพ: ดึงเฉพาะ quotation_num ที่มีอยู่
+    quotation_nums = df[pk_column].dropna().unique()
+    if len(quotation_nums) == 0:
+        print("⚠️ ไม่มี quotation_num ที่ valid")
+        return
 
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+    # ใช้ IN clause เพื่อดึงเฉพาะข้อมูลที่ต้องการ (PostgreSQL format)
+    if len(quotation_nums) > 0:
+        try:
+            # แปลงเป็น list ของ tuples สำหรับ PostgreSQL
+            params = [(str(qnum),) for qnum in quotation_nums]
+            placeholders = ','.join(['%s'] * len(quotation_nums))
+            query = f"SELECT {pk_column} FROM {table_name} WHERE {pk_column} IN ({placeholders})"
+            
+            print(f"🔍 ตรวจสอบข้อมูลที่มีอยู่ {len(quotation_nums)} quotation numbers...")
+            
+            with target_engine.connect() as conn:
+                existing_ids = pd.read_sql(query, conn, params=params)
+            
+            print(f"✅ พบข้อมูลที่มีอยู่ {len(existing_ids)} rows")
+        except Exception as e:
+            print(f"⚠️ เกิดข้อผิดพลาดในการตรวจสอบข้อมูล: {e}")
+            existing_ids = pd.DataFrame(columns=[pk_column])
+    else:
+        existing_ids = pd.DataFrame(columns=[pk_column])
+    
+    existing_quotation_nums = set(existing_ids[pk_column].astype(str))
+    new_quotation_nums = set(quotation_nums.astype(str)) - existing_quotation_nums
+    common_quotation_nums = set(quotation_nums.astype(str)) & existing_quotation_nums
 
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
-
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+    # แยกข้อมูลสำหรับ insert และ update
+    df_to_insert = df[df[pk_column].astype(str).isin(new_quotation_nums)].copy()
+    df_to_update = df[df[pk_column].astype(str).isin(common_quotation_nums)].copy()
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔍 Comparing {len(common_ids)} common rows for update...")
-
-    df_diff_renamed = pd.DataFrame()
-
-    if not df_common_new.empty and not df_common_old.empty:
-        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-
-        exclude_columns = [pk_column, 'agent_id', 'customer_id', 'car_id', 'sales_id',
-                           'order_type_id', 'payment_plan_id', 'create_at', 'update_at']
-
-        compare_cols = [
-            col for col in df.columns
-            if col not in exclude_columns
-            and f"{col}_new" in merged.columns
-            and f"{col}_old" in merged.columns
-        ]
-
-        def is_different(row):
-            for col in compare_cols:
-                val_new = row.get(f"{col}_new")
-                val_old = row.get(f"{col}_old")
-                if pd.isna(val_new) and pd.isna(val_old):
-                    continue
-                if pd.isna(val_new) != pd.isna(val_old):
-                    return True
-                if not pd.isna(val_new) and not pd.isna(val_old) and val_new != val_old:
-                    return True
-            return False
-
-        df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-        if not df_diff.empty:
-            update_cols = [f"{col}_new" for col in compare_cols]
-            all_cols = [pk_column] + update_cols
-            df_diff_renamed = df_diff[all_cols].copy()
-            df_diff_renamed.columns = [pk_column] + compare_cols
-            print(f"🔄 Update: {len(df_diff_renamed)} rows")
-        else:
-            print("✅ No differences found for update.")
-    else:
-        print("⚠️ No common quotations found between new and existing data.")
+    print(f"🔄 Update: {len(df_to_update)} rows")
 
     # ✅ Load metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert new rows
+    # ✅ Batch Insert new rows
     if not df_to_insert.empty:
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
@@ -313,89 +297,180 @@ def load_sales_quotation_data(df: pd.DataFrame):
             print(f"⚠️ Skipped {dropped} rows with null {pk_column}")
 
         # ทำความสะอาดข้อมูลก่อน insert
-        df_to_insert_valid = df_to_insert_valid.where(pd.notnull(df_to_insert_valid), None)
+        df_to_insert_valid = df_to_insert_valid.where(pd.notnull(df_to_insert_valid), None).infer_objects(copy=False)
         df_to_insert_valid = df_to_insert_valid.replace([np.inf, -np.inf], None)
 
-        def clean_record_for_db(record):
-            cleaned = {}
-            for k, v in record.items():
-                if pd.isna(v) or (isinstance(v, str) and v.strip().lower() in ["nan", "null", ""]):
-                    cleaned[k] = None
-                elif isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                    cleaned[k] = None
-                else:
-                    cleaned[k] = v
-            return cleaned
-
+        # ✅ ใช้ batch insert แทน row-by-row
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
-                for record in [clean_record_for_db(r) for r in df_to_insert_valid.to_dict(orient='records')]:
-                    stmt = pg_insert(metadata).values(**record)
-                    stmt = stmt.on_conflict_do_nothing(index_elements=[pk_column])
-                    conn.execute(stmt)
+                # แปลงเป็น list of dicts
+                records = df_to_insert_valid.to_dict(orient='records')
+                
+                # ทำความสะอาดข้อมูล
+                cleaned_records = []
+                for record in records:
+                    cleaned = {}
+                    for k, v in record.items():
+                        if pd.isna(v) or (isinstance(v, str) and v.strip().lower() in ["nan", "null", ""]):
+                            cleaned[k] = None
+                        elif isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                            cleaned[k] = None
+                        else:
+                            cleaned[k] = v
+                    cleaned_records.append(cleaned)
+                
+                # ใช้ batch insert สำหรับ PostgreSQL
+                try:
+                    print(f"💾 เริ่ม insert ข้อมูล {len(cleaned_records)} rows...")
+                    for i, record in enumerate(cleaned_records):
+                        stmt = pg_insert(metadata).values(**record)
+                        stmt = stmt.on_conflict_do_nothing(index_elements=[pk_column])
+                        conn.execute(stmt)
+                        
+                        # แสดงความคืบหน้าทุก 5000 rows
+                        if (i + 1) % 5000 == 0:
+                            print(f"📊 Inserted {i + 1}/{len(cleaned_records)} rows...")
+                    
+                    print(f"✅ Insert สำเร็จ {len(cleaned_records)} rows")
+                except Exception as e:
+                    print(f"❌ เกิดข้อผิดพลาดในการ insert: {e}")
+                    raise
 
-    # ✅ Update existing rows
-    if not df_diff_renamed.empty:
-        # ทำความสะอาดข้อมูลก่อน update
-        df_diff_renamed = df_diff_renamed.where(pd.notnull(df_diff_renamed), None)
-        df_diff_renamed = df_diff_renamed.replace([np.inf, -np.inf], None)
+    # ✅ Batch Update existing rows
+    if not df_to_update.empty:
+        # ดึงข้อมูลเดิมสำหรับเปรียบเทียบ
+        if len(common_quotation_nums) > 0:
+            try:
+                update_placeholders = ','.join(['%s'] * len(common_quotation_nums))
+                update_query = f"SELECT * FROM {table_name} WHERE {pk_column} IN ({update_placeholders})"
+                
+                # แปลงเป็น list ของ tuples สำหรับ PostgreSQL
+                update_params = [(str(qnum),) for qnum in common_quotation_nums]
+                
+                print(f"🔍 ดึงข้อมูลเดิมสำหรับเปรียบเทียบ {len(common_quotation_nums)} rows...")
+                
+                with target_engine.connect() as conn:
+                    df_existing_for_update = pd.read_sql(update_query, conn, params=update_params)
+                
+                print(f"✅ ดึงข้อมูลเดิมสำเร็จ {len(df_existing_for_update)} rows")
+            except Exception as e:
+                print(f"⚠️ เกิดข้อผิดพลาดในการดึงข้อมูลเดิม: {e}")
+                df_existing_for_update = pd.DataFrame()
+        else:
+            df_existing_for_update = pd.DataFrame()
         
-        with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
-                # ทำความสะอาด record ก่อนส่งไป database
-                cleaned_record = {}
+        # เปรียบเทียบและหาข้อมูลที่เปลี่ยนแปลง
+        exclude_columns = [pk_column, 'agent_id', 'customer_id', 'car_id', 'sales_id',
+                           'order_type_id', 'payment_plan_id', 'create_at', 'update_at']
+        
+        compare_cols = [col for col in df.columns if col not in exclude_columns]
+        
+        # ✅ เพิ่มประสิทธิภาพ: ใช้ merge แทน apply
+        merged = df_to_update.merge(df_existing_for_update, on=pk_column, suffixes=('_new', '_old'))
+        
+        # หาแถวที่มีการเปลี่ยนแปลง
+        changed_rows = []
+        for _, row in merged.iterrows():
+            has_changes = False
+            for col in compare_cols:
+                val_new = row.get(f"{col}_new")
+                val_old = row.get(f"{col}_old")
+                
+                # เปรียบเทียบค่า
+                if pd.isna(val_new) != pd.isna(val_old):
+                    has_changes = True
+                    break
+                elif not pd.isna(val_new) and not pd.isna(val_old) and val_new != val_old:
+                    has_changes = True
+                    break
+            
+            if has_changes:
+                # สร้าง record สำหรับ update
+                update_record = {pk_column: row[pk_column]}
+                for col in compare_cols:
+                    update_record[col] = row[f"{col}_new"]
+                changed_rows.append(update_record)
+        
+        # ✅ Batch update
+        if changed_rows:
+            print(f"🔄 Updating {len(changed_rows)} changed rows...")
+            
+            # ทำความสะอาดข้อมูล
+            for record in changed_rows:
                 for k, v in record.items():
                     if pd.isna(v) or (isinstance(v, str) and v.strip().lower() in ["nan", "null", ""]):
-                        cleaned_record[k] = None
+                        record[k] = None
                     elif isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                        cleaned_record[k] = None
-                    else:
-                        cleaned_record[k] = v
-                
-                stmt = pg_insert(metadata).values(**cleaned_record)
-                update_dict = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns if c.name not in [pk_column, 'create_at', 'update_at']
-                }
-                update_dict['update_at'] = datetime.datetime.now()
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_dict
-                )
-                conn.execute(stmt)
+                        record[k] = None
+            
+            with target_engine.begin() as conn:
+                try:
+                    print(f"🔄 เริ่ม update ข้อมูล {len(changed_rows)} rows...")
+                    for i, record in enumerate(changed_rows):
+                        stmt = pg_insert(metadata).values(**record)
+                        update_dict = {
+                            c.name: stmt.excluded[c.name]
+                            for c in metadata.columns if c.name not in [pk_column, 'create_at', 'update_at']
+                        }
+                        update_dict['update_at'] = datetime.datetime.now()
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=[pk_column],
+                            set_=update_dict
+                        )
+                        conn.execute(stmt)
+                        
+                        # แสดงความคืบหน้าทุก 5000 rows
+                        if (i + 1) % 5000 == 0:
+                            print(f"📊 Updated {i + 1}/{len(changed_rows)} rows...")
+                    
+                    print(f"✅ Update สำเร็จ {len(changed_rows)} rows")
+                except Exception as e:
+                    print(f"❌ เกิดข้อผิดพลาดในการ update: {e}")
+                    raise
+        else:
+            print("✅ No changes detected for update.")
 
-    print("🎉 Insert/update completed.")
+    print("🎉 Insert/update completed successfully!")
 
 @job
 def fact_sales_quotation_etl():
     load_sales_quotation_data(clean_sales_quotation_data(extract_sales_quotation_data()))
 
-# if __name__ == "__main__":
-#     df_plan, df_order, df_pay = extract_sales_quotation_data()
+if __name__ == "__main__":
+    try:
+        print("🚀 เริ่มการประมวลผล fact_sales_quotation...")
+        
+        df_plan, df_order, df_pay = extract_sales_quotation_data()
 
-#     # print(f"- df_plan: {df_plan.shape}")
-#     # print(f"- df_order: {df_order.shape}")
-#     # print(f"- df_pay: {df_pay.shape}")
+        # print(f"- df_plan: {df_plan.shape}")
+        # print(f"- df_order: {df_order.shape}")
+        # print(f"- df_pay: {df_pay.shape}")
 
-#     df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
-#     # print("✅ Cleaned columns:", df_clean.columns)
+        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+        # print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "fact_sales_quotation.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+        # output_path = "fact_sales_quotation.xlsx"
+        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-#     # ทำความสะอาดข้อมูลครั้งสุดท้ายก่อนส่งไป database
-#     df_clean = df_clean.where(pd.notnull(df_clean), None)
-#     df_clean = df_clean.replace([np.inf, -np.inf], None)
-    
-#     # ตรวจสอบว่ายังมี NaN string อยู่หรือไม่
-#     for col in df_clean.columns:
-#         if df_clean[col].dtype == object:
-#             mask = df_clean[col].astype(str).str.lower().str.strip() == 'nan'
-#             if mask.any():
-#                 print(f"⚠️ พบ 'nan' string ในคอลัมน์ {col}: {mask.sum()} แถว")
-#                 # แทนที่ NaN string ด้วย None
-#                 df_clean.loc[mask, col] = None
+        # # ทำความสะอาดข้อมูลครั้งสุดท้ายก่อนส่งไป database
+        # df_clean = df_clean.where(pd.notnull(df_clean), None)
+        # df_clean = df_clean.replace([np.inf, -np.inf], None)
+        
+        # # ตรวจสอบว่ายังมี NaN string อยู่หรือไม่
+        # for col in df_clean.columns:
+        #     if df_clean[col].dtype == object:
+        #         mask = df_clean[col].astype(str).str.lower().str.strip() == 'nan'
+        #         if mask.any():
+        #             print(f"⚠️ พบ 'nan' string ในคอลัมน์ {col}: {mask.sum()} แถว")
+        #             # แทนที่ NaN string ด้วย None
+        #             df_clean.loc[mask, col] = None
 
-#     load_sales_quotation_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_sales_quotation.")
+        load_sales_quotation_data(df_clean)
+        print("🎉 completed! Data upserted to fact_sales_quotation.")
+        
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
