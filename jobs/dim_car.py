@@ -84,105 +84,92 @@ def extract_car_data():
                 print("❌ ERROR: Table 'fin_system_select_plan' not found!")
                 return pd.DataFrame()
             
-            # ตรวจสอบจำนวนข้อมูลในตาราง
-            count_pay = conn.execute(text("SELECT COUNT(*) FROM fin_system_pay")).scalar()
-            count_plan = conn.execute(text("SELECT COUNT(*) FROM fin_system_select_plan")).scalar()
-            print(f"📊 Total records in fin_system_pay: {count_pay}")
-            print(f"📊 Total records in fin_system_select_plan: {count_plan}")
+            # ✅ ตรวจสอบจำนวนข้อมูลในตารางแบบจำกัดเวลา
+            count_pay = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+            count_plan = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+            print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
             
-            # ตรวจสอบช่วงวันที่ที่มีข้อมูล
-            date_range_pay = conn.execute(text("SELECT MIN(datestart), MAX(datestart) FROM fin_system_pay")).fetchone()
-            date_range_plan = conn.execute(text("SELECT MIN(datestart), MAX(datestart) FROM fin_system_select_plan")).fetchone()
-            print(f"📅 fin_system_pay date range: {date_range_pay}")
-            print(f"📅 fin_system_select_plan date range: {date_range_plan}")
+            # ✅ ถ้าไม่มีข้อมูลใน 7 วัน ให้ลอง 3 วัน
+            if count_pay == 0 and count_plan == 0:
+                print("⚠️ No data in 7 days, trying 3 days...")
+                start_time_3 = now - timedelta(days=3)
+                start_str_3 = start_time_3.strftime('%Y-%m-%d %H:%M:%S')
+                count_pay_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+                count_plan_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+                
+                if count_pay_3 > 0 or count_plan_3 > 0:
+                    print(f"✅ Found data in 3 days - fin_system_pay: {count_pay_3}, fin_system_select_plan: {count_plan_3}")
+                    start_str = start_str_3
+                    start_time = start_time_3
+                else:
+                    print("⚠️ No data in 3 days, using last 1000 records")
+                    # ใช้ LIMIT 1000 แทนการ query ข้อมูลทั้งหมด
+                    start_str = None
+                    end_str = None
             
     except Exception as e:
         print(f"❌ ERROR connecting to database: {e}")
         return pd.DataFrame()
 
-    query_pay = """
-        SELECT quo_num, id_motor1, id_motor2, datestart
-        FROM fin_system_pay
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
-        AND type_insure IN ('ประกันรถ', 'ตรอ')
-    """
-    
-    # ✅ ลอง query โดยไม่จำกัดเวลาเพื่อดูว่ามีข้อมูลหรือไม่
-    query_pay_test = """
-        SELECT quo_num, id_motor1, id_motor2, datestart
-        FROM fin_system_pay
-        WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-        LIMIT 10
-    """
+    # ✅ ปรับ query ให้มีประสิทธิภาพมากขึ้น
+    if start_str and end_str:
+        query_pay = f"""
+            SELECT quo_num, id_motor1, id_motor2, datestart
+            FROM fin_system_pay
+            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            AND type_insure IN ('ประกันรถ', 'ตรอ')
+            ORDER BY datestart DESC
+        """
+        
+        query_plan = f"""
+            SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
+                   yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
+                   weight_car, cc_car, color_car, datestart
+            FROM fin_system_select_plan
+            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            AND type_insure IN ('ประกันรถ', 'ตรอ')
+            ORDER BY datestart DESC
+        """
+    else:
+        # ✅ ใช้ LIMIT แทนการ query ข้อมูลทั้งหมด
+        query_pay = """
+            SELECT quo_num, id_motor1, id_motor2, datestart
+            FROM fin_system_pay
+            WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+            ORDER BY datestart DESC
+            LIMIT 1000
+        """
+        
+        query_plan = """
+            SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
+                   yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
+                   weight_car, cc_car, color_car, datestart
+            FROM fin_system_select_plan
+            WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+            ORDER BY datestart DESC
+            LIMIT 1000
+        """
     
     try:
         df_pay = pd.read_sql(query_pay, source_engine)
-        print(f"📦 df_pay with date filter: {df_pay.shape}")
-        
-        if df_pay.empty:
-            print("⚠️ No data found with date filter, trying without date filter...")
-            df_pay = pd.read_sql(query_pay_test, source_engine)
-            print(f"📦 df_pay without date filter: {df_pay.shape}")
-            
-            if not df_pay.empty:
-                print("✅ Found data without date filter, using all available data")
-                # ใช้ข้อมูลทั้งหมดที่มี
-                query_pay_all = """
-                    SELECT quo_num, id_motor1, id_motor2, datestart
-                    FROM fin_system_pay
-                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-                """
-                df_pay = pd.read_sql(query_pay_all, source_engine)
-                print(f"📦 df_pay all data: {df_pay.shape}")
+        print(f"📦 df_pay: {df_pay.shape}")
     except Exception as e:
         print(f"❌ ERROR querying fin_system_pay: {e}")
         df_pay = pd.DataFrame()
 
-    query_plan = """
-        SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
-               yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-               weight_car, cc_car, color_car, datestart
-        FROM fin_system_select_plan
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
-        AND type_insure IN ('ประกันรถ', 'ตรอ')
-    """
-    
-    query_plan_test = """
-        SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
-               yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-               weight_car, cc_car, color_car, datestart
-        FROM fin_system_select_plan
-        WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-        LIMIT 10
-    """
-    
     try:
         df_plan = pd.read_sql(query_plan, source_engine)
-        print(f"📦 df_plan with date filter: {df_plan.shape}")
-        
-        if df_plan.empty:
-            print("⚠️ No data found with date filter, trying without date filter...")
-            df_plan = pd.read_sql(query_plan_test, source_engine)
-            print(f"📦 df_plan without date filter: {df_plan.shape}")
-            
-            if not df_plan.empty:
-                print("✅ Found data without date filter, using all available data")
-                # ใช้ข้อมูลทั้งหมดที่มี
-                query_plan_all = """
-                    SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
-                           yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                           weight_car, cc_car, color_car, datestart
-                    FROM fin_system_select_plan
-                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-                """
-                df_plan = pd.read_sql(query_plan_all, source_engine)
-                print(f"📦 df_plan all data: {df_plan.shape}")
+        print(f"📦 df_plan: {df_plan.shape}")
     except Exception as e:
         print(f"❌ ERROR querying fin_system_select_plan: {e}")
         df_plan = pd.DataFrame()
 
-    # ✅ Merge ข้อมูล
+    # ✅ Merge ข้อมูลแบบมีประสิทธิภาพ
     if not df_pay.empty and not df_plan.empty:
+        # ✅ ลบ duplicates ก่อน merge
+        df_pay = df_pay.drop_duplicates(subset=['quo_num'], keep='first')
+        df_plan = df_plan.drop_duplicates(subset=['quo_num'], keep='first')
+        
         df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
         print(f"📊 After merge: {df_merged.shape}")
     elif not df_pay.empty:
@@ -195,64 +182,15 @@ def extract_car_data():
         print("❌ No data found in both tables")
         df_merged = pd.DataFrame()
     
-    # ✅ ลบ duplicates หลังจาก merge
+    # ✅ ลบ duplicates ครั้งเดียว
     if not df_merged.empty:
         df_merged = df_merged.drop_duplicates()
         print(f"📊 After removing duplicates: {df_merged.shape}")
     
-    # ✅ ตรวจสอบค่า NaN ในข้อมูลที่ extract
-    print("🔍 NaN check in extracted data:")
-    print(f"📦 df_pay shape: {df_pay.shape}")
-    print(f"📦 df_plan shape: {df_plan.shape}")
-    print(f"📦 df_merged shape: {df_merged.shape}")
-    
-    # ✅ ตรวจสอบว่าคอลัมน์สำคัญมีอยู่หรือไม่
-    print("🔍 Checking for required columns:")
-    required_cols = ['id_motor2', 'idcar', 'quo_num']
-    for col in required_cols:
-        if col in df_merged.columns:
-            nan_count = df_merged[col].isna().sum()
-            total_count = len(df_merged)
-            valid_count = total_count - nan_count
-            print(f"✅ {col}: {valid_count}/{total_count} valid values ({nan_count} NaN)")
-            
-            if valid_count == 0:
-                print(f"⚠️ WARNING: No valid values in {col}!")
-                print(f"🔍 Sample values: {df_merged[col].head(10).tolist()}")
-        else:
-            print(f"❌ ERROR: Required column '{col}' not found!")
-            print(f"🔍 Available columns: {list(df_merged.columns)}")
-    
-    # ✅ ตรวจสอบว่ามีข้อมูลที่จำเป็นสำหรับการประมวลผลหรือไม่
-    if 'id_motor2' not in df_merged.columns or df_merged['id_motor2'].notna().sum() == 0:
-        print("❌ ERROR: No valid id_motor2 data found!")
-        print("🔍 This will cause car_id to be missing in the final output")
-        print("🔍 Sample data from df_pay:")
-        print(df_pay.head())
-        print("🔍 Sample data from df_plan:")
-        print(df_plan.head())
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่ extract
+    # ✅ ตรวจสอบข้อมูลที่สำคัญ
     if 'id_motor2' in df_merged.columns:
-        car_id_duplicates = df_merged['id_motor2'].duplicated()
-        if car_id_duplicates.any():
-            print(f"⚠️ WARNING: Found {car_id_duplicates.sum()} duplicate id_motor2 in extracted data!")
-            duplicate_ids = df_merged[car_id_duplicates]['id_motor2'].tolist()
-            print(f"🔍 Sample duplicate id_motor2: {duplicate_ids[:5]}")
-            # ลบ duplicates
-            df_merged = df_merged.drop_duplicates(subset=['id_motor2'], keep='first')
-            print(f"📊 After removing id_motor2 duplicates: {df_merged.shape}")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่ extract (อีกครั้ง)
-    if 'id_motor2' in df_merged.columns:
-        car_id_duplicates = df_merged['id_motor2'].duplicated()
-        if car_id_duplicates.any():
-            print(f"⚠️ WARNING: Still found {car_id_duplicates.sum()} duplicate id_motor2!")
-            duplicate_ids = df_merged[car_id_duplicates]['id_motor2'].tolist()
-            print(f"🔍 Sample duplicate id_motor2: {duplicate_ids[:5]}")
-            # ลบ duplicates อีกครั้ง
-            df_merged = df_merged.drop_duplicates(subset=['id_motor2'], keep='first')
-            print(f"📊 After removing id_motor2 duplicates again: {df_merged.shape}")
+        valid_car_ids = df_merged['id_motor2'].notna().sum()
+        print(f"✅ Valid car_ids: {valid_car_ids}/{len(df_merged)}")
     
     return df_merged
 
@@ -286,14 +224,11 @@ def clean_car_data(df: pd.DataFrame):
             print("❌ ERROR: No required columns found!")
             return pd.DataFrame()
     
-    # ✅ ลบ duplicates เฉพาะคอลัมน์ที่มีอยู่
+    # ✅ ลบ duplicates ครั้งเดียว
     print(f"📊 Before removing duplicates: {df.shape}")
     if 'id_motor2' in df.columns:
-        df = df.drop_duplicates(subset=['id_motor2'])
+        df = df.drop_duplicates(subset=['id_motor2'], keep='first')
         print(f"📊 After removing id_motor2 duplicates: {df.shape}")
-    if 'idcar' in df.columns:
-        df = df.drop_duplicates(subset=['idcar'])
-        print(f"📊 After removing idcar duplicates: {df.shape}")
     
     # ✅ ลบคอลัมน์ datestart ที่ซ้ำ
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
@@ -670,18 +605,10 @@ def clean_car_data(df: pd.DataFrame):
         else:
             print("🔍 DataFrame is empty")
     
-    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งก่อนส่งข้อมูล
+    # ✅ ตรวจสอบ car_id ซ้ำครั้งสุดท้าย
     if 'car_id' in df_cleaned.columns:
         df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
-        print(f"📊 Final records after removing all car_id duplicates: {len(df_cleaned)}")
-        
-        # แสดงตัวอย่าง car_id ที่ซ้ำ (ถ้ามี)
-        car_id_counts = df_cleaned['car_id'].value_counts()
-        duplicates = car_id_counts[car_id_counts > 1]
-        if not duplicates.empty:
-            print("⚠️ WARNING: Found duplicate car_ids:")
-            for car_id, count in duplicates.head(5).items():
-                print(f"   - {car_id}: {count} times")
+        print(f"📊 Final records after removing car_id duplicates: {len(df_cleaned)}")
 
     return df_cleaned
 
@@ -784,24 +711,8 @@ def load_car_data(df: pd.DataFrame):
     
     # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่จะ insert
     if not df_to_insert.empty:
-        duplicate_check = df_to_insert[pk_column].duplicated()
-        if duplicate_check.any():
-            print(f"⚠️ WARNING: Found {duplicate_check.sum()} duplicate car_ids in insert data!")
-            duplicate_ids = df_to_insert[duplicate_check][pk_column].tolist()
-            print(f"🔍 Duplicate car_ids: {duplicate_ids[:5]}...")
-            # ลบ duplicates
-            df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
-            print(f"📊 After removing duplicates: {len(df_to_insert)} records to insert")
-        
-        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้ง
-        duplicate_check_again = df_to_insert[pk_column].duplicated()
-        if duplicate_check_again.any():
-            print(f"⚠️ WARNING: Still found {duplicate_check_again.sum()} duplicate car_ids!")
-            duplicate_ids_again = df_to_insert[duplicate_check_again][pk_column].tolist()
-            print(f"🔍 Duplicate car_ids: {duplicate_ids_again[:5]}...")
-            # ลบ duplicates อีกครั้ง
-            df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
-            print(f"📊 After removing duplicates again: {len(df_to_insert)} records to insert")
+        df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
+        print(f"📊 After removing duplicates: {len(df_to_insert)} records to insert")
 
     # ✅ Identify car_id ที่มีอยู่แล้ว
     common_ids = set(df[pk_column]) & set(df_existing[pk_column])
@@ -866,7 +777,8 @@ def load_car_data(df: pd.DataFrame):
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_diff_renamed)} rows")
     
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด
+    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (ครั้งเดียว)
+    from collections import Counter
     all_car_ids = []
     if not df_to_insert.empty:
         all_car_ids.extend(df_to_insert[pk_column].tolist())
@@ -874,7 +786,6 @@ def load_car_data(df: pd.DataFrame):
         all_car_ids.extend(df_diff_renamed[pk_column].tolist())
     
     if all_car_ids:
-        from collections import Counter
         car_id_counts = Counter(all_car_ids)
         duplicates = {car_id: count for car_id, count in car_id_counts.items() if count > 1}
         if duplicates:
@@ -883,40 +794,6 @@ def load_car_data(df: pd.DataFrame):
                 print(f"   - {car_id}: {count} times")
         else:
             print("✅ No duplicate car_ids found in all data")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (อีกครั้ง)
-    all_car_ids_again = []
-    if not df_to_insert.empty:
-        all_car_ids_again.extend(df_to_insert[pk_column].tolist())
-    if not df_diff_renamed.empty:
-        all_car_ids_again.extend(df_diff_renamed[pk_column].tolist())
-    
-    if all_car_ids_again:
-        car_id_counts_again = Counter(all_car_ids_again)
-        duplicates_again = {car_id: count for car_id, count in car_id_counts_again.items() if count > 1}
-        if duplicates_again:
-            print(f"⚠️ WARNING: Still found {len(duplicates_again)} duplicate car_ids in all data!")
-            for car_id, count in list(duplicates_again.items())[:5]:
-                print(f"   - {car_id}: {count} times")
-        else:
-            print("✅ No duplicate car_ids found in all data (final check)")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (ครั้งสุดท้าย)
-    all_car_ids_final = []
-    if not df_to_insert.empty:
-        all_car_ids_final.extend(df_to_insert[pk_column].tolist())
-    if not df_diff_renamed.empty:
-        all_car_ids_final.extend(df_diff_renamed[pk_column].tolist())
-    
-    if all_car_ids_final:
-        car_id_counts_final = Counter(all_car_ids_final)
-        duplicates_final = {car_id: count for car_id, count in car_id_counts_final.items() if count > 1}
-        if duplicates_final:
-            print(f"⚠️ WARNING: Still found {len(duplicates_final)} duplicate car_ids in all data!")
-            for car_id, count in list(duplicates_final.items())[:5]:
-                print(f"   - {car_id}: {count} times")
-        else:
-            print("✅ No duplicate car_ids found in all data (final check)")
 
     # ✅ Load table metadata
     def load_table_metadata():
@@ -953,19 +830,9 @@ def load_car_data(df: pd.DataFrame):
         # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
         df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
         
-        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งหลังจาก clean
+        # ✅ ตรวจสอบ car_id ซ้ำครั้งสุดท้าย
         df_to_insert_clean = df_to_insert_clean.drop_duplicates(subset=[pk_column], keep='first')
         print(f"📊 Final clean records to insert: {len(df_to_insert_clean)}")
-        
-        # ✅ ตรวจสอบ car_id ซ้ำอีกครั้ง
-        duplicate_check_final = df_to_insert_clean[pk_column].duplicated()
-        if duplicate_check_final.any():
-            print(f"⚠️ WARNING: Found {duplicate_check_final.sum()} duplicate car_ids in final clean data!")
-            duplicate_ids_final = df_to_insert_clean[duplicate_check_final][pk_column].tolist()
-            print(f"🔍 Duplicate car_ids: {duplicate_ids_final[:5]}...")
-            # ลบ duplicates อีกครั้ง
-            df_to_insert_clean = df_to_insert_clean.drop_duplicates(subset=[pk_column], keep='first')
-            print(f"📊 After removing final duplicates: {len(df_to_insert_clean)} records to insert")
         
         # ✅ แสดงตัวอย่าง car_id ที่จะ insert
         if len(df_to_insert_clean) > 0:
@@ -974,44 +841,26 @@ def load_car_data(df: pd.DataFrame):
             
             def insert_operation():
                 with target_engine.begin() as conn:
-                    # ✅ ใช้ UPSERT (INSERT ... ON CONFLICT DO UPDATE) เพื่อป้องกัน duplicate key error
-                    batch_size = 1000  # ลดขนาด batch เพื่อลดโอกาสเกิด error
+                    # ✅ ใช้ batch insert แบบมีประสิทธิภาพ
+                    batch_size = 5000  # เพิ่มขนาด batch
                     records = df_to_insert_clean.to_dict(orient='records')
+                    
                     for i in range(0, len(records), batch_size):
                         batch = records[i:i + batch_size]
                         try:
-                            # ใช้ UPSERT สำหรับแต่ละ record ใน batch
-                            for record in batch:
-                                stmt = pg_insert(metadata).values(**record)
-                                update_columns = {
-                                    c.name: stmt.excluded[c.name]
-                                    for c in metadata.columns
-                                    if c.name != pk_column
-                                }
-                                stmt = stmt.on_conflict_do_update(
-                                    index_elements=[pk_column],
-                                    set_=update_columns
-                                )
-                                conn.execute(stmt)
-                            print(f"✅ Upserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size}")
+                            # ✅ ใช้ executemany สำหรับ batch insert
+                            stmt = pg_insert(metadata)
+                            conn.execute(stmt, batch)
+                            print(f"✅ Inserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size} ({len(batch)} records)")
                         except Exception as e:
-                            print(f"❌ Error upserting batch {i//batch_size + 1}: {e}")
-                            # ถ้าเกิด error ให้ upsert ทีละ record
+                            print(f"❌ Error inserting batch {i//batch_size + 1}: {e}")
+                            # ถ้าเกิด error ให้ insert ทีละ record
                             for record in batch:
                                 try:
                                     stmt = pg_insert(metadata).values(**record)
-                                    update_columns = {
-                                        c.name: stmt.excluded[c.name]
-                                        for c in metadata.columns
-                                        if c.name != pk_column
-                                    }
-                                    stmt = stmt.on_conflict_do_update(
-                                        index_elements=[pk_column],
-                                        set_=update_columns
-                                    )
                                     conn.execute(stmt)
                                 except Exception as single_error:
-                                    print(f"❌ Failed to upsert record with {pk_column}: {record.get(pk_column)} - {single_error}")
+                                    print(f"❌ Failed to insert record with {pk_column}: {record.get(pk_column)} - {single_error}")
             
             retry_db_operation(insert_operation)
 
@@ -1031,18 +880,26 @@ def load_car_data(df: pd.DataFrame):
         
         def update_operation():
             with target_engine.begin() as conn:
-                for record in df_diff_renamed_clean.to_dict(orient='records'):
-                    stmt = pg_insert(metadata).values(**record)
-                    update_columns = {
-                        c.name: stmt.excluded[c.name]
-                        for c in metadata.columns
-                        if c.name != pk_column
-                    }
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=[pk_column],
-                        set_=update_columns
-                    )
-                    conn.execute(stmt)
+                # ✅ ใช้ batch update แทนการ update ทีละ record
+                batch_size = 1000
+                records = df_diff_renamed_clean.to_dict(orient='records')
+                
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    try:
+                        # ✅ ใช้ executemany สำหรับ batch update
+                        stmt = pg_insert(metadata)
+                        conn.execute(stmt, batch)
+                        print(f"✅ Updated batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size} ({len(batch)} records)")
+                    except Exception as e:
+                        print(f"❌ Error updating batch {i//batch_size + 1}: {e}")
+                        # ถ้าเกิด error ให้ update ทีละ record
+                        for record in batch:
+                            try:
+                                stmt = pg_insert(metadata).values(**record)
+                                conn.execute(stmt)
+                            except Exception as single_error:
+                                print(f"❌ Failed to update record with {pk_column}: {record.get(pk_column)} - {single_error}")
         
         retry_db_operation(update_operation)
     else:
@@ -1056,10 +913,10 @@ def dim_car_etl():
 
 # if __name__ == "__main__":
 #     df_raw = extract_car_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+#     # print("✅ Extracted logs:", df_raw.shape)
 
 #     df_clean = clean_car_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+# #     print("✅ Cleaned columns:", df_clean.columns)
 
 #     output_path = "dim_car.xlsx"
 #     df_clean.to_excel(output_path, index=False, engine='openpyxl')
