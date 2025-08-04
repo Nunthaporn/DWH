@@ -3,19 +3,42 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError, DisconnectionError
 
 # ✅ Load .env
 load_dotenv()
 
-# ✅ Source DB connections
+# ✅ Source DB connections with timeout and retry settings
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_timeout=30,
+    connect_args={
+        'connect_timeout': 60,
+        'read_timeout': 300,
+        'write_timeout': 300,
+        'charset': 'utf8mb4',
+        'autocommit': True
+    }
 )
+
 task_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_timeout=30,
+    connect_args={
+        'connect_timeout': 60,
+        'read_timeout': 300,
+        'write_timeout': 300,
+        'charset': 'utf8mb4',
+        'autocommit': True
+    }
 )
 
 # ✅ Target PostgreSQL
@@ -47,32 +70,158 @@ def remove_commas_from_numeric(value):
     
     return value
 
+def clean_insurance_company(company):
+    """ทำความสะอาดชื่อบริษัทประกัน"""
+    if pd.isna(company) or company is None:
+        return None
+    
+    company_str = str(company).strip()
+    
+    # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
+    invalid_patterns = [
+        r'[<>"\'\`\\]',  # SQL injection characters
+        r'\.\./',  # path traversal
+        r'[\(\)\{\}\[\]]+',  # brackets
+        r'[!@#$%^&*+=|]+',  # special characters
+        r'XOR',  # SQL injection
+        r'if\(',  # SQL injection
+        r'now\(\)',  # SQL injection
+        r'\$\{',  # template injection
+        r'\?\?\?\?',  # multiple question marks
+        r'[0-9]+[XO][0-9]+',  # XSS patterns
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.search(pattern, company_str, re.IGNORECASE):
+            return None
+    
+    # ตรวจสอบความยาว
+    if len(company_str) < 2 or len(company_str) > 100:
+        return None
+    
+    # ตรวจสอบว่ามีตัวอักษรไทยหรืออังกฤษหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
+    if not re.search(r'[ก-๙a-zA-Z]', company_str):
+        return None
+    
+    # ถ้าข้อมูลผ่านการตรวจสอบแล้ว ให้คืนค่าข้อมูลเดิม
+    return company_str
+
+def clean_insurance_class(insurance_class):
+    """ทำความสะอาดชั้นประกัน"""
+    if pd.isna(insurance_class) or insurance_class is None:
+        return None
+    
+    insurance_class_str = str(insurance_class).strip()
+    
+    # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
+    invalid_patterns = [
+        r'[<>"\'\`\\]',  # SQL injection characters
+        r'\.\./',  # path traversal
+        r'[\(\)\{\}\[\]]+',  # brackets
+        r'[!@#$%^&*+=|]+',  # special characters
+        r'XOR',  # SQL injection
+        r'if\(',  # SQL injection
+        r'now\(\)',  # SQL injection
+        r'\$\{',  # template injection
+        r'\?\?\?\?',  # multiple question marks
+        r'[0-9]+[XO][0-9]+',  # XSS patterns
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.search(pattern, insurance_class_str, re.IGNORECASE):
+            return None
+    
+    # ตรวจสอบความยาว
+    if len(insurance_class_str) < 2 or len(insurance_class_str) > 50:
+        return None
+    
+    # ตรวจสอบว่ามีตัวอักษรไทยหรืออังกฤษหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
+    if not re.search(r'[ก-๙a-zA-Z]', insurance_class_str):
+        return None
+    
+    # ตรวจสอบว่าขึ้นต้นด้วย "ชั้น" หรือ "พ.ร.บ." หรือ "พรบ" หรือไม่
+    if not re.match(r'^(ชั้น|พ\.ร\.บ\.|พรบ)', insurance_class_str):
+        return None
+    
+    # ถ้าข้อมูลผ่านการตรวจสอบแล้ว ให้คืนค่าข้อมูลเดิม
+    return insurance_class_str
+
+def execute_query_with_retry(engine, query, max_retries=3, delay=5):
+    """Execute query with retry mechanism for connection issues"""
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Attempt {attempt + 1}/{max_retries} - Executing query...")
+            df = pd.read_sql(query, engine)
+            print(f"✅ Query executed successfully on attempt {attempt + 1}")
+            return df
+        except (OperationalError, DisconnectionError) as e:
+            if "Lost connection" in str(e) or "connection was forcibly closed" in str(e):
+                print(f"⚠️ Connection lost on attempt {attempt + 1}: {str(e)}")
+                if attempt < max_retries - 1:
+                    print(f"⏳ Waiting {delay} seconds before retry...")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    # Dispose and recreate engine to force new connections
+                    engine.dispose()
+                else:
+                    print(f"❌ All retry attempts failed")
+                    raise
+            else:
+                raise
+        except Exception as e:
+            print(f"❌ Unexpected error: {str(e)}")
+            raise
+
+def close_engines():
+    """Safely close all database engines"""
+    try:
+        source_engine.dispose()
+        task_engine.dispose()
+        target_engine.dispose()
+        print("🔒 Database connections closed safely")
+    except Exception as e:
+        print(f"⚠️ Warning: Error closing connections: {str(e)}")
+
 @op
 def extract_motor_data():
-    df_plan = pd.read_sql("""
+    # Query 1: Extract plan data with retry mechanism
+    plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
         WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01' 
         AND type_insure = 'ประกันรถ'
-    """, source_engine)
+    """
+    df_plan = execute_query_with_retry(source_engine, plan_query)
 
-    df_order = pd.read_sql("""
+    # Query 2: Extract order data with retry mechanism
+    order_query = """
         SELECT quo_num, responsibility1, responsibility2, responsibility3, responsibility4,
                damage1, damage2, damage3, damage4, protect1, protect2, protect3, protect4,
                IF(sendtype = 'ที่อยู่ใหม่', provincenew, province) AS delivery_province,
                show_ems_price, show_ems_type
         FROM fin_order
-    """, task_engine)
+    """
+    df_order = execute_query_with_retry(task_engine, order_query)
 
-    df_pay = pd.read_sql("""
+    # Query 3: Extract payment data with retry mechanism
+    pay_query = """
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
         WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
-    """, source_engine)
+    """
+    df_pay = execute_query_with_retry(source_engine, pay_query)
 
     print("📦 df_plan:", df_plan.shape)
     print("📦 df_order:", df_order.shape)
     print("📦 df_pay:", df_pay.shape)
+
+    # Close source connections after extraction
+    try:
+        source_engine.dispose()
+        task_engine.dispose()
+        print("🔒 Source database connections closed")
+    except Exception as e:
+        print(f"⚠️ Warning: Error closing source connections: {str(e)}")
 
     return df_plan, df_order, df_pay
 
@@ -131,6 +280,30 @@ def clean_motor_data(data_tuple):
 
     df.columns = df.columns.str.lower()
     df["income_comp_ins"] = df["income_comp_ins"].apply(lambda x: True if x == 1 else False if x == 0 else None)
+    # ทำความสะอาดคอลัมน์ ins_company
+    if 'ins_company' in df.columns:
+        before_count = df['ins_company'].notna().sum()
+        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
+        invalid_companies = df[df['ins_company'].notna()]['ins_company'].unique()
+        df['ins_company'] = df['ins_company'].apply(clean_insurance_company)
+        after_count = df['ins_company'].notna().sum()
+        filtered_count = before_count - after_count
+        print(f"🧹 Cleaned ins_company column - filtered {filtered_count} invalid records")
+        if filtered_count > 0:
+            print(f"   Examples of invalid companies: {list(invalid_companies[:5])}")
+    
+    # ทำความสะอาดคอลัมน์ insurance_class
+    if 'insurance_class' in df.columns:
+        before_count = df['insurance_class'].notna().sum()
+        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
+        invalid_classes = df[df['insurance_class'].notna()]['insurance_class'].unique()
+        df['insurance_class'] = df['insurance_class'].apply(clean_insurance_class)
+        after_count = df['insurance_class'].notna().sum()
+        filtered_count = before_count - after_count
+        print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
+        if filtered_count > 0:
+            print(f"   Examples of invalid classes: {list(invalid_classes[:5])}")
+    
     df["insurance_class"] = df["insurance_class"].replace("ซ่อมอู่", np.nan)
     
     # แปลง datetime และจัดการกับ NaT values
@@ -268,7 +441,28 @@ def clean_motor_data(data_tuple):
     
     df = df.where(pd.notnull(df), None)
 
+    # แสดงสถิติข้อมูลที่ถูกต้อง
+    if 'ins_company' in df.columns:
+        valid_companies = df['ins_company'].value_counts().head(10)
+        print(f"\n📊 Top 10 valid insurance companies:")
+        for company, count in valid_companies.items():
+            print(f"   {company}: {count}")
+    
+    if 'insurance_class' in df.columns:
+        valid_classes = df['insurance_class'].value_counts().head(10)
+        print(f"\n📊 Top 10 valid insurance classes:")
+        for class_name, count in valid_classes.items():
+            print(f"   {class_name}: {count}")
+
     print("\n📊 Cleaning completed")
+
+    # Close any remaining connections
+    try:
+        source_engine.dispose()
+        task_engine.dispose()
+        print("🔒 Remaining database connections closed")
+    except Exception as e:
+        print(f"⚠️ Warning: Error closing remaining connections: {str(e)}")
 
     return df
 
@@ -281,8 +475,9 @@ def load_motor_data(df: pd.DataFrame):
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
-    with target_engine.begin() as conn:
-        df_existing = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", conn)
+    # Use retry mechanism for reading existing data
+    existing_query = f"SELECT {pk_column} FROM {table_name}"
+    df_existing = execute_query_with_retry(target_engine, existing_query)
 
     existing_ids = set(df_existing[pk_column])
     new_rows = df[~df[pk_column].isin(existing_ids)].copy()
@@ -292,42 +487,87 @@ def load_motor_data(df: pd.DataFrame):
     print(f"🔄 Update: {len(update_rows)} rows")
 
     if not new_rows.empty:
-        with target_engine.begin() as conn:
-            conn.execute(table.insert(), new_rows.to_dict(orient="records"))
+        print(f"🔄 Inserting {len(new_rows)} new records...")
+        try:
+            with target_engine.begin() as conn:
+                conn.execute(table.insert(), new_rows.to_dict(orient="records"))
+            print(f"✅ Insert completed successfully")
+        except Exception as e:
+            print(f"❌ Insert failed: {str(e)}")
+            raise
 
     if not update_rows.empty:
-        with target_engine.begin() as conn:
-            for record in update_rows.to_dict(orient="records"):
-                stmt = pg_insert(table).values(**record)
-                update_dict = {
-                    c.name: stmt.excluded[c.name]
-                    for c in table.columns if c.name != pk_column
-                }
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_dict
-                )
-                conn.execute(stmt)
+        print(f"🔄 Updating {len(update_rows)} existing records...")
+        try:
+            with target_engine.begin() as conn:
+                for i, record in enumerate(update_rows.to_dict(orient="records")):
+                    if i % 100 == 0:  # Progress indicator every 100 records
+                        print(f"   Progress: {i}/{len(update_rows)} records processed")
+                    
+                    stmt = pg_insert(table).values(**record)
+                    update_dict = {
+                        c.name: stmt.excluded[c.name]
+                        for c in table.columns if c.name != pk_column
+                    }
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[pk_column],
+                        set_=update_dict
+                    )
+                    conn.execute(stmt)
+            print(f"✅ Update completed successfully")
+        except Exception as e:
+            print(f"❌ Update failed: {str(e)}")
+            raise
 
     print("✅ Insert/update completed.")
+
+    # Close target engine connection after load
+    try:
+        target_engine.dispose()
+        print("🔒 Target database connection closed")
+    except Exception as e:
+        print(f"⚠️ Warning: Error closing target connection: {str(e)}")
+
+    # Close any remaining connections
+    try:
+        source_engine.dispose()
+        task_engine.dispose()
+        print("🔒 All database connections closed")
+    except Exception as e:
+        print(f"⚠️ Warning: Error closing all connections: {str(e)}")
 
 @job
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
 if __name__ == "__main__":
-    df_raw = extract_motor_data()
+    try:
+        print("🚀 Starting fact_insurance_motor ETL process...")
+        
+        # Extract data with retry mechanism
+        print("📥 Extracting data from source databases...")
+        df_raw = extract_motor_data()
+        print("✅ Data extraction completed")
 
-    df_clean = clean_motor_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+        # Clean data
+        print("🧹 Cleaning and transforming data...")
+        df_clean = clean_motor_data((df_raw))
+        print("✅ Data cleaning completed")
+        print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_insurance_motor.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+        # Save to Excel for inspection
+        output_path = "fact_insurance_motor.xlsx"
+        df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        print(f"💾 Saved to {output_path}")
 
-    output_path = "fact_insurance_motor.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
-
-    # load_motor_data(df_clean)
-    # print("🎉 completed! Data upserted to fact_insurance_motor.")
+        # Uncomment to load to database
+        # print("📤 Loading data to target database...")
+        # load_motor_data(df_clean)
+        # print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+        
+    except Exception as e:
+        print(f"❌ ETL process failed: {str(e)}")
+        raise
+    finally:
+        # Always close database connections
+        close_engines()
