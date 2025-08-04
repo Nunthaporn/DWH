@@ -52,7 +52,7 @@ def extract_fact_check_price():
             SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                    assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
             FROM fin_customer_logs_B2B
-            WHERE create_at BETWEEN '2024-01-01' AND '2024-12-31'
+            WHERE create_at BETWEEN '2025-01-01' AND '2025-08-04'
             ORDER BY create_at
         """
         
