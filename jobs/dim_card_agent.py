@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, inspect
+from sqlalchemy import create_engine, MetaData, Table, inspect, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # ✅ Load environment variables
@@ -108,25 +108,46 @@ def load_card_agent_data(df: pd.DataFrame):
 
     # ✅ กรอง agent_id ซ้ำจาก DataFrame ใหม่
     df = df[~df[pk_column].duplicated(keep='first')].copy()
+    
+    # ✅ กรองข้อมูลที่ agent_id ไม่เป็น None
+    df = df[df[pk_column].notna()].copy()
+    
+    if df.empty:
+        print("⚠️ No valid data to process")
+        return
 
-    # ✅ Load ข้อมูลเดิมจาก PostgreSQL
+    # ✅ โหลดเฉพาะ agent_id ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
+    agent_ids = df[pk_column].tolist()
+    placeholders = ','.join(['%s'] * len(agent_ids))
+    
+    query_existing = f"""
+        SELECT * FROM {table_name} 
+        WHERE {pk_column} IN ({placeholders})
+    """
+    
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df_existing = pd.read_sql(
+            text(query_existing), 
+            conn, 
+            params=agent_ids
+        )
+
+    print(f"📊 New data: {len(df)} rows")
+    print(f"📊 Existing data found: {len(df_existing)} rows")
 
     # ✅ กรอง agent_id ซ้ำจากข้อมูลเก่า
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+    if not df_existing.empty:
+        df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
     # ✅ Identify agent_id ใหม่ (ไม่มีใน DB)
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
+    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
+    new_ids = set(df[pk_column]) - existing_ids
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
 
     # ✅ Identify agent_id ที่มีอยู่แล้ว
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
+    common_ids = set(df[pk_column]) & existing_ids
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-
-    # ✅ Merge ด้วย suffix (_new, _old)
-    merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
     # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
     exclude_columns = [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
@@ -135,77 +156,64 @@ def load_card_agent_data(df: pd.DataFrame):
         if col not in exclude_columns
     ]
 
-    # ✅ ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
-    available_cols = []
-    for col in compare_cols:
-        if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
-            available_cols.append(col)
-
-    # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
-    def is_different(row):
-        for col in available_cols:
-            val_new = row.get(f"{col}_new")
-            val_old = row.get(f"{col}_old")
-            if pd.isna(val_new) and pd.isna(val_old):
-                continue
-            if val_new != val_old:
-                return True
-        return False
-
-    # ✅ ตรวจหาความแตกต่างจริง
-    df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-    if not df_diff.empty and available_cols:
-        update_cols = [f"{col}_new" for col in available_cols]
-        all_cols = [pk_column] + update_cols
-
-        # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
-        existing_cols = [col for col in all_cols if col in df_diff.columns]
+    # ✅ เปรียบเทียบข้อมูลแบบ Vectorized (เร็วกว่า apply)
+    df_to_update = pd.DataFrame()
+    if not df_common_new.empty and not df_common_old.empty:
+        # Merge ด้วย suffix (_new, _old)
+        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
         
-        if len(existing_cols) > 1:  # ต้องมี pk_column และอย่างน้อย 1 คอลัมน์อื่น
-            df_diff_renamed = df_diff[existing_cols].copy()
-            # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
-            new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
-            df_diff_renamed.columns = new_col_names
-        else:
-            df_diff_renamed = pd.DataFrame()
-    else:
-        df_diff_renamed = pd.DataFrame()
+        # ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
+        available_cols = []
+        for col in compare_cols:
+            if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
+                available_cols.append(col)
+        
+        if available_cols:
+            # สร้าง boolean mask สำหรับแถวที่มีความแตกต่าง
+            diff_mask = pd.Series(False, index=merged.index)
+            
+            for col in available_cols:
+                col_new = f"{col}_new"
+                col_old = f"{col}_old"
+                
+                # เปรียบเทียบแบบ vectorized
+                new_vals = merged[col_new]
+                old_vals = merged[col_old]
+                
+                # จัดการ NaN values
+                both_nan = (pd.isna(new_vals) & pd.isna(old_vals))
+                different = (new_vals != old_vals) & ~both_nan
+                
+                diff_mask |= different
+            
+            # กรองแถวที่มีความแตกต่าง
+            df_diff = merged[diff_mask].copy()
+            
+            if not df_diff.empty:
+                # เตรียมข้อมูลสำหรับ update
+                update_cols = [f"{col}_new" for col in available_cols]
+                all_cols = [pk_column] + update_cols
+                
+                # ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
+                existing_cols = [col for col in all_cols if col in df_diff.columns]
+                
+                if len(existing_cols) > 1:
+                    df_to_update = df_diff[existing_cols].copy()
+                    # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+                    new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
+                    df_to_update.columns = new_col_names
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    print(f"🔄 Update: {len(df_to_update)} rows")
 
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ Insert (กรอง quotation_num ที่เป็น NaN)
+    # ✅ Insert (Batch operation)
     if not df_to_insert.empty:
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped}")
-        
-        # ✅ แปลง NaT และ string ว่างเป็น None ก่อนส่งไปยัง PostgreSQL
-        if not df_to_insert_valid.empty:
-            # แปลง DataFrame เป็น dictionary และจัดการ NaT/NaN และ string ว่าง
-            records = []
-            for _, row in df_to_insert_valid.iterrows():
-                record = {}
-                for col, value in row.items():
-                    if pd.isna(value) or value == pd.NaT or value == '':
-                        record[col] = None
-                    else:
-                        record[col] = value
-                records.append(record)
-            
-            with target_engine.begin() as conn:
-                conn.execute(metadata.insert(), records)
-
-    # ✅ Update
-    if not df_diff_renamed.empty:
-        # ✅ แปลง DataFrame เป็น dictionary และจัดการ NaT/NaN และ string ว่าง
+        # แปลง DataFrame เป็น records
         records = []
-        for _, row in df_diff_renamed.iterrows():
+        for _, row in df_to_insert.iterrows():
             record = {}
             for col, value in row.items():
                 if pd.isna(value) or value == pd.NaT or value == '':
@@ -214,6 +222,24 @@ def load_card_agent_data(df: pd.DataFrame):
                     record[col] = value
             records.append(record)
         
+        # Insert แบบ batch
+        with target_engine.begin() as conn:
+            conn.execute(metadata.insert(), records)
+
+    # ✅ Update (Batch operation)
+    if not df_to_update.empty:
+        # แปลง DataFrame เป็น records
+        records = []
+        for _, row in df_to_update.iterrows():
+            record = {}
+            for col, value in row.items():
+                if pd.isna(value) or value == pd.NaT or value == '':
+                    record[col] = None
+                else:
+                    record[col] = value
+            records.append(record)
+        
+        # Update แบบ batch
         with target_engine.begin() as conn:
             for record in records:
                 stmt = pg_insert(metadata).values(**record)
