@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
-from datetime import datetime
+from datetime import datetime, timedelta
+
 
 # ✅ Load .env
 load_dotenv()
@@ -121,59 +122,6 @@ def clean_insurance_company(company):
     
     return cleaned_company
 
-# def clean_insurance_class(insurance_class):
-#     """ทำความสะอาดชั้นประกัน - ลบคำภาษาอังกฤษออก เก็บแค่ภาษาไทยและตัวเลข 1,1+,2,2+,3,3+"""
-#     if pd.isna(insurance_class) or insurance_class is None:
-#         return None
-    
-#     insurance_class_str = str(insurance_class).strip()
-    
-#     # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
-#     invalid_patterns = [
-#         r'[<>"\'\`\\]',  # SQL injection characters
-#         r'\.\./',  # path traversal
-#         r'[\(\)\{\}\[\]]+',  # brackets
-#         r'[!@#$%^&*+=|]+',  # special characters
-#         r'XOR',  # SQL injection
-#         r'if\(',  # SQL injection
-#         r'now\(\)',  # SQL injection
-#         r'\$\{',  # template injection
-#         r'\?\?\?\?',  # multiple question marks
-#         r'[0-9]+[XO][0-9]+',  # XSS patterns
-#     ]
-    
-#     for pattern in invalid_patterns:
-#         if re.search(pattern, insurance_class_str, re.IGNORECASE):
-#             return None
-    
-#     # ตรวจสอบความยาว
-#     if len(insurance_class_str) < 2 or len(insurance_class_str) > 50:
-#         return None
-    
-#     # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
-#     if not re.search(r'[ก-๙]', insurance_class_str):
-#         return None
-    
-#     # ลบคำภาษาอังกฤษออกจากทุกตำแหน่ง
-#     # ใช้ regex เพื่อลบตัวอักษรภาษาอังกฤษและช่องว่างที่ติดกัน
-#     cleaned_class = re.sub(r'[a-zA-Z\s]+', ' ', insurance_class_str)
-    
-#     # ลบเครื่องหมายพิเศษ . : / ; - ออก (แต่เก็บ + ไว้)
-#     cleaned_class = re.sub(r'[.:/;\-]', '', cleaned_class)
-    
-#     # ลบช่องว่างที่เหลือและช่องว่างที่ติดกัน
-#     cleaned_class = re.sub(r'\s+', ' ', cleaned_class).strip()
-    
-#     # ตรวจสอบว่าหลังจากลบแล้วยังมีความยาวที่เหมาะสมหรือไม่
-#     if len(cleaned_class) < 2:
-#         return None
-    
-#     # ตรวจสอบว่าหลังจากลบแล้วยังมีตัวอักษรไทยหรือไม่
-#     if not re.search(r'[ก-๙]', cleaned_class):
-#         return None
-    
-#     return cleaned_class
-
 def execute_query_with_retry(engine, query, max_retries=3, delay=5):
     """Execute query with retry mechanism for connection issues"""
     for attempt in range(max_retries):
@@ -212,11 +160,18 @@ def close_engines():
 
 @op
 def extract_motor_data():
-    # Query 1: Extract plan data with retry mechanism
+    now = datetime.now()
+
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
+
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
     plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01' 
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}' 
         AND type_insure = 'ประกันรถ'
     """
     df_plan = execute_query_with_retry(source_engine, plan_query)
@@ -235,7 +190,7 @@ def extract_motor_data():
     pay_query = """
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-        WHERE datestart >= '2024-01-01' AND datestart < '2025-08-01'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
     """
     df_pay = execute_query_with_retry(source_engine, pay_query)
 
@@ -273,9 +228,6 @@ def clean_motor_data(data_tuple):
             return a_str
         return f"{a_str} {b_str}"
 
-    df["insurance_class"] = df.apply(lambda row: combine_columns(row["type"], row["repair_type"]), axis=1)
-    df = df.drop(columns=["type", "repair_type"], errors="ignore")
-
     df = df.rename(columns={
         "quo_num": "quotation_num",
         "company": "ins_company",
@@ -297,7 +249,8 @@ def clean_motor_data(data_tuple):
         "show_ems_price": "ems_amount",
         "show_ems_type": "delivery_type",
         "date_warranty": "date_warranty",
-        "date_exp": "date_expired"
+        "date_exp": "date_expired",
+        "type":"insurance_class"
     })
 
     df = df.replace(r'^\s*$', pd.NA, regex=True)
@@ -319,20 +272,6 @@ def clean_motor_data(data_tuple):
         print(f"🧹 Cleaned ins_company column - filtered {filtered_count} invalid records")
         if filtered_count > 0:
             print(f"   Examples of invalid companies: {list(invalid_companies[:5])}")
-    
-    # # ทำความสะอาดคอลัมน์ insurance_class
-    # if 'insurance_class' in df.columns:
-    #     before_count = df['insurance_class'].notna().sum()
-    #     # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
-    #     invalid_classes = df[df['insurance_class'].notna()]['insurance_class'].unique()
-    #     df['insurance_class'] = df['insurance_class'].apply(clean_insurance_class)
-    #     after_count = df['insurance_class'].notna().sum()
-    #     filtered_count = before_count - after_count
-    #     print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
-    #     if filtered_count > 0:
-    #         print(f"   Examples of invalid classes: {list(invalid_classes[:5])}")
-    
-    # df["insurance_class"] = df["insurance_class"].replace("ซ่อมอู่", np.nan)
     
     # แปลง datetime และจัดการกับ NaT values
     df["date_warranty"] = pd.to_datetime(df["date_warranty"], errors="coerce")
@@ -428,6 +367,70 @@ def clean_motor_data(data_tuple):
         df['delivery_type'] = df['delivery_type'].replace('nor', 'normal')
         print(f"📦 Cleaned delivery_type column - changed 'nor' to 'normal'")
 
+    # ✅ ทำความสะอาดคอลัมน์ insurance_class (type) - เก็บแค่ค่าที่กำหนดเท่านั้น
+    if 'insurance_class' in df.columns:
+        valid_classes = ['1', '1+', '2', '2+', '3', '3+', 'พรบ']
+        before_count = df['insurance_class'].notna().sum()
+        
+        # แปลงเป็น string และทำความสะอาด
+        df['insurance_class'] = df['insurance_class'].astype(str).str.strip()
+        
+        # เก็บแค่ค่าที่ถูกต้องเท่านั้น
+        df['insurance_class'] = df['insurance_class'].apply(
+            lambda x: x if x in valid_classes else None
+        )
+        
+        after_count = df['insurance_class'].notna().sum()
+        filtered_count = before_count - after_count
+        print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
+        print(f"   Valid classes: {valid_classes}")
+        
+        # แสดงสถิติค่าที่ถูกต้อง
+        valid_counts = df['insurance_class'].value_counts()
+        print(f"   Valid class distribution:")
+        for class_name, count in valid_counts.items():
+            print(f"     {class_name}: {count}")
+
+    # ✅ ทำความสะอาดคอลัมน์ repair_type - เก็บแค่ภาษาไทยเท่านั้น
+    if 'repair_type' in df.columns:
+        def clean_repair_type(repair_type):
+            """ทำความสะอาด repair_type - เก็บแค่ภาษาไทยเท่านั้น"""
+            if pd.isna(repair_type) or repair_type is None:
+                return None
+            
+            repair_str = str(repair_type).strip()
+            
+            # เก็บแค่ตัวอักษรภาษาไทยเท่านั้น
+            thai_only = re.sub(r'[^ก-๙]', '', repair_str)
+            
+            # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
+            if len(thai_only) < 2:
+                return None
+            
+            # แก้ไขชื่อที่ผิดให้ถูกต้อง
+            if thai_only in ['อู่', 'ซ่อมอู้', 'ซ่อมอู๋']:
+                return 'ซ่อมอู่'
+            elif thai_only in ['ซ่องห้าง', 'ซ่อมศูนย์']:
+                return 'ซ่อมห้าง'
+            
+            return thai_only
+        
+        before_count = df['repair_type'].notna().sum()
+        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
+        invalid_repairs = df[df['repair_type'].notna()]['repair_type'].unique()
+        df['repair_type'] = df['repair_type'].apply(clean_repair_type)
+        after_count = df['repair_type'].notna().sum()
+        filtered_count = before_count - after_count
+        print(f"🧹 Cleaned repair_type column - filtered {filtered_count} invalid records")
+        if filtered_count > 0:
+            print(f"   Examples of invalid repair types: {list(invalid_repairs[:5])}")
+        
+        # แสดงสถิติข้อมูลที่ถูกต้อง
+        valid_repairs = df['repair_type'].value_counts().head(10)
+        print(f"   Top 10 valid repair types:")
+        for repair_type, count in valid_repairs.items():
+            print(f"     {repair_type}: {count}")
+
     # ✅ ลบลูกน้ำออกจากคอลัมน์ตัวเลขก่อนแปลงเป็นตัวเลข
     numeric_columns = [
         "sum_insured", "human_coverage_person", "human_coverage_atime", "property_coverage",
@@ -503,8 +506,16 @@ def load_motor_data(df: pd.DataFrame):
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
-    # Use retry mechanism for reading existing data
-    existing_query = f"SELECT {pk_column} FROM {table_name}"
+
+    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
+    with target_engine.connect() as conn:
+        existing_query = pd.read_sql(
+            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            conn
+        )
     df_existing = execute_query_with_retry(target_engine, existing_query)
 
     existing_ids = set(df_existing[pk_column])
@@ -570,34 +581,34 @@ def load_motor_data(df: pd.DataFrame):
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
-if __name__ == "__main__":
-    try:
-        print("🚀 Starting fact_insurance_motor ETL process...")
+# if __name__ == "__main__":
+#     try:
+#         print("🚀 Starting fact_insurance_motor ETL process...")
         
-        # Extract data with retry mechanism
-        print("📥 Extracting data from source databases...")
-        df_raw = extract_motor_data()
-        print("✅ Data extraction completed")
+#         # Extract data with retry mechanism
+#         print("📥 Extracting data from source databases...")
+#         df_raw = extract_motor_data()
+#         print("✅ Data extraction completed")
 
-        # Clean data
-        print("🧹 Cleaning and transforming data...")
-        df_clean = clean_motor_data((df_raw))
-        print("✅ Data cleaning completed")
-        print("✅ Cleaned columns:", df_clean.columns)
+#         # Clean data
+#         print("🧹 Cleaning and transforming data...")
+#         df_clean = clean_motor_data((df_raw))
+#         print("✅ Data cleaning completed")
+#         print("✅ Cleaned columns:", df_clean.columns)
 
-        # Save to Excel for inspection
-        output_path = "fact_insurance_motor.xlsx"
-        df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        print(f"💾 Saved to {output_path}")
+#         # Save to Excel for inspection
+#         # output_path = "fact_insurance_motor.xlsx"
+#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#         # print(f"💾 Saved to {output_path}")
 
-        # Uncomment to load to database
-        # print("📤 Loading data to target database...")
-        # load_motor_data(df_clean)
-        # print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+#         # Uncomment to load to database
+#         print("📤 Loading data to target database...")
+#         load_motor_data(df_clean)
+#         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
         
-    except Exception as e:
-        print(f"❌ ETL process failed: {str(e)}")
-        raise
-    finally:
-        # Always close database connections
-        close_engines()
+#     except Exception as e:
+#         print(f"❌ ETL process failed: {str(e)}")
+#         raise
+#     finally:
+#         # Always close database connections
+#         close_engines()
