@@ -93,15 +93,31 @@ def extract_car_data():
     print(f"📦 df_plan shape: {df_plan.shape}")
     print(f"📦 df_merged shape: {df_merged.shape}")
     
-    # ตรวจสอบ NaN ในคอลัมน์สำคัญ
-    important_cols = ['id_motor2', 'idcar', 'quo_num']
-    for col in important_cols:
+    # ✅ ตรวจสอบว่าคอลัมน์สำคัญมีอยู่หรือไม่
+    print("🔍 Checking for required columns:")
+    required_cols = ['id_motor2', 'idcar', 'quo_num']
+    for col in required_cols:
         if col in df_merged.columns:
             nan_count = df_merged[col].isna().sum()
-            if nan_count > 0:
-                print(f"⚠️ {col}: {nan_count} NaN values")
-            else:
-                print(f"✅ {col}: No NaN values")
+            total_count = len(df_merged)
+            valid_count = total_count - nan_count
+            print(f"✅ {col}: {valid_count}/{total_count} valid values ({nan_count} NaN)")
+            
+            if valid_count == 0:
+                print(f"⚠️ WARNING: No valid values in {col}!")
+                print(f"🔍 Sample values: {df_merged[col].head(10).tolist()}")
+        else:
+            print(f"❌ ERROR: Required column '{col}' not found!")
+            print(f"🔍 Available columns: {list(df_merged.columns)}")
+    
+    # ✅ ตรวจสอบว่ามีข้อมูลที่จำเป็นสำหรับการประมวลผลหรือไม่
+    if 'id_motor2' not in df_merged.columns or df_merged['id_motor2'].notna().sum() == 0:
+        print("❌ ERROR: No valid id_motor2 data found!")
+        print("🔍 This will cause car_id to be missing in the final output")
+        print("🔍 Sample data from df_pay:")
+        print(df_pay.head())
+        print("🔍 Sample data from df_plan:")
+        print(df_plan.head())
     
     return df_merged
 
@@ -133,6 +149,17 @@ def clean_car_data(df: pd.DataFrame):
     }
 
     df = df.rename(columns=rename_columns)
+    
+    # ✅ ตรวจสอบว่าการเปลี่ยนชื่อคอลัมน์ทำงานถูกต้อง
+    print("🔍 Column renaming check:")
+    if 'car_id' in df.columns:
+        car_id_count = df['car_id'].notna().sum()
+        print(f"✅ car_id column exists with {car_id_count} valid values")
+    else:
+        print("❌ ERROR: car_id column not found after renaming!")
+        print(f"🔍 Available columns: {list(df.columns)}")
+        raise KeyError("car_id column not found after renaming")
+    
     df = df.replace(r'^\s*$', pd.NA, regex=True)
     df_temp = df.replace(r'^\s*$', np.nan, regex=True)
     df['non_empty_count'] = df_temp.notnull().sum(axis=1)
@@ -145,6 +172,16 @@ def clean_car_data(df: pd.DataFrame):
     df_cleaned = df_cleaned.drop(columns=['non_empty_count'])
 
     df_cleaned.columns = df_cleaned.columns.str.lower()
+    
+    # ✅ ตรวจสอบว่าคอลัมน์ car_id ยังคงอยู่หลังจากเปลี่ยนเป็นตัวพิมพ์เล็ก
+    print("🔍 After converting columns to lowercase:")
+    if 'car_id' in df_cleaned.columns:
+        car_id_count = df_cleaned['car_id'].notna().sum()
+        print(f"✅ car_id column exists with {car_id_count} valid values")
+    else:
+        print("❌ ERROR: car_id column not found after lowercase conversion!")
+        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
+        raise KeyError("car_id column not found after lowercase conversion")
 
     df_cleaned['seat_count'] = df_cleaned['seat_count'].replace("อื่นๆ", np.nan)
     df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
@@ -365,15 +402,44 @@ def clean_car_data(df: pd.DataFrame):
     # ✅ ตรวจสอบ car_id ที่เป็น NaN (สำคัญที่สุด)
     if 'car_id' in df_cleaned.columns:
         car_id_nan = df_cleaned['car_id'].isna().sum()
+        total_records = len(df_cleaned)
+        print(f"🔍 car_id status: {total_records - car_id_nan}/{total_records} valid records")
+        
         if car_id_nan > 0:
             print(f"⚠️ WARNING: {car_id_nan} records have NaN car_id")
             # ลบข้อมูลที่มี car_id เป็น NaN
             df_cleaned = df_cleaned[df_cleaned['car_id'].notna()].copy()
             print(f"✅ Removed {car_id_nan} records with NaN car_id")
+            print(f"📊 Remaining records: {len(df_cleaned)}")
+            
+            # ตรวจสอบว่ายังมีข้อมูลเหลืออยู่หรือไม่
+            if len(df_cleaned) == 0:
+                print("❌ ERROR: No records remaining after removing NaN car_id!")
+                print("🔍 This means all records had NaN car_id values")
+                raise ValueError("No valid records remaining after cleaning")
+        else:
+            print("✅ All car_id values are valid")
     else:
-        print("⚠️ Column 'car_id' not found in DataFrame (skip NaN check and removal)")
+        print("❌ ERROR: Column 'car_id' not found in DataFrame!")
+        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
+        raise KeyError("car_id column not found in DataFrame")
     
     print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
+    
+    # ✅ ตรวจสอบว่าคอลัมน์ car_id ยังคงอยู่
+    if 'car_id' not in df_cleaned.columns:
+        print("❌ ERROR: Column 'car_id' is missing after cleaning!")
+        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
+        raise KeyError("Column 'car_id' is missing after cleaning process")
+    
+    # ✅ ตรวจสอบว่ามีข้อมูลใน car_id หรือไม่
+    car_id_count = df_cleaned['car_id'].notna().sum()
+    print(f"✅ Records with valid car_id: {car_id_count}/{len(df_cleaned)}")
+    
+    if car_id_count == 0:
+        print("⚠️ WARNING: No valid car_id records found!")
+        print("🔍 Sample of car_id values:")
+        print(df_cleaned['car_id'].head(10))
 
     return df_cleaned
 
@@ -382,6 +448,17 @@ def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
+    # ✅ ตรวจสอบว่าคอลัมน์ car_id มีอยู่ใน DataFrame หรือไม่
+    print(f"🔍 Available columns in DataFrame: {list(df.columns)}")
+    print(f"🔍 DataFrame shape: {df.shape}")
+    
+    if pk_column not in df.columns:
+        print(f"❌ ERROR: Column '{pk_column}' not found in DataFrame!")
+        print(f"🔍 Available columns: {list(df.columns)}")
+        print(f"📊 DataFrame info:")
+        print(df.info())
+        raise KeyError(f"Column '{pk_column}' not found in DataFrame. Available columns: {list(df.columns)}")
+    
     # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
     def check_and_add_column():
         with target_engine.connect() as conn:
