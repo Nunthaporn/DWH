@@ -493,10 +493,12 @@ def load_sales_data(df: pd.DataFrame):
                 stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
                 valid_column_names = [c.name for c in metadata_table.columns]
                 update_columns = {
-                    c: stmt.excluded[c]
-                    for c in valid_column_names
-                    if c != pk_column and c in batch_df.columns
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata_table.columns
+                    if c.name not in pk_column + ['id_contact', 'create_at', 'update_at']
                 }
+                # update_at ให้เป็นเวลาปัจจุบัน
+                update_columns['update_at'] = datetime.now()
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
                     set_=update_columns

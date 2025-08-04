@@ -394,8 +394,10 @@ def load_commission_data(df: pd.DataFrame):
                         stmt = pg_insert(metadata).values(batch)
                         update_dict = {
                             c.name: stmt.excluded[c.name]
-                            for c in metadata.columns if c.name != pk_column
+                            for c in metadata.columns if c.name not in [pk_column, 'create_at', 'update_at']
                         }
+                        # update_at ให้เป็นเวลาปัจจุบัน
+                        update_dict['update_at'] = datetime.now()
                         stmt = stmt.on_conflict_do_update(
                             index_elements=[pk_column],
                             set_=update_dict

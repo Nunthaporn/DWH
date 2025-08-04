@@ -594,8 +594,10 @@ def load_to_wh(df: pd.DataFrame):
                 update_columns = {
                     c: stmt.excluded[c]
                     for c in valid_column_names
-                    if c != pk_column and c in batch_df.columns
+                    if c not in [pk_column, 'id_contact', 'create_at', 'update_at'] and c in batch_df.columns
                 }
+                # update_at ให้เป็นเวลาปัจจุบัน
+                update_columns['update_at'] = datetime.now()
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
                     set_=update_columns

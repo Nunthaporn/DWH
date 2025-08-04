@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
+from datetime import datetime
 
 # ✅ Load .env
 load_dotenv()
@@ -507,8 +508,10 @@ def load_motor_data(df: pd.DataFrame):
                     stmt = pg_insert(table).values(**record)
                     update_dict = {
                         c.name: stmt.excluded[c.name]
-                        for c in table.columns if c.name != pk_column
+                        for c in table.columns if c.name not in [pk_column, 'create_at', 'update_at']
                     }
+                    # update_at ให้เป็นเวลาปัจจุบัน
+                    update_dict['update_at'] = datetime.now()
                     stmt = stmt.on_conflict_do_update(
                         index_elements=[pk_column],
                         set_=update_dict

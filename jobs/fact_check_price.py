@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, text, inspect, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 import logging
+from datetime import datetime
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
@@ -362,8 +363,10 @@ def load_fact_check_price(df: pd.DataFrame):
                         update_columns = {
                             c.name: stmt.excluded[c.name]
                             for c in metadata.columns
-                            if c.name not in pk_column
+                            if c.name not in pk_column + ['check_price_id', 'create_at', 'update_at']
                         }
+                        # update_at ให้เป็นเวลาปัจจุบัน
+                        update_columns['update_at'] = datetime.now()
                         stmt = stmt.on_conflict_do_update(
                             index_elements=pk_column,
                             set_=update_columns

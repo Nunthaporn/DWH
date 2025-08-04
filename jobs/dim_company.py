@@ -8,6 +8,7 @@ import numpy as np
 import re
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime
 
 # ✅ โหลด .env
 load_dotenv()
@@ -225,8 +226,10 @@ def load_to_company(df: pd.DataFrame):
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name not in pk_columns
+                    if c.name not in pk_columns + ['id_company', 'create_at', 'update_at']
                 }
+                # update_at ให้เป็นเวลาปัจจุบัน
+                update_columns['update_at'] = datetime.now()
                 stmt = stmt.on_conflict_do_update(
                     index_elements=pk_columns,
                     set_=update_columns

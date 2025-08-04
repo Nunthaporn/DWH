@@ -257,8 +257,10 @@ def load_order_type_data(df: pd.DataFrame):
                     update_columns = {
                         c.name: stmt.excluded[c.name]
                         for c in metadata.columns
-                        if c.name != pk_column
+                        if c.name not in [pk_column, 'order_type_id', 'create_at', 'update_at']
                     }
+                    # update_at ให้เป็นเวลาปัจจุบัน
+                    update_columns['update_at'] = datetime.now()
                     stmt = stmt.on_conflict_do_update(
                         index_elements=[pk_column],
                         set_=update_columns
