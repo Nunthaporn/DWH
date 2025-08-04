@@ -158,6 +158,9 @@ def load_card_agent_data(df: pd.DataFrame):
         col for col in df.columns
         if col not in exclude_columns
     ]
+    
+    print(f"🔍 Columns to compare for updates: {compare_cols}")
+    print(f"🔍 Excluded columns (audit fields): {exclude_columns}")
 
     # ✅ เปรียบเทียบข้อมูลแบบ Vectorized (เร็วกว่า apply)
     df_to_update = pd.DataFrame()
@@ -208,6 +211,21 @@ def load_card_agent_data(df: pd.DataFrame):
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
     print(f"🔄 Update: {len(df_to_update)} rows")
+    
+    # ✅ แสดงตัวอย่างข้อมูลที่จะ insert และ update
+    if not df_to_insert.empty:
+        print("🔍 Sample data to INSERT:")
+        sample_insert = df_to_insert.head(2)
+        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
+            if col in sample_insert.columns:
+                print(f"   {col}: {sample_insert[col].tolist()}")
+    
+    if not df_to_update.empty:
+        print("🔍 Sample data to UPDATE:")
+        sample_update = df_to_update.head(2)
+        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
+            if col in sample_update.columns:
+                print(f"   {col}: {sample_update[col].tolist()}")
 
     # ✅ Load table metadata
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
@@ -216,6 +234,7 @@ def load_card_agent_data(df: pd.DataFrame):
     if not df_to_insert.empty:
         # แปลง DataFrame เป็น records
         records = []
+        current_time = pd.Timestamp.now()
         for _, row in df_to_insert.iterrows():
             record = {}
             for col, value in row.items():
@@ -223,6 +242,9 @@ def load_card_agent_data(df: pd.DataFrame):
                     record[col] = None
                 else:
                     record[col] = value
+            # ✅ ตั้งค่า audit fields สำหรับ insert
+            record['create_at'] = current_time
+            record['update_at'] = current_time
             records.append(record)
         
         # Insert แบบ batch
@@ -242,15 +264,21 @@ def load_card_agent_data(df: pd.DataFrame):
                     record[col] = value
             records.append(record)
         
-        # Update แบบ batch
+        # Update แบบ batch - เฉพาะคอลัมน์ที่ต้องการ update
         with target_engine.begin() as conn:
             for record in records:
                 stmt = pg_insert(metadata).values(**record)
+                # ✅ เฉพาะคอลัมน์ที่ต้องการ update (ไม่รวม audit fields)
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name != pk_column
+                    if c.name not in [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
                 }
+                # ✅ เพิ่ม update_at เป็นเวลาปัจจุบัน
+                update_columns['update_at'] = pd.Timestamp.now()
+                
+                print(f"🔍 Updating columns for agent_id {record.get(pk_column)}: {list(update_columns.keys())}")
+                
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
                     set_=update_columns
@@ -258,6 +286,31 @@ def load_card_agent_data(df: pd.DataFrame):
                 conn.execute(stmt)
 
     print("✅ Insert/update completed.")
+    
+    # ✅ ตรวจสอบผลลัพธ์
+    print("🔍 Verification - checking audit fields...")
+    if not df_to_insert.empty or not df_to_update.empty:
+        # ดึงข้อมูลที่เพิ่ง insert/update มาเพื่อตรวจสอบ
+        all_agent_ids = []
+        if not df_to_insert.empty:
+            all_agent_ids.extend(df_to_insert[pk_column].tolist())
+        if not df_to_update.empty:
+            all_agent_ids.extend(df_to_update[pk_column].tolist())
+        
+        if all_agent_ids:
+            agent_ids_str = ','.join([f"'{id}'" for id in all_agent_ids[:5]])  # ตรวจสอบแค่ 5 รายการแรก
+            verify_query = f"""
+                SELECT {pk_column}, create_at, update_at 
+                FROM {table_name} 
+                WHERE {pk_column} IN ({agent_ids_str})
+                ORDER BY update_at DESC
+            """
+            
+            with target_engine.connect() as conn:
+                verify_df = pd.read_sql(text(verify_query), conn)
+                print("🔍 Recent records audit fields:")
+                for _, row in verify_df.iterrows():
+                    print(f"   {pk_column}: {row[pk_column]}, create_at: {row['create_at']}, update_at: {row['update_at']}")
 
 @job
 def dim_card_agent_etl():

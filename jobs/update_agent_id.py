@@ -4,6 +4,7 @@ import numpy as np
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, update
+from datetime import datetime
 
 # ✅ Load .env
 load_dotenv()
@@ -67,7 +68,10 @@ def update_agent_id(df_selected: pd.DataFrame):
                 stmt = (
                     update(table)
                     .where(table.c.quotation_num == record['quotation_num'])
-                    .values(agent_id=record['agent_id'])
+                    .values(
+                        agent_id=record['agent_id'],
+                        update_at=datetime.now()
+                    )
                 )
                 conn.execute(stmt)
 

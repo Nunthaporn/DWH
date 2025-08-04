@@ -302,14 +302,14 @@ def load_sales_quotation_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             for record in df_diff_renamed.to_dict(orient='records'):
                 stmt = pg_insert(metadata).values(**record)
-                update_columns = {
+                update_dict = {
                     c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name != pk_column
+                    for c in metadata.columns if c.name not in [pk_column, 'create_at', 'update_at']
                 }
+                update_dict['update_at'] = datetime.datetime.now()
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
-                    set_=update_columns
+                    set_=update_dict
                 )
                 conn.execute(stmt)
 

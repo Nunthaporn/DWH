@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, MetaData, Table, update
 import re
 from sqlalchemy import create_engine, MetaData, Table, update
 from sqlalchemy import text
+from datetime import datetime
 
 # ✅ Load .env
 load_dotenv()
@@ -66,7 +67,10 @@ def update_dim_order_type_in_sales(df_merged: pd.DataFrame):
                 stmt = (
                     update(table)
                     .where(table.c.quotation_num == record['quotation_num'])
-                    .values(order_type_id=record['order_type_id'])
+                    .values(
+                        order_type_id=record['order_type_id'],
+                        update_at=datetime.now()
+                    )
                 )
                 conn.execute(stmt)
 
