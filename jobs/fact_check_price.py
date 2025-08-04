@@ -395,19 +395,19 @@ def load_fact_check_price(df: pd.DataFrame):
 def fact_check_price_etl():
     load_fact_check_price(clean_fact_check_price(extract_fact_check_price()))
 
-# if __name__ == "__main__":
-#     df_logs, df_checkprice = extract_fact_check_price()
-#     print("✅ Extracted logs:", df_logs.shape)
-#     print("✅ Extracted checkprice:", df_checkprice.shape)
-#
-#     df_clean = clean_fact_check_price((df_logs, df_checkprice))
-#     print("✅ Cleaned columns:", df_clean.columns)
-#
-#     # print(df_clean.head(10))
-#
-#     # output_path = "fact_check_price.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+if __name__ == "__main__":
+    df_logs, df_checkprice = extract_fact_check_price()
+    # print("✅ Extracted logs:", df_logs.shape)
+    # print("✅ Extracted checkprice:", df_checkprice.shape)
+
+    df_clean = clean_fact_check_price((df_logs, df_checkprice))
+    # print("✅ Cleaned columns:", df_clean.columns)
+
+    # print(df_clean.head(10))
+
+    output_path = "fact_check_price.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 #
 #     load_fact_check_price(df_clean)
 #     print("🎉 Test completed! Data upserted to dim_car.")

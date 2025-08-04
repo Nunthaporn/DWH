@@ -72,7 +72,7 @@ def remove_commas_from_numeric(value):
     return value
 
 def clean_insurance_company(company):
-    """ทำความสะอาดชื่อบริษัทประกัน"""
+    """ทำความสะอาดชื่อบริษัทประกัน - ลบตัวเลขและภาษาอังกฤษออกจากทุกตำแหน่ง เก็บแค่ภาษาไทย"""
     if pd.isna(company) or company is None:
         return None
     
@@ -100,52 +100,79 @@ def clean_insurance_company(company):
     if len(company_str) < 2 or len(company_str) > 100:
         return None
     
-    # ตรวจสอบว่ามีตัวอักษรไทยหรืออังกฤษหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
-    if not re.search(r'[ก-๙a-zA-Z]', company_str):
+    # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
+    if not re.search(r'[ก-๙]', company_str):
         return None
     
-    # ถ้าข้อมูลผ่านการตรวจสอบแล้ว ให้คืนค่าข้อมูลเดิม
-    return company_str
+    # ลบตัวเลขและภาษาอังกฤษออกจากทุกตำแหน่ง
+    # ใช้ regex เพื่อลบตัวเลข, ตัวอักษรภาษาอังกฤษ, และช่องว่างที่ติดกัน
+    cleaned_company = re.sub(r'[0-9a-zA-Z\s]+', ' ', company_str)
+    
+    # ลบช่องว่างที่เหลือและช่องว่างที่ติดกัน
+    cleaned_company = re.sub(r'\s+', ' ', cleaned_company).strip()
+    
+    # ตรวจสอบว่าหลังจากลบแล้วยังมีความยาวที่เหมาะสมหรือไม่
+    if len(cleaned_company) < 2:
+        return None
+    
+    # ตรวจสอบว่าหลังจากลบแล้วยังมีตัวอักษรไทยหรือไม่
+    if not re.search(r'[ก-๙]', cleaned_company):
+        return None
+    
+    return cleaned_company
 
-def clean_insurance_class(insurance_class):
-    """ทำความสะอาดชั้นประกัน"""
-    if pd.isna(insurance_class) or insurance_class is None:
-        return None
+# def clean_insurance_class(insurance_class):
+#     """ทำความสะอาดชั้นประกัน - ลบคำภาษาอังกฤษออก เก็บแค่ภาษาไทยและตัวเลข 1,1+,2,2+,3,3+"""
+#     if pd.isna(insurance_class) or insurance_class is None:
+#         return None
     
-    insurance_class_str = str(insurance_class).strip()
+#     insurance_class_str = str(insurance_class).strip()
     
-    # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
-    invalid_patterns = [
-        r'[<>"\'\`\\]',  # SQL injection characters
-        r'\.\./',  # path traversal
-        r'[\(\)\{\}\[\]]+',  # brackets
-        r'[!@#$%^&*+=|]+',  # special characters
-        r'XOR',  # SQL injection
-        r'if\(',  # SQL injection
-        r'now\(\)',  # SQL injection
-        r'\$\{',  # template injection
-        r'\?\?\?\?',  # multiple question marks
-        r'[0-9]+[XO][0-9]+',  # XSS patterns
-    ]
+#     # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
+#     invalid_patterns = [
+#         r'[<>"\'\`\\]',  # SQL injection characters
+#         r'\.\./',  # path traversal
+#         r'[\(\)\{\}\[\]]+',  # brackets
+#         r'[!@#$%^&*+=|]+',  # special characters
+#         r'XOR',  # SQL injection
+#         r'if\(',  # SQL injection
+#         r'now\(\)',  # SQL injection
+#         r'\$\{',  # template injection
+#         r'\?\?\?\?',  # multiple question marks
+#         r'[0-9]+[XO][0-9]+',  # XSS patterns
+#     ]
     
-    for pattern in invalid_patterns:
-        if re.search(pattern, insurance_class_str, re.IGNORECASE):
-            return None
+#     for pattern in invalid_patterns:
+#         if re.search(pattern, insurance_class_str, re.IGNORECASE):
+#             return None
     
-    # ตรวจสอบความยาว
-    if len(insurance_class_str) < 2 or len(insurance_class_str) > 50:
-        return None
+#     # ตรวจสอบความยาว
+#     if len(insurance_class_str) < 2 or len(insurance_class_str) > 50:
+#         return None
     
-    # ตรวจสอบว่ามีตัวอักษรไทยหรืออังกฤษหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
-    if not re.search(r'[ก-๙a-zA-Z]', insurance_class_str):
-        return None
+#     # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
+#     if not re.search(r'[ก-๙]', insurance_class_str):
+#         return None
     
-    # ตรวจสอบว่าขึ้นต้นด้วย "ชั้น" หรือ "พ.ร.บ." หรือ "พรบ" หรือไม่
-    if not re.match(r'^(ชั้น|พ\.ร\.บ\.|พรบ)', insurance_class_str):
-        return None
+#     # ลบคำภาษาอังกฤษออกจากทุกตำแหน่ง
+#     # ใช้ regex เพื่อลบตัวอักษรภาษาอังกฤษและช่องว่างที่ติดกัน
+#     cleaned_class = re.sub(r'[a-zA-Z\s]+', ' ', insurance_class_str)
     
-    # ถ้าข้อมูลผ่านการตรวจสอบแล้ว ให้คืนค่าข้อมูลเดิม
-    return insurance_class_str
+#     # ลบเครื่องหมายพิเศษ . : / ; - ออก (แต่เก็บ + ไว้)
+#     cleaned_class = re.sub(r'[.:/;\-]', '', cleaned_class)
+    
+#     # ลบช่องว่างที่เหลือและช่องว่างที่ติดกัน
+#     cleaned_class = re.sub(r'\s+', ' ', cleaned_class).strip()
+    
+#     # ตรวจสอบว่าหลังจากลบแล้วยังมีความยาวที่เหมาะสมหรือไม่
+#     if len(cleaned_class) < 2:
+#         return None
+    
+#     # ตรวจสอบว่าหลังจากลบแล้วยังมีตัวอักษรไทยหรือไม่
+#     if not re.search(r'[ก-๙]', cleaned_class):
+#         return None
+    
+#     return cleaned_class
 
 def execute_query_with_retry(engine, query, max_retries=3, delay=5):
     """Execute query with retry mechanism for connection issues"""
@@ -244,7 +271,7 @@ def clean_motor_data(data_tuple):
             return b_str
         elif b_str == '':
             return a_str
-        return f"ชั้น{a_str} {b_str}"
+        return f"{a_str} {b_str}"
 
     df["insurance_class"] = df.apply(lambda row: combine_columns(row["type"], row["repair_type"]), axis=1)
     df = df.drop(columns=["type", "repair_type"], errors="ignore")
@@ -293,19 +320,19 @@ def clean_motor_data(data_tuple):
         if filtered_count > 0:
             print(f"   Examples of invalid companies: {list(invalid_companies[:5])}")
     
-    # ทำความสะอาดคอลัมน์ insurance_class
-    if 'insurance_class' in df.columns:
-        before_count = df['insurance_class'].notna().sum()
-        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
-        invalid_classes = df[df['insurance_class'].notna()]['insurance_class'].unique()
-        df['insurance_class'] = df['insurance_class'].apply(clean_insurance_class)
-        after_count = df['insurance_class'].notna().sum()
-        filtered_count = before_count - after_count
-        print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
-        if filtered_count > 0:
-            print(f"   Examples of invalid classes: {list(invalid_classes[:5])}")
+    # # ทำความสะอาดคอลัมน์ insurance_class
+    # if 'insurance_class' in df.columns:
+    #     before_count = df['insurance_class'].notna().sum()
+    #     # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
+    #     invalid_classes = df[df['insurance_class'].notna()]['insurance_class'].unique()
+    #     df['insurance_class'] = df['insurance_class'].apply(clean_insurance_class)
+    #     after_count = df['insurance_class'].notna().sum()
+    #     filtered_count = before_count - after_count
+    #     print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
+    #     if filtered_count > 0:
+    #         print(f"   Examples of invalid classes: {list(invalid_classes[:5])}")
     
-    df["insurance_class"] = df["insurance_class"].replace("ซ่อมอู่", np.nan)
+    # df["insurance_class"] = df["insurance_class"].replace("ซ่อมอู่", np.nan)
     
     # แปลง datetime และจัดการกับ NaT values
     df["date_warranty"] = pd.to_datetime(df["date_warranty"], errors="coerce")
