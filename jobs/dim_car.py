@@ -61,8 +61,7 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 def extract_car_data():
     now = datetime.now()
 
-    # ✅ ขยายช่วงเวลาเป็น 7 วันย้อนหลังเพื่อให้ได้ข้อมูลมากขึ้น
-    start_time = now - timedelta(days=7)
+    start_time = now - timedelta(days=1)
     end_time = now
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
@@ -355,22 +354,41 @@ def clean_car_data(df: pd.DataFrame):
         "อุตรดิตถ์", "อุบลราชธานี", "อำนาจเจริญ"]
 
     def extract_clean_plate(value):
-        if pd.isnull(value) or value.strip() == "":
+        if pd.isnull(value) or str(value).strip() == "":
             return None
-        text = re.split(r'[\/]', value.strip())[0].split()[0]
-        for prov in province_list:
-            if prov in text:
-                text = text.replace(prov, "").strip()
-        reg_match = re.match(r'^((?:\d{1,2})?[ก-ฮ]{1,3}\d{1,4})', text)
-        if reg_match:
-            final_plate = reg_match.group(1).replace('-', '')
-            match_two_digits = re.match(r'^(\d{2})([ก-ฮ].*)$', final_plate)
-            if match_two_digits:
-                final_plate = match_two_digits.group(1)[1:] + match_two_digits.group(2)
-            if final_plate.startswith("0"):
-                final_plate = final_plate[1:]
-            return final_plate
-        else:
+        
+        try:
+            # แบ่งด้วย / และเอาแค่ส่วนแรก
+            parts = re.split(r'[\/]', str(value).strip())
+            if not parts or not parts[0]:
+                return None
+            
+            # แบ่งด้วยช่องว่างและเอาแค่ส่วนแรก
+            words = parts[0].split()
+            if not words:
+                return None
+            
+            text = words[0]
+            
+            # ลบชื่อจังหวัดออก
+            for prov in province_list:
+                if prov in text:
+                    text = text.replace(prov, "").strip()
+            
+            # ตรวจสอบรูปแบบทะเบียนรถ
+            reg_match = re.match(r'^((?:\d{1,2})?[ก-ฮ]{1,3}\d{1,4})', text)
+            if reg_match:
+                final_plate = reg_match.group(1).replace('-', '')
+                match_two_digits = re.match(r'^(\d{2})([ก-ฮ].*)$', final_plate)
+                if match_two_digits:
+                    final_plate = match_two_digits.group(1)[1:] + match_two_digits.group(2)
+                if final_plate.startswith("0"):
+                    final_plate = final_plate[1:]
+                return final_plate
+            else:
+                return None
+        except (IndexError, AttributeError, TypeError) as e:
+            # ถ้าเกิด error ให้ return None
             return None
 
     df_cleaned['car_registration'] = df_cleaned['car_registration'].apply(extract_clean_plate)
@@ -402,7 +420,10 @@ def clean_car_data(df: pd.DataFrame):
     else:
         print("⚠️ Column 'car_province' not found in DataFrame")
         
-    df_cleaned = df_cleaned.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    # แทนที่ applymap ที่ deprecated ด้วย map
+    for col in df_cleaned.columns:
+        if df_cleaned[col].dtype == 'object':
+            df_cleaned[col] = df_cleaned[col].map(lambda x: x.strip() if isinstance(x, str) else x)
     
     if 'car_no' in df_cleaned.columns:
         df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
@@ -835,16 +856,16 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_car_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_car_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_car_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_car_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "dim_car.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     output_path = "dim_car.xlsx"
+#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     print(f"💾 Saved to {output_path}")
 
 #     load_car_data(df_clean)
 #     print("🎉 Test completed! Data upserted to dim_car.")
