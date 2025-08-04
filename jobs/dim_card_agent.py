@@ -122,20 +122,17 @@ def load_card_agent_data(df: pd.DataFrame):
     if not agent_ids:
         df_existing = pd.DataFrame()
     else:
-        # แปลง agent_ids เป็น tuple เพื่อให้ SQLAlchemy รับได้
-        agent_ids_tuple = tuple(agent_ids)
-        
-        placeholders = ','.join(['%s'] * len(agent_ids))
+        # สร้าง query string โดยตรงแทนการใช้ placeholders
+        agent_ids_str = ','.join([f"'{id}'" for id in agent_ids])
         query_existing = f"""
             SELECT * FROM {table_name} 
-            WHERE {pk_column} IN ({placeholders})
+            WHERE {pk_column} IN ({agent_ids_str})
         """
 
         with target_engine.connect() as conn:
             df_existing = pd.read_sql(
                 text(query_existing), 
-                conn, 
-                params=agent_ids
+                conn
             )
 
     print(f"📊 New data: {len(df)} rows")
@@ -266,19 +263,19 @@ def load_card_agent_data(df: pd.DataFrame):
 def dim_card_agent_etl():
     load_card_agent_data(clean_card_agent_data(extract_card_agent_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_card_agent_data()
+if __name__ == "__main__":
+    df_raw = extract_card_agent_data()
 
-#     df_clean = clean_card_agent_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_card_agent_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_card_agent.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_card_agent.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "dim_card_agent.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_card_agent.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_card_agent_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_card_agent.")
+    load_card_agent_data(df_clean)
+    print("🎉 completed! Data upserted to dim_card_agent.")
