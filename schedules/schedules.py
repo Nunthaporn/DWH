@@ -65,7 +65,7 @@ fact_commission_schedule = ScheduleDefinition(
 )
 dim_card_agent_schedule = ScheduleDefinition(
     job=dim_card_agent_etl,
-    cron_schedule="0 * * * *", 
+    cron_schedule="0 */2 * * *", 
 )
 fact_insurance_motor_schedule = ScheduleDefinition(
     job=fact_insurance_motor_etl,
