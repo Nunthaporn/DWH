@@ -99,12 +99,15 @@ def clean_fact_check_price(df_logs: pd.DataFrame, df_checkprice: pd.DataFrame) -
             'tunprakan': 'sum_insured', 'deduct': 'deductible'
         }, inplace=True)
         check['input_type'] = 'manual'
+        # Drop columns that are not needed in the final table
+        check.drop(columns=['idcar', 'company', 'status', 'type_driver', 'status_send'], inplace=True)
 
         df_combined = pd.concat([logs, check], ignore_index=True)
         df_combined['transaction_date'] = pd.to_datetime(df_combined['transaction_date'], errors='coerce')
         df_combined['transaction_date'] = df_combined['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
         df_combined = df_combined.drop_duplicates()
         logger.info(f"\u2705 Cleaned shape: {df_combined.shape}")
+        logger.info(f"\u2705 Columns: {list(df_combined.columns)}")
         return df_combined
     except Exception as e:
         logger.error(f"\u274c Error in clean_fact_check_price: {str(e)}")
@@ -118,8 +121,23 @@ def load_fact_check_price(df: pd.DataFrame):
         pk_column = ['id_cus', 'brand', 'model', 'submodel', 'yearcar', 'car_code',
                      'sum_insured', 'type_camera', 'type_addon', 'transaction_date']
         df = df.drop_duplicates(subset=pk_column)
+        
+        # Get table schema
         metadata = MetaData()
         table = Table(table_name, metadata, autoload_with=target_engine)
+        table_columns = [col.name for col in table.columns]
+        logger.info(f"\u2705 Table columns: {table_columns}")
+        
+        # Ensure DataFrame columns match table columns
+        df_columns = list(df.columns)
+        missing_columns = [col for col in table_columns if col not in df_columns]
+        extra_columns = [col for col in df_columns if col not in table_columns]
+        
+        if missing_columns:
+            logger.warning(f"\u26a0 Missing columns in DataFrame: {missing_columns}")
+        if extra_columns:
+            logger.warning(f"\u26a0 Extra columns in DataFrame: {extra_columns}")
+            df = df.drop(columns=extra_columns)
 
         with target_engine.begin() as conn:
             conn.execute(table.insert().values(df.to_dict(orient='records')))
@@ -137,20 +155,20 @@ def fact_check_price_etl():
         )
     )
 
-# if __name__ == "__main__":
-#     logs = extract_logs_data()
-#     check = extract_checkprice_data()
-#     # print("✅ Extracted logs:", df_logs.shape)
-#     # print("✅ Extracted checkprice:", df_checkprice.shape)
+if __name__ == "__main__":
+    logs = extract_logs_data()
+    check = extract_checkprice_data()
+    # print("✅ Extracted logs:", df_logs.shape)
+    # print("✅ Extracted checkprice:", df_checkprice.shape)
 
-#     cleaned = clean_fact_check_price(logs, check)
-#     # print("✅ Cleaned columns:", df_clean.columns)
+    cleaned = clean_fact_check_price(logs, check)
+    # print("✅ Cleaned columns:", df_clean.columns)
 
-#     # print(df_clean.head(10))
+    # print(df_clean.head(10))
 
-#     output_path = "fact_check_price.xlsx"
-#     cleaned.to_excel(output_path, index=False, engine='openpyxl')
+    # output_path = "fact_check_price.xlsx"
+    # cleaned.to_excel(output_path, index=False, engine='openpyxl')
     # print(f"💾 Saved to {output_path}")
-#
-#     load_fact_check_price(df_clean)
-#     print("🎉 Test completed! Data upserted to dim_car.")
+
+    load_fact_check_price(cleaned)
+    print("🎉 Test completed! Data upserted to fact_check_price.")
