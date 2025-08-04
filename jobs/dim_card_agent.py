@@ -125,16 +125,18 @@ def load_card_agent_data(df: pd.DataFrame):
         # แปลง agent_ids เป็น tuple เพื่อให้ SQLAlchemy รับได้
         agent_ids_tuple = tuple(agent_ids)
         
+        # สร้าง placeholders สำหรับ PostgreSQL
+        placeholders = ','.join(['%s'] * len(agent_ids))
         query_existing = f"""
             SELECT * FROM {table_name} 
-            WHERE {pk_column} IN %s
+            WHERE {pk_column} IN ({placeholders})
         """
         
         with target_engine.connect() as conn:
             df_existing = pd.read_sql(
                 text(query_existing), 
                 conn, 
-                params=(agent_ids_tuple,)
+                params=agent_ids
             )
 
     print(f"📊 New data: {len(df)} rows")

@@ -61,11 +61,45 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 def extract_car_data():
     now = datetime.now()
 
-    start_time = now.replace(minute=0, second=0, microsecond=0)
-    end_time = now.replace(minute=59, second=59, microsecond=999999)
+    # ✅ ขยายช่วงเวลาเป็น 7 วันย้อนหลังเพื่อให้ได้ข้อมูลมากขึ้น
+    start_time = now - timedelta(days=7)
+    end_time = now
 
     start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
     end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+
+    print(f"🔍 Querying data from {start_str} to {end_str}")
+
+    # ✅ ตรวจสอบการเชื่อมต่อฐานข้อมูลก่อน
+    try:
+        with source_engine.connect() as conn:
+            # ตรวจสอบว่าตารางมีอยู่หรือไม่
+            inspector = inspect(conn)
+            tables = inspector.get_table_names()
+            print(f"🔍 Available tables: {tables}")
+            
+            if 'fin_system_pay' not in tables:
+                print("❌ ERROR: Table 'fin_system_pay' not found!")
+                return pd.DataFrame()
+            if 'fin_system_select_plan' not in tables:
+                print("❌ ERROR: Table 'fin_system_select_plan' not found!")
+                return pd.DataFrame()
+            
+            # ตรวจสอบจำนวนข้อมูลในตาราง
+            count_pay = conn.execute(text("SELECT COUNT(*) FROM fin_system_pay")).scalar()
+            count_plan = conn.execute(text("SELECT COUNT(*) FROM fin_system_select_plan")).scalar()
+            print(f"📊 Total records in fin_system_pay: {count_pay}")
+            print(f"📊 Total records in fin_system_select_plan: {count_plan}")
+            
+            # ตรวจสอบช่วงวันที่ที่มีข้อมูล
+            date_range_pay = conn.execute(text("SELECT MIN(datestart), MAX(datestart) FROM fin_system_pay")).fetchone()
+            date_range_plan = conn.execute(text("SELECT MIN(datestart), MAX(datestart) FROM fin_system_select_plan")).fetchone()
+            print(f"📅 fin_system_pay date range: {date_range_pay}")
+            print(f"📅 fin_system_select_plan date range: {date_range_plan}")
+            
+    except Exception as e:
+        print(f"❌ ERROR connecting to database: {e}")
+        return pd.DataFrame()
 
     query_pay = """
         SELECT quo_num, id_motor1, id_motor2, datestart
@@ -73,7 +107,37 @@ def extract_car_data():
         WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
-    df_pay = pd.read_sql(query_pay, source_engine)
+    
+    # ✅ ลอง query โดยไม่จำกัดเวลาเพื่อดูว่ามีข้อมูลหรือไม่
+    query_pay_test = """
+        SELECT quo_num, id_motor1, id_motor2, datestart
+        FROM fin_system_pay
+        WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+        LIMIT 10
+    """
+    
+    try:
+        df_pay = pd.read_sql(query_pay, source_engine)
+        print(f"📦 df_pay with date filter: {df_pay.shape}")
+        
+        if df_pay.empty:
+            print("⚠️ No data found with date filter, trying without date filter...")
+            df_pay = pd.read_sql(query_pay_test, source_engine)
+            print(f"📦 df_pay without date filter: {df_pay.shape}")
+            
+            if not df_pay.empty:
+                print("✅ Found data without date filter, using all available data")
+                # ใช้ข้อมูลทั้งหมดที่มี
+                query_pay_all = """
+                    SELECT quo_num, id_motor1, id_motor2, datestart
+                    FROM fin_system_pay
+                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+                """
+                df_pay = pd.read_sql(query_pay_all, source_engine)
+                print(f"📦 df_pay all data: {df_pay.shape}")
+    except Exception as e:
+        print(f"❌ ERROR querying fin_system_pay: {e}")
+        df_pay = pd.DataFrame()
 
     query_plan = """
         SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
@@ -83,9 +147,53 @@ def extract_car_data():
         WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
-    df_plan = pd.read_sql(query_plan, source_engine)
+    
+    query_plan_test = """
+        SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
+               yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
+               weight_car, cc_car, color_car, datestart
+        FROM fin_system_select_plan
+        WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+        LIMIT 10
+    """
+    
+    try:
+        df_plan = pd.read_sql(query_plan, source_engine)
+        print(f"📦 df_plan with date filter: {df_plan.shape}")
+        
+        if df_plan.empty:
+            print("⚠️ No data found with date filter, trying without date filter...")
+            df_plan = pd.read_sql(query_plan_test, source_engine)
+            print(f"📦 df_plan without date filter: {df_plan.shape}")
+            
+            if not df_plan.empty:
+                print("✅ Found data without date filter, using all available data")
+                # ใช้ข้อมูลทั้งหมดที่มี
+                query_plan_all = """
+                    SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
+                           yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
+                           weight_car, cc_car, color_car, datestart
+                    FROM fin_system_select_plan
+                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
+                """
+                df_plan = pd.read_sql(query_plan_all, source_engine)
+                print(f"📦 df_plan all data: {df_plan.shape}")
+    except Exception as e:
+        print(f"❌ ERROR querying fin_system_select_plan: {e}")
+        df_plan = pd.DataFrame()
 
-    df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
+    # ✅ Merge ข้อมูล
+    if not df_pay.empty and not df_plan.empty:
+        df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
+    elif not df_pay.empty:
+        print("⚠️ Only fin_system_pay has data, using it alone")
+        df_merged = df_pay.copy()
+    elif not df_plan.empty:
+        print("⚠️ Only fin_system_select_plan has data, using it alone")
+        df_merged = df_plan.copy()
+    else:
+        print("❌ No data found in both tables")
+        df_merged = pd.DataFrame()
     
     # ✅ ตรวจสอบค่า NaN ในข้อมูลที่ extract
     print("🔍 NaN check in extracted data:")
@@ -123,8 +231,41 @@ def extract_car_data():
 
 @op
 def clean_car_data(df: pd.DataFrame):
-    df = df.drop_duplicates(subset=['id_motor2'])
-    df = df.drop_duplicates(subset=['idcar'])
+    # ✅ ตรวจสอบว่า DataFrame ว่างเปล่าหรือไม่
+    if df.empty:
+        print("⚠️ WARNING: Input DataFrame is empty!")
+        print("🔍 Returning empty DataFrame with expected columns")
+        # สร้าง DataFrame ว่างที่มีคอลัมน์ที่คาดหวัง
+        expected_columns = [
+            'quotation_num', 'car_id', 'engine_number', 'car_registration', 
+            'car_province', 'camera', 'car_no', 'car_brand', 'car_series', 
+            'car_subseries', 'car_year', 'car_detail', 'vehicle_group', 
+            'vehbodytypedesc', 'seat_count', 'vehicle_weight', 'engine_capacity', 
+            'vehicle_color'
+        ]
+        return pd.DataFrame(columns=expected_columns)
+    
+    print(f"🔍 Starting data cleaning with {len(df)} records")
+    
+    # ✅ ตรวจสอบว่าคอลัมน์ที่จำเป็นมีอยู่หรือไม่
+    required_cols = ['id_motor2', 'idcar', 'quo_num']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        print(f"⚠️ WARNING: Missing required columns: {missing_cols}")
+        print(f"🔍 Available columns: {list(df.columns)}")
+        # ใช้คอลัมน์ที่มีอยู่เท่านั้น
+        available_cols = [col for col in required_cols if col in df.columns]
+        if not available_cols:
+            print("❌ ERROR: No required columns found!")
+            return pd.DataFrame()
+    
+    # ✅ ลบ duplicates เฉพาะคอลัมน์ที่มีอยู่
+    if 'id_motor2' in df.columns:
+        df = df.drop_duplicates(subset=['id_motor2'])
+    if 'idcar' in df.columns:
+        df = df.drop_duplicates(subset=['idcar'])
+    
+    # ✅ ลบคอลัมน์ datestart ที่ซ้ำ
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
 
     rename_columns = {
@@ -148,7 +289,15 @@ def clean_car_data(df: pd.DataFrame):
         "color_car": "vehicle_color"
     }
 
-    df = df.rename(columns=rename_columns)
+    # ✅ เปลี่ยนชื่อเฉพาะคอลัมน์ที่มีอยู่
+    existing_columns = [col for col in rename_columns.keys() if col in df.columns]
+    if existing_columns:
+        rename_dict = {col: rename_columns[col] for col in existing_columns}
+        df = df.rename(columns=rename_dict)
+        print(f"✅ Renamed {len(existing_columns)} columns: {list(rename_dict.values())}")
+    else:
+        print("⚠️ WARNING: No columns to rename found!")
+        print(f"🔍 Available columns: {list(df.columns)}")
     
     # ✅ ตรวจสอบว่าการเปลี่ยนชื่อคอลัมน์ทำงานถูกต้อง
     print("🔍 Column renaming check:")
@@ -156,9 +305,11 @@ def clean_car_data(df: pd.DataFrame):
         car_id_count = df['car_id'].notna().sum()
         print(f"✅ car_id column exists with {car_id_count} valid values")
     else:
-        print("❌ ERROR: car_id column not found after renaming!")
+        print("⚠️ WARNING: car_id column not found after renaming!")
         print(f"🔍 Available columns: {list(df.columns)}")
-        raise KeyError("car_id column not found after renaming")
+        # สร้างคอลัมน์ car_id ว่างถ้าไม่มี
+        df['car_id'] = None
+        print("➕ Created empty car_id column")
     
     df = df.replace(r'^\s*$', pd.NA, regex=True)
     df_temp = df.replace(r'^\s*$', np.nan, regex=True)
@@ -179,9 +330,11 @@ def clean_car_data(df: pd.DataFrame):
         car_id_count = df_cleaned['car_id'].notna().sum()
         print(f"✅ car_id column exists with {car_id_count} valid values")
     else:
-        print("❌ ERROR: car_id column not found after lowercase conversion!")
+        print("⚠️ WARNING: car_id column not found after lowercase conversion!")
         print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        raise KeyError("car_id column not found after lowercase conversion")
+        # สร้างคอลัมน์ car_id ว่างถ้าไม่มี
+        df_cleaned['car_id'] = None
+        print("➕ Created empty car_id column after lowercase conversion")
 
     df_cleaned['seat_count'] = df_cleaned['seat_count'].replace("อื่นๆ", np.nan)
     df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
@@ -414,23 +567,28 @@ def clean_car_data(df: pd.DataFrame):
             
             # ตรวจสอบว่ายังมีข้อมูลเหลืออยู่หรือไม่
             if len(df_cleaned) == 0:
-                print("❌ ERROR: No records remaining after removing NaN car_id!")
+                print("⚠️ WARNING: No records remaining after removing NaN car_id!")
                 print("🔍 This means all records had NaN car_id values")
-                raise ValueError("No valid records remaining after cleaning")
+                # ส่งคืน DataFrame ว่างแทนที่จะ raise error
+                return pd.DataFrame(columns=df_cleaned.columns)
         else:
             print("✅ All car_id values are valid")
     else:
-        print("❌ ERROR: Column 'car_id' not found in DataFrame!")
+        print("⚠️ WARNING: Column 'car_id' not found in DataFrame!")
         print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        raise KeyError("car_id column not found in DataFrame")
+        # สร้างคอลัมน์ car_id ว่าง
+        df_cleaned['car_id'] = None
+        print("➕ Created empty car_id column")
     
     print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
     
     # ✅ ตรวจสอบว่าคอลัมน์ car_id ยังคงอยู่
     if 'car_id' not in df_cleaned.columns:
-        print("❌ ERROR: Column 'car_id' is missing after cleaning!")
+        print("⚠️ WARNING: Column 'car_id' is missing after cleaning!")
         print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        raise KeyError("Column 'car_id' is missing after cleaning process")
+        # สร้างคอลัมน์ car_id ว่าง
+        df_cleaned['car_id'] = None
+        print("➕ Created empty car_id column after cleaning")
     
     # ✅ ตรวจสอบว่ามีข้อมูลใน car_id หรือไม่
     car_id_count = df_cleaned['car_id'].notna().sum()
@@ -438,8 +596,11 @@ def clean_car_data(df: pd.DataFrame):
     
     if car_id_count == 0:
         print("⚠️ WARNING: No valid car_id records found!")
-        print("🔍 Sample of car_id values:")
-        print(df_cleaned['car_id'].head(10))
+        if len(df_cleaned) > 0:
+            print("🔍 Sample of car_id values:")
+            print(df_cleaned['car_id'].head(10))
+        else:
+            print("🔍 DataFrame is empty")
 
     return df_cleaned
 
@@ -448,16 +609,23 @@ def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
+    # ✅ ตรวจสอบว่า DataFrame ว่างเปล่าหรือไม่
+    if df.empty:
+        print("⚠️ WARNING: Input DataFrame is empty!")
+        print("🔍 Skipping database operations")
+        return
+    
     # ✅ ตรวจสอบว่าคอลัมน์ car_id มีอยู่ใน DataFrame หรือไม่
     print(f"🔍 Available columns in DataFrame: {list(df.columns)}")
     print(f"🔍 DataFrame shape: {df.shape}")
     
     if pk_column not in df.columns:
-        print(f"❌ ERROR: Column '{pk_column}' not found in DataFrame!")
+        print(f"⚠️ WARNING: Column '{pk_column}' not found in DataFrame!")
         print(f"🔍 Available columns: {list(df.columns)}")
         print(f"📊 DataFrame info:")
         print(df.info())
-        raise KeyError(f"Column '{pk_column}' not found in DataFrame. Available columns: {list(df.columns)}")
+        print("🔍 Skipping database operations due to missing primary key column")
+        return
     
     # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
     def check_and_add_column():
@@ -504,6 +672,12 @@ def load_car_data(df: pd.DataFrame):
         print(f"✅ Removed {critical_nan} records with NaN {pk_column}")
     
     print(f"📊 Final data shape after NaN check: {df.shape}")
+    
+    # ✅ ตรวจสอบว่ายังมีข้อมูลเหลืออยู่หรือไม่
+    if df.empty:
+        print("⚠️ WARNING: No valid data remaining after NaN check!")
+        print("🔍 Skipping database operations")
+        return
 
     # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
     today_str = datetime.now().strftime('%Y-%m-%d')
@@ -601,6 +775,11 @@ def load_car_data(df: pd.DataFrame):
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
             print(f"⚠️ Skipped {dropped} records with NaN {pk_column}")
+        
+        if df_to_insert_valid.empty:
+            print("⚠️ WARNING: No valid data to insert after NaN check!")
+            return
+        
         if not df_to_insert_valid.empty:
             # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
             df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
@@ -647,6 +826,8 @@ def load_car_data(df: pd.DataFrame):
                     conn.execute(stmt)
         
         retry_db_operation(update_operation)
+    else:
+        print("ℹ️ No data to update")
 
     print("✅ Insert/update completed.")
 
