@@ -82,7 +82,7 @@ def extract_commission_data():
     df_select_plan = pd.read_sql("""
         SELECT quo_num,id_cus,no_car,current_campaign 
         FROM fin_system_select_plan 
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
     """, source_engine)
 
     df_fin_order = pd.read_sql("""
@@ -96,7 +96,7 @@ def extract_commission_data():
                show_price_com_count,show_com_addon,condition_install,
                percent_install,chanel_main
         FROM fin_system_pay 
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
     """, source_engine)
 
     df_com_rank = pd.read_sql("""

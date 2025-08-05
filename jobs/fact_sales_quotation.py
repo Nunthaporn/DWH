@@ -268,23 +268,13 @@ def load_sales_quotation_data(df: pd.DataFrame):
         return
 
     # ✅ โหลดเฉพาะ fact_sales_quotation ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
-    fact_sales_quotations = df[pk_column].tolist()
+    # fact_sales_quotations = df[pk_column].tolist()
     
-    if not fact_sales_quotations:
-        df_existing = pd.DataFrame()
-    else:
-        # สร้าง query string โดยตรงแทนการใช้ placeholders
-        fact_sales_quotations_str = ','.join([f"'{id}'" for id in fact_sales_quotations])
-        query_existing = f"""
-            SELECT * FROM {table_name} 
-            WHERE {pk_column} IN ({fact_sales_quotations_str})
-        """
-
-        with target_engine.connect() as conn:
-            df_existing = pd.read_sql(
-                text(query_existing), 
-                conn
-            )
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(
+            f"SELECT {pk_column} FROM {table_name}",
+            conn
+        )
 
     print(f"📊 New data: {len(df)} rows")
     print(f"📊 Existing data found: {len(df_existing)} rows")

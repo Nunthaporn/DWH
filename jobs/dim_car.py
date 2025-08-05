@@ -114,38 +114,38 @@ def extract_car_data():
     # ✅ ปรับ query ให้มีประสิทธิภาพมากขึ้น
     if start_str and end_str:
         query_pay = f"""
-            SELECT quo_num, id_motor1, id_motor2, datestart
+            SELECT quo_num, id_motor1, id_motor2, update_at
             FROM fin_system_pay
-            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
             AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """
         
         query_plan = f"""
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, datestart
+                   weight_car, cc_car, color_car, update_at
             FROM fin_system_select_plan
-            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
             AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """
     else:
         # ✅ ใช้ LIMIT แทนการ query ข้อมูลทั้งหมด
         query_pay = """
-            SELECT quo_num, id_motor1, id_motor2, datestart
+            SELECT quo_num, id_motor1, id_motor2, update_at
             FROM fin_system_pay
             WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """
         
         query_plan = """
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, datestart
+                   weight_car, cc_car, color_car, update_at
             FROM fin_system_select_plan
             WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """
     
     try:
@@ -228,8 +228,8 @@ def clean_car_data(df: pd.DataFrame):
         df = df.drop_duplicates(subset=['id_motor2'], keep='first')
         print(f"📊 After removing id_motor2 duplicates: {df.shape}")
     
-    # ✅ ลบคอลัมน์ datestart ที่ซ้ำ
-    df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
+    # ✅ ลบคอลัมน์ update_at ที่ซ้ำ
+    df = df.drop(columns=['update_at_x', 'update_at_y'], errors='ignore')
 
     rename_columns = {
         "quo_num": "quotation_num",
