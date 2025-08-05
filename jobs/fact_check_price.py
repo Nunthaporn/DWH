@@ -88,7 +88,7 @@ def extract_logs_data():
             SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                    assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
             FROM fin_customer_logs_B2B
-            WHERE create_at BETWEEN '2025-05-01' AND '2025-08-05'
+            WHERE create_at BETWEEN '2025-07-01' AND '2025-08-05'
             ORDER BY create_at
         """
         chunks_logs = []
@@ -282,20 +282,20 @@ def fact_check_price_etl():
         )
     )
 
-if __name__ == "__main__":
-    logs = extract_logs_data()
-    check = extract_checkprice_data()
-    # print("✅ Extracted logs:", df_logs.shape)
-    # print("✅ Extracted checkprice:", df_checkprice.shape)
+# if __name__ == "__main__":
+#     logs = extract_logs_data()
+#     check = extract_checkprice_data()
+#     # print("✅ Extracted logs:", df_logs.shape)
+#     # print("✅ Extracted checkprice:", df_checkprice.shape)
 
-    cleaned = clean_fact_check_price(logs, check)
-    # print("✅ Cleaned columns:", df_clean.columns)
+#     cleaned = clean_fact_check_price(logs, check)
+#     # print("✅ Cleaned columns:", df_clean.columns)
 
-    # print(df_clean.head(10))
+#     # print(df_clean.head(10))
 
-    # output_path = "fact_check_price.xlsx"
-    # cleaned.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_check_price.xlsx"
+#     # cleaned.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_fact_check_price(cleaned)
-    print("🎉 completed! Data upserted to fact_check_price.")
+#     load_fact_check_price(cleaned)
+#     print("🎉 completed! Data upserted to fact_check_price.")
