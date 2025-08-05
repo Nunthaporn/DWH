@@ -154,10 +154,11 @@ def load_card_agent_data(df: pd.DataFrame):
                 record['update_at'] = current_time
                 records.append(record)
             
-            # Insert แบบ batch (เฉพาะ records ที่ไม่ซ้ำ)
+            # Insert แบบ batch ลง temporary table (ไม่ใช่ตารางหลัก)
             if records:
-                metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-                conn.execute(metadata.insert(), records)
+                # ใช้ temporary table metadata แทน
+                temp_metadata = Table(temp_table_name, MetaData(), autoload_with=target_engine)
+                conn.execute(temp_metadata.insert(), records)
 
     # ✅ ใช้ SQL เพื่อหา records ที่ต้อง insert และ update
     with target_engine.connect() as conn:
