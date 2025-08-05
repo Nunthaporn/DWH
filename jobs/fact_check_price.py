@@ -37,6 +37,31 @@ def clean_numeric_column(series):
     
     return cleaned
 
+def clean_numeric_column_with_bounds(series, min_val=None, max_val=None):
+    """
+    Clean numeric column with bounds checking for PostgreSQL integer compatibility
+    """
+    # Convert to string and remove commas and spaces
+    cleaned = series.astype(str).str.replace(',', '', regex=False)
+    cleaned = cleaned.str.replace(' ', '', regex=False)
+    
+    # Replace empty strings with None
+    cleaned = cleaned.replace('', None)
+    
+    # Convert to numeric, coercing errors to NaN
+    cleaned = pd.to_numeric(cleaned, errors="coerce")
+    
+    # Apply bounds if specified
+    if min_val is not None:
+        cleaned = cleaned.where(cleaned >= min_val, None)
+    if max_val is not None:
+        cleaned = cleaned.where(cleaned <= max_val, None)
+    
+    # Convert NaN to None for database compatibility
+    cleaned = cleaned.where(pd.notnull(cleaned), None)
+    
+    return cleaned
+
 # DB: Source (MariaDB)
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
@@ -63,7 +88,7 @@ def extract_logs_data():
             SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                    assured_insurance_capital1, camera, addon, quo_num, create_at, results, selected, carprovince
             FROM fin_customer_logs_B2B
-            WHERE create_at BETWEEN '2024-01-01' AND '2024-04-30'
+            WHERE create_at BETWEEN '2025-05-01' AND '2025-08-05'
             ORDER BY create_at
         """
         chunks_logs = []
@@ -123,11 +148,19 @@ def clean_fact_check_price(df_logs: pd.DataFrame, df_checkprice: pd.DataFrame) -
 
         df_combined = pd.concat([logs, check], ignore_index=True)
         
-        # Clean numeric columns that might contain empty strings
-        numeric_columns = ['id_cus', 'yearcar', 'sum_insured', 'deductible']
-        for col in numeric_columns:
-            if col in df_combined.columns:
-                df_combined[col] = clean_numeric_column(df_combined[col])
+        # Clean numeric columns that might contain empty strings with bounds checking
+        # PostgreSQL integer range: -2147483648 to 2147483647
+        if 'id_cus' in df_combined.columns:
+            df_combined['id_cus'] = clean_numeric_column_with_bounds(df_combined['id_cus'], min_val=-2147483648, max_val=2147483647)
+        
+        if 'yearcar' in df_combined.columns:
+            df_combined['yearcar'] = clean_numeric_column_with_bounds(df_combined['yearcar'], min_val=1900, max_val=2100)
+        
+        if 'sum_insured' in df_combined.columns:
+            df_combined['sum_insured'] = clean_numeric_column_with_bounds(df_combined['sum_insured'], min_val=0, max_val=2147483647)
+        
+        if 'deductible' in df_combined.columns:
+            df_combined['deductible'] = clean_numeric_column_with_bounds(df_combined['deductible'], min_val=0, max_val=2147483647)
         
         # Clean string columns by replacing empty strings with None
         string_columns = ['brand', 'model', 'submodel', 'car_code', 'type_camera', 'type_addon', 
@@ -138,9 +171,18 @@ def clean_fact_check_price(df_logs: pd.DataFrame, df_checkprice: pd.DataFrame) -
         
         # Handle transaction_date
         df_combined['transaction_date'] = pd.to_datetime(df_combined['transaction_date'], errors='coerce')
-        df_combined['transaction_date'] = df_combined['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
+        df_combined['transaction_date'] = df_combined['transaction_date'].dt.strftime('%Y%m%d')
         
-        # Replace NaT with None for transaction_date
+        # Convert to integer with bounds checking
+        df_combined['transaction_date'] = pd.to_numeric(df_combined['transaction_date'], errors='coerce')
+        # Ensure transaction_date is within reasonable bounds (19000101 to 21000101)
+        df_combined['transaction_date'] = df_combined['transaction_date'].where(
+            (df_combined['transaction_date'] >= 19000101) & (df_combined['transaction_date'] <= 21000101), 
+            None
+        )
+        
+        # Convert to Int64 and replace NaN with None
+        df_combined['transaction_date'] = df_combined['transaction_date'].astype('Int64')
         df_combined['transaction_date'] = df_combined['transaction_date'].replace({pd.NaT: None})
         
         df_combined = df_combined.drop_duplicates()
@@ -183,6 +225,34 @@ def load_fact_check_price(df: pd.DataFrame):
             if df[col].dtype == 'object':
                 df[col] = df[col].replace('', None)
         
+        # Additional bounds checking for numeric columns
+        numeric_columns = ['id_cus', 'yearcar', 'sum_insured', 'deductible', 'transaction_date']
+        for col in numeric_columns:
+            if col in df.columns:
+                # Check for values that might be too large for PostgreSQL integer
+                if col == 'transaction_date':
+                    # Check for reasonable date range
+                    invalid_dates = df[col].where(
+                        (df[col] < 19000101) | (df[col] > 21000101)
+                    ).dropna()
+                    if len(invalid_dates) > 0:
+                        logger.warning(f"\u26a0 Found {len(invalid_dates)} invalid dates in {col}, setting to None")
+                        df[col] = df[col].where(
+                            (df[col] >= 19000101) & (df[col] <= 21000101), 
+                            None
+                        )
+                else:
+                    # Check for values outside PostgreSQL integer range
+                    invalid_values = df[col].where(
+                        (df[col] < -2147483648) | (df[col] > 2147483647)
+                    ).dropna()
+                    if len(invalid_values) > 0:
+                        logger.warning(f"\u26a0 Found {len(invalid_values)} values outside integer range in {col}, setting to None")
+                        df[col] = df[col].where(
+                            (df[col] >= -2147483648) & (df[col] <= 2147483647), 
+                            None
+                        )
+        
         # Log data quality information
         logger.info(f"\u2705 Data shape before insert: {df.shape}")
         logger.info(f"\u2705 Null values per column:")
@@ -190,6 +260,11 @@ def load_fact_check_price(df: pd.DataFrame):
             null_count = df[col].isnull().sum()
             if null_count > 0:
                 logger.info(f"   {col}: {null_count} null values")
+        
+        # Log sample of data for debugging
+        logger.info(f"\u2705 Sample data (first 3 rows):")
+        for i, row in df.head(3).iterrows():
+            logger.info(f"   Row {i}: {dict(row)}")
 
         with target_engine.begin() as conn:
             conn.execute(table.insert().values(df.to_dict(orient='records')))
@@ -207,20 +282,20 @@ def fact_check_price_etl():
         )
     )
 
-# if __name__ == "__main__":
-#     logs = extract_logs_data()
-#     check = extract_checkprice_data()
-#     # print("✅ Extracted logs:", df_logs.shape)
-#     # print("✅ Extracted checkprice:", df_checkprice.shape)
+if __name__ == "__main__":
+    logs = extract_logs_data()
+    check = extract_checkprice_data()
+    # print("✅ Extracted logs:", df_logs.shape)
+    # print("✅ Extracted checkprice:", df_checkprice.shape)
 
-#     cleaned = clean_fact_check_price(logs, check)
-#     # print("✅ Cleaned columns:", df_clean.columns)
+    cleaned = clean_fact_check_price(logs, check)
+    # print("✅ Cleaned columns:", df_clean.columns)
 
-#     # print(df_clean.head(10))
+    # print(df_clean.head(10))
 
-#     # output_path = "fact_check_price.xlsx"
-#     # cleaned.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_check_price.xlsx"
+    # cleaned.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_fact_check_price(cleaned)
-#     print("🎉 completed! Data upserted to fact_check_price.")
+    load_fact_check_price(cleaned)
+    print("🎉 completed! Data upserted to fact_check_price.")
