@@ -4,8 +4,8 @@ import numpy as np
 import os
 import re
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import create_engine, MetaData, Table, inspect, text
 import datetime
 import logging
 
@@ -66,7 +66,7 @@ def extract_sales_quotation_data():
             SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp
             FROM fin_system_select_plan 
-            WHERE datestart BETWEEN '2024-01-01' AND '2024-12-31'
+            WHERE datestart BETWEEN '2025-01-01' AND '2025-08-05'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY datestart DESC
         """, source_engine)
@@ -85,7 +85,7 @@ def extract_sales_quotation_data():
                    discount_mkt, discount_government, discount_government_fin,
                    discount_government_ins, coupon_addon, status AS status_fsp
             FROM fin_system_pay 
-            WHERE datestart BETWEEN '2024-01-01' AND '2024-12-31'
+            WHERE datestart BETWEEN '2025-01-01' AND '2025-08-05'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY datestart DESC
         """, source_engine)
@@ -148,6 +148,12 @@ def clean_sales_quotation_data(inputs):
             "chanel": "contact_channel",
         }
         df_merged.rename(columns=column_mapping, inplace=True)
+
+        # ✅ Add column: sale_team
+        df_merged['sale_team'] = df_merged['type_insurance'].map({
+            'ตรอ': 'ตรอ',
+            'ประกันรถ': 'Motor agency'
+        })
     
         # ✅ แปลงวันที่แบบ vectorized
         date_columns = ['transaction_date', 'order_time', 'quotation_date']
@@ -247,254 +253,197 @@ def clean_sales_quotation_data(inputs):
 
 @op
 def load_sales_quotation_data(df: pd.DataFrame):
-    """Load data to target database"""
+    """Load data to target database with efficient upsert logic"""
     table_name = 'fact_sales_quotation'
     pk_column = 'quotation_num'
     
-    try:
-        # ✅ ตรวจสอบข้อมูล
-        if df.empty:
-            logger.warning("⚠️ ไม่มีข้อมูลที่จะประมวลผล")
-            return
+    # ✅ กรอง fact_sales_quotation ซ้ำจาก DataFrame ใหม่
+    df = df[~df[pk_column].duplicated(keep='first')].copy()
+    
+    # ✅ กรองข้อมูลที่ fact_sales_quotation ไม่เป็น None
+    df = df[df[pk_column].notna()].copy()
+    
+    if df.empty:
+        print("⚠️ No valid data to process")
+        return
+
+    # ✅ โหลดเฉพาะ fact_sales_quotation ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
+    fact_sales_quotations = df[pk_column].tolist()
+    
+    if not fact_sales_quotations:
+        df_existing = pd.DataFrame()
+    else:
+        # สร้าง query string โดยตรงแทนการใช้ placeholders
+        fact_sales_quotations_str = ','.join([f"'{id}'" for id in fact_sales_quotations])
+        query_existing = f"""
+            SELECT * FROM {table_name} 
+            WHERE {pk_column} IN ({fact_sales_quotations_str})
+        """
+
+        with target_engine.connect() as conn:
+            df_existing = pd.read_sql(
+                text(query_existing), 
+                conn
+            )
+
+    print(f"📊 New data: {len(df)} rows")
+    print(f"📊 Existing data found: {len(df_existing)} rows")
+
+    # ✅ กรอง fact_sales_quotation ซ้ำจากข้อมูลเก่า
+    if not df_existing.empty:
+        df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
+
+    # ✅ Identify fact_sales_quotation ใหม่ (ไม่มีใน DB)
+    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
+    new_ids = set(df[pk_column]) - existing_ids
+    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+
+    # ✅ Identify fact_sales_quotation ที่มีอยู่แล้ว
+    common_ids = set(df[pk_column]) & existing_ids
+    df_common_new = df[df[pk_column].isin(common_ids)].copy()
+    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+
+    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
+    exclude_columns = [pk_column, 'create_at', 'update_at']
+    compare_cols = [
+        col for col in df.columns
+        if col not in exclude_columns
+    ]
+    
+    print(f"🔍 Columns to compare for updates: {compare_cols}")
+    print(f"🔍 Excluded columns (audit fields): {exclude_columns}")
+
+    # ✅ เปรียบเทียบข้อมูลแบบ Vectorized (เร็วกว่า apply)
+    df_to_update = pd.DataFrame()
+    if not df_common_new.empty and not df_common_old.empty:
+        # Merge ด้วย suffix (_new, _old)
+        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
         
-        if pk_column not in df.columns:
-            logger.error(f"❌ ไม่พบคอลัมน์ {pk_column} ในข้อมูล")
-            return
+        # ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
+        available_cols = []
+        for col in compare_cols:
+            if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
+                available_cols.append(col)
         
-        logger.info(f"📊 เริ่มประมวลผลข้อมูล {len(df)} rows")
-
-        # ลบข้อมูลซ้ำ
-        df = df[~df[pk_column].duplicated(keep='first')].copy()
-        logger.info(f"📊 ข้อมูลหลังจากลบซ้ำ: {len(df)} rows")
-
-        # ✅ ดึง quotation_num ที่ valid
-        quotation_nums = df[pk_column].dropna().unique()
-        if len(quotation_nums) == 0:
-            logger.warning("⚠️ ไม่มี quotation_num ที่ valid")
-            return
-        
-        logger.info(f"📊 พบ quotation_num ที่ valid: {len(quotation_nums)} รายการ")
-
-        # ✅ ตรวจสอบข้อมูลที่มีอยู่แบบ batch
-        existing_ids = pd.DataFrame(columns=[pk_column])
-        if len(quotation_nums) > 0:
-            try:
-                batch_size = 1000
-                existing_ids_list = []
-                
-                for i in range(0, len(quotation_nums), batch_size):
-                    batch = quotation_nums[i:i + batch_size]
-                    if len(batch) == 0:
-                        continue
-                        
-                    placeholders = ','.join(['%s'] * len(batch))
-                    query = f"SELECT {pk_column} FROM {table_name} WHERE {pk_column} IN ({placeholders})"
-                    params = [str(qnum) for qnum in batch]
-                    
-                    try:
-                        with target_engine.connect() as conn:
-                            batch_existing = pd.read_sql(query, conn, params=params)
-                            if not batch_existing.empty:
-                                existing_ids_list.append(batch_existing)
-                    except Exception as batch_error:
-                        logger.warning(f"⚠️ เกิดข้อผิดพลาดใน batch {i//batch_size + 1}: {batch_error}")
-                        continue
-                
-                existing_ids = pd.concat(existing_ids_list, ignore_index=True) if existing_ids_list else pd.DataFrame(columns=[pk_column])
-                logger.info(f"✅ พบข้อมูลที่มีอยู่ {len(existing_ids)} rows")
-            except Exception as e:
-                logger.warning(f"⚠️ เกิดข้อผิดพลาดในการตรวจสอบข้อมูล: {e}")
-                existing_ids = pd.DataFrame(columns=[pk_column])
-        
-        # แยกข้อมูลสำหรับ insert และ update
-        if existing_ids.empty or pk_column not in existing_ids.columns:
-            existing_quotation_nums = set()
-        else:
-            existing_quotation_nums = set(existing_ids[pk_column].astype(str))
-        
-        new_quotation_nums = set(quotation_nums.astype(str)) - existing_quotation_nums
-        common_quotation_nums = set(quotation_nums.astype(str)) & existing_quotation_nums
-
-        df_to_insert = df[df[pk_column].astype(str).isin(new_quotation_nums)].copy()
-        df_to_update = df[df[pk_column].astype(str).isin(common_quotation_nums)].copy()
-
-        logger.info(f"🆕 Insert: {len(df_to_insert)} rows")
-        logger.info(f"🔄 Update: {len(df_to_update)} rows")
-
-        # ✅ Load metadata
-        metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-
-        # ✅ Batch Insert new rows
-        if not df_to_insert.empty:
-            df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
-            dropped = len(df_to_insert) - len(df_to_insert_valid)
-            if dropped > 0:
-                logger.warning(f"⚠️ Skipped {dropped} rows with null {pk_column}")
-
-            # ทำความสะอาดข้อมูลก่อน insert
-            df_to_insert_valid = df_to_insert_valid.where(pd.notnull(df_to_insert_valid), None)
-            df_to_insert_valid = df_to_insert_valid.replace([np.inf, -np.inf], None)
-
-            if not df_to_insert_valid.empty:
-                try:
-                    logger.info(f"💾 เริ่ม insert ข้อมูล {len(df_to_insert_valid)} rows...")
-                    
-                    df_to_insert_valid.to_sql(
-                        table_name, 
-                        target_engine, 
-                        if_exists='append', 
-                        index=False,
-                        method='multi',
-                        chunksize=1000
-                    )
-                    
-                    logger.info(f"✅ Insert สำเร็จ {len(df_to_insert_valid)} rows")
-                except Exception as e:
-                    logger.error(f"❌ เกิดข้อผิดพลาดในการ insert: {e}")
-                    # Fallback to individual inserts
-                    logger.info("🔄 ลองใช้วิธี insert แบบ individual...")
-                    with target_engine.begin() as conn:
-                        records = df_to_insert_valid.to_dict(orient='records')
-                        for i, record in enumerate(records):
-                            if i % 1000 == 0:
-                                logger.info(f"📊 Inserted {i}/{len(records)} rows...")
-                            stmt = pg_insert(metadata).values(**record)
-                            stmt = stmt.on_conflict_do_nothing(index_elements=[pk_column])
-                            conn.execute(stmt)
-                    logger.info(f"✅ Insert สำเร็จ {len(records)} rows (fallback method)")
-
-        # ✅ Batch Update existing rows
-        if not df_to_update.empty:
-            # ดึงข้อมูลเดิมสำหรับเปรียบเทียบ
-            df_existing_for_update = pd.DataFrame()
-            if len(common_quotation_nums) > 0:
-                try:
-                    batch_size = 1000
-                    df_existing_list = []
-                    
-                    for i in range(0, len(common_quotation_nums), batch_size):
-                        batch = list(common_quotation_nums)[i:i + batch_size]
-                        if len(batch) == 0:
-                            continue
-                            
-                        update_placeholders = ','.join(['%s'] * len(batch))
-                        update_query = f"SELECT * FROM {table_name} WHERE {pk_column} IN ({update_placeholders})"
-                        update_params = [str(qnum) for qnum in batch]
-                        
-                        try:
-                            with target_engine.connect() as conn:
-                                batch_existing = pd.read_sql(update_query, conn, params=update_params)
-                                if not batch_existing.empty:
-                                    df_existing_list.append(batch_existing)
-                        except Exception as batch_error:
-                            logger.warning(f"⚠️ เกิดข้อผิดพลาดใน update batch {i//batch_size + 1}: {batch_error}")
-                            continue
-                    
-                    df_existing_for_update = pd.concat(df_existing_list, ignore_index=True) if df_existing_list else pd.DataFrame()
-                    logger.info(f"✅ ดึงข้อมูลเดิมสำเร็จ {len(df_existing_for_update)} rows")
-                except Exception as e:
-                    logger.warning(f"⚠️ เกิดข้อผิดพลาดในการดึงข้อมูลเดิม: {e}")
-                    df_existing_for_update = pd.DataFrame()
+        if available_cols:
+            # สร้าง boolean mask สำหรับแถวที่มีความแตกต่าง
+            diff_mask = pd.Series(False, index=merged.index)
             
-            # เปรียบเทียบข้อมูลแบบ vectorized
-            if not df_existing_for_update.empty:
-                exclude_columns = [pk_column, 'agent_id', 'customer_id', 'car_id', 'sales_id',
-                                   'order_type_id', 'payment_plan_id', 'create_at', 'update_at']
-                
-                compare_cols = [col for col in df.columns if col not in exclude_columns]
-                
-                # ใช้ merge แทน iterrows
-                merged = df_to_update.merge(df_existing_for_update, on=pk_column, suffixes=('_new', '_old'))
+            for col in available_cols:
+                col_new = f"{col}_new"
+                col_old = f"{col}_old"
                 
                 # เปรียบเทียบแบบ vectorized
-                changed_mask = pd.Series([False] * len(merged), index=merged.index)
+                new_vals = merged[col_new]
+                old_vals = merged[col_old]
                 
-                for col in compare_cols:
-                    col_new = f"{col}_new"
-                    col_old = f"{col}_old"
-                    
-                    if col_new in merged.columns and col_old in merged.columns:
-                        mask = (merged[col_new] != merged[col_old]) | (merged[col_new].isna() != merged[col_old].isna())
-                        changed_mask = changed_mask | mask
+                # จัดการ NaN values
+                both_nan = (pd.isna(new_vals) & pd.isna(old_vals))
+                different = (new_vals != old_vals) & ~both_nan
                 
-                # ดึงแถวที่มีการเปลี่ยนแปลง
-                changed_rows_df = merged[changed_mask][[pk_column] + compare_cols].copy()
+                diff_mask |= different
+            
+            # กรองแถวที่มีความแตกต่าง
+            df_diff = merged[diff_mask].copy()
+            
+            if not df_diff.empty:
+                # เตรียมข้อมูลสำหรับ update
+                update_cols = [f"{col}_new" for col in available_cols]
+                all_cols = [pk_column] + update_cols
                 
-                if not changed_rows_df.empty:
-                    logger.info(f"🔄 Updating {len(changed_rows_df)} changed rows...")
-                    
-                    # ทำความสะอาดข้อมูล
-                    changed_rows_df = changed_rows_df.where(pd.notnull(changed_rows_df), None)
-                    changed_rows_df = changed_rows_df.replace([np.inf, -np.inf], None)
-                    
-                    # ใช้ to_sql สำหรับ batch update
-                    try:
-                        # สร้าง temporary table สำหรับ update
-                        temp_table_name = f"temp_update_{table_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        
-                        # Insert ข้อมูลใหม่ลง temporary table
-                        changed_rows_df.to_sql(
-                            temp_table_name,
-                            target_engine,
-                            if_exists='replace',
-                            index=False,
-                            method='multi',
-                            chunksize=1000
-                        )
-                        
-                        # ใช้ SQL UPDATE แบบ batch
-                        update_columns = ', '.join([f"{col} = t.{col}" for col in compare_cols])
-                        update_sql = f"""
-                            UPDATE {table_name} 
-                            SET {update_columns}, update_at = NOW()
-                            FROM {temp_table_name} t
-                            WHERE {table_name}.{pk_column} = t.{pk_column}
-                        """
-                        
-                        with target_engine.begin() as conn:
-                            conn.execute(update_sql)
-                        
-                        # ลบ temporary table
-                        with target_engine.begin() as conn:
-                            conn.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
-                        
-                        logger.info(f"✅ Update สำเร็จ {len(changed_rows_df)} rows")
-                    except Exception as e:
-                        logger.error(f"❌ เกิดข้อผิดพลาดในการ update: {e}")
-                        # Fallback to individual updates
-                        logger.info("🔄 ลองใช้วิธี update แบบ individual...")
-                        with target_engine.begin() as conn:
-                            for i, (_, row) in enumerate(changed_rows_df.iterrows()):
-                                if i % 1000 == 0:
-                                    logger.info(f"📊 Updated {i}/{len(changed_rows_df)} rows...")
-                                record = row.to_dict()
-                                stmt = pg_insert(metadata).values(**record)
-                                update_dict = {
-                                    c.name: stmt.excluded[c.name]
-                                    for c in metadata.columns if c.name not in [pk_column, 'create_at', 'update_at']
-                                }
-                                update_dict['update_at'] = datetime.datetime.now()
-                                stmt = stmt.on_conflict_do_update(
-                                    index_elements=[pk_column],
-                                    set_=update_dict
-                                )
-                                conn.execute(stmt)
-                        logger.info(f"✅ Update สำเร็จ {len(changed_rows_df)} rows (fallback method)")
-                else:
-                    logger.info("✅ No changes detected for update.")
-            else:
-                logger.info("✅ No existing data to update.")
+                # ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
+                existing_cols = [col for col in all_cols if col in df_diff.columns]
+                
+                if len(existing_cols) > 1:
+                    df_to_update = df_diff[existing_cols].copy()
+                    # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
+                    new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
+                    df_to_update.columns = new_col_names
 
-        logger.info("🎉 Insert/update completed successfully!")
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_to_update)} rows")
+    
+    # ✅ แสดงตัวอย่างข้อมูลที่จะ insert และ update
+    if not df_to_insert.empty:
+        print("🔍 Sample data to INSERT:")
+        sample_insert = df_to_insert.head(2)
+        for col in ['sale_team', 'transaction_date', 'type_insurance']:
+            if col in sample_insert.columns:
+                print(f"   {col}: {sample_insert[col].tolist()}")
+    
+    if not df_to_update.empty:
+        print("🔍 Sample data to UPDATE:")
+        sample_update = df_to_update.head(2)
+        for col in ['sale_team', 'transaction_date', 'type_insurance']:
+            if col in sample_update.columns:
+                print(f"   {col}: {sample_update[col].tolist()}")
+
+    # ✅ Load table metadata
+    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+
+    # ✅ Insert (Batch operation)
+    if not df_to_insert.empty:
+        # แปลง DataFrame เป็น records
+        records = []
+        current_time = pd.Timestamp.now()
+        for _, row in df_to_insert.iterrows():
+            record = {}
+            for col, value in row.items():
+                if pd.isna(value) or value == pd.NaT or value == '':
+                    record[col] = None
+                else:
+                    record[col] = value
+            # ✅ ตั้งค่า audit fields สำหรับ insert
+            record['create_at'] = current_time
+            record['update_at'] = current_time
+            records.append(record)
         
-    except Exception as e:
-        logger.error(f"❌ เกิดข้อผิดพลาดในการ load ข้อมูล: {e}")
-        raise
+        # Insert แบบ batch
+        with target_engine.begin() as conn:
+            conn.execute(metadata.insert(), records)
+
+    # ✅ Update (Batch operation)
+    if not df_to_update.empty:
+        # แปลง DataFrame เป็น records
+        records = []
+        for _, row in df_to_update.iterrows():
+            record = {}
+            for col, value in row.items():
+                if pd.isna(value) or value == pd.NaT or value == '':
+                    record[col] = None
+                else:
+                    record[col] = value
+            records.append(record)
+        
+        # Update แบบ batch - เฉพาะคอลัมน์ที่ต้องการ update
+        with target_engine.begin() as conn:
+            for record in records:
+                stmt = pg_insert(metadata).values(**record)
+                # ✅ เฉพาะคอลัมน์ที่ต้องการ update (ไม่รวม audit fields)
+                update_columns = {
+                    c.name: stmt.excluded[c.name]
+                    for c in metadata.columns
+                    if c.name not in [pk_column, 'create_at', 'update_at']
+                }
+                # ✅ เพิ่ม update_at เป็นเวลาปัจจุบัน
+                update_columns['update_at'] = pd.Timestamp.now()
+                
+                # print(f"🔍 Updating columns for fact_sales_quotation {record.get(pk_column)}: {list(update_columns.keys())}")
+                
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[pk_column],
+                    set_=update_columns
+                )
+                conn.execute(stmt)
+
+    print("✅ Insert/update completed.")
 
 @job
 def fact_sales_quotation_etl():
     """Main ETL job for fact_sales_quotation"""
-    load_sales_quotation_data(clean_sales_quotation_data(extract_sales_quotation_data()))
+    data = extract_sales_quotation_data()
+    df_clean = clean_sales_quotation_data(data)
+    load_sales_quotation_data(df_clean)
 
 if __name__ == "__main__":
     try:
@@ -502,6 +451,11 @@ if __name__ == "__main__":
         
         df_plan, df_order, df_pay = extract_sales_quotation_data()
         df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+
+        # output_path = "fact_sales_quotation.xlsx"
+        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
+
         load_sales_quotation_data(df_clean)
         
         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
