@@ -23,13 +23,19 @@ target_engine = create_engine(
 @op
 def extract_quotation_idcus():
     df = pd.read_sql("SELECT quo_num, id_cus FROM fin_system_select_plan", source_engine)
-    df = df.rename(columns={'quo_num': 'quotation_num'})
-    return df
+    df = df.rename(columns={'quo_num': 'quotation_num'})    
+
+    print(f"📦 df: {df.shape}")
+
+    return df       
 
 @op
 def extract_fact_sales_quotation():
     df = pd.read_sql("SELECT * FROM fact_sales_quotation WHERE agent_id IS NULL", target_engine)
     df = df.drop(columns=['create_at', 'update_at', 'agent_id'], errors='ignore')
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
@@ -37,6 +43,9 @@ def extract_dim_agent():
     df = pd.read_sql("SELECT * FROM dim_agent", target_engine)
     df = df.drop(columns=['create_at', 'update_at'], errors='ignore')
     df = df.rename(columns={'agent_id': 'id_cus'})
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
@@ -46,6 +55,9 @@ def join_and_clean_agent_data(df_plan: pd.DataFrame, df_sales: pd.DataFrame, df_
     df_merge = df_merge.rename(columns={'id_contact': 'agent_id'})
     df_merge = df_merge[['quotation_num', 'agent_id']]
     df_merge = df_merge.where(pd.notnull(df_merge), None)  # Convert NaN, NaT -> None
+
+    print(f"📦 df_merge: {df_merge.shape}")
+
     return df_merge
 
 @op

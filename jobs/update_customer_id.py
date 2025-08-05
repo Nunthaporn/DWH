@@ -27,18 +27,27 @@ def extract_dim_customer_data():
     query = "SELECT quotation_num, customer_sk FROM dim_customer"
     df = pd.read_sql(query, target_engine)
     df = df.rename(columns={"customer_sk": "customer_id"})
-    return df
+
+    print(f"📦 df: {df.shape}")
+
+    return df   
 
 @op
 def extract_fact_sales_quotation_for_customer():
     query = "SELECT * FROM fact_sales_quotation"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['customer_id', 'create_at', 'update_at'], errors='ignore')
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
 def merge_dim_customer_to_sales(df_customer: pd.DataFrame, df_sales: pd.DataFrame):
     df_merged = pd.merge(df_customer, df_sales, on='quotation_num', how='right')
+
+    print(f"📦 df_merged: {df_merged.shape}")
+
     return df_merged
 
 @op

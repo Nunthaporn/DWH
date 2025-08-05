@@ -27,7 +27,10 @@ target_engine = create_engine(
 def extract_dim_car_data():
     query = "SELECT quotation_num, car_sk FROM dim_car"
     df = pd.read_sql(query, target_engine)
-    df = df.rename(columns={"car_sk": "car_id"})
+    df = df.rename(columns={"car_sk": "car_id"})                        
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
@@ -35,11 +38,17 @@ def extract_fact_sales_quotation_for_car():
     query = "SELECT * FROM fact_sales_quotation WHERE car_id IS NULL"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['car_id', 'create_at', 'update_at'], errors='ignore')
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
 def merge_car_to_sales(df_car: pd.DataFrame, df_sales: pd.DataFrame):
     df_merged = pd.merge(df_car, df_sales, on='quotation_num', how='right')
+
+    print(f"📦 df_merged: {df_merged.shape}")
+
     return df_merged
 
 @op
