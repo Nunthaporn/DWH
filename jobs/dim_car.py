@@ -802,6 +802,8 @@ def load_car_data(df: pd.DataFrame):
     metadata = retry_db_operation(load_table_metadata)
 
     # ✅ Insert (กรอง car_id ที่เป็น NaN)
+    df_to_insert_valid = pd.DataFrame()  # ประกาศตัวแปรก่อน
+    
     if not df_to_insert.empty:
         # ✅ ตรวจสอบ NaN ในข้อมูลที่จะ Insert
         print("🔍 Checking NaN in data to insert:")
@@ -819,11 +821,12 @@ def load_car_data(df: pd.DataFrame):
         
         if df_to_insert_valid.empty:
             print("⚠️ WARNING: No valid data to insert after NaN check!")
-            return
-        
+        else:
             # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งก่อน insert
-    df_to_insert_valid = df_to_insert_valid[~df_to_insert_valid[pk_column].duplicated(keep='first')].copy()
-    print(f"📊 Final records to insert after duplicate check: {len(df_to_insert_valid)}")
+            df_to_insert_valid = df_to_insert_valid[~df_to_insert_valid[pk_column].duplicated(keep='first')].copy()
+            print(f"📊 Final records to insert after duplicate check: {len(df_to_insert_valid)}")
+    else:
+        print("ℹ️ No data to insert")
     
     # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งในข้อมูลที่ clean แล้ว
     if not df_to_insert_valid.empty:
@@ -863,6 +866,8 @@ def load_car_data(df: pd.DataFrame):
                                     print(f"❌ Failed to insert record with {pk_column}: {record.get(pk_column)} - {single_error}")
             
             retry_db_operation(insert_operation)
+    else:
+        print("ℹ️ No data to insert")
 
     # ✅ Update
     if not df_diff_renamed.empty:
