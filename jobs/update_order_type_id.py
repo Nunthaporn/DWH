@@ -28,6 +28,8 @@ def extract_dim_order_type_data():
     query = "SELECT quotation_num, order_type_id FROM dim_order_type"
     df = pd.read_sql(query, target_engine)
 
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
@@ -35,12 +37,18 @@ def extract_fact_sales_quotation_for_order_type():
     query = "SELECT * FROM fact_sales_quotation WHERE order_type_id IS NULL"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['order_type_id', 'create_at', 'update_at'], errors='ignore')
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
 def merge_dim_order_type_to_sales(df_order_type: pd.DataFrame, df_sales: pd.DataFrame):
     df_merged = pd.merge(df_order_type, df_sales, on='quotation_num', how='right')
-    return df_merged
+
+    print(f"📦 df_merged: {df_merged.shape}")
+
+    return df_merged    
 
 @op
 def update_dim_order_type_in_sales(df_merged: pd.DataFrame):

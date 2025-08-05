@@ -28,6 +28,8 @@ def extract_dim_payment_plan_data():
     query = "SELECT quotation_num, payment_plan_id FROM dim_payment_plan"
     df = pd.read_sql(query, target_engine)
 
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
@@ -35,11 +37,17 @@ def extract_fact_sales_quotation_for_payment_plan():
     query = "SELECT * FROM fact_sales_quotation WHERE payment_plan_id IS NULL"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['payment_plan_id', 'create_at', 'update_at'], errors='ignore')
+
+    print(f"📦 df: {df.shape}")
+
     return df
 
 @op
 def merge_dim_payment_plan_to_sales(df_payment_plan: pd.DataFrame, df_sales: pd.DataFrame):
     df_merged = pd.merge(df_payment_plan, df_sales, on='quotation_num', how='right')
+
+    print(f"📦 df_merged: {df_merged.shape}")
+
     return df_merged
 
 @op
