@@ -35,7 +35,7 @@ def extract_order_type_data():
     query_plan = """
         SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key
         FROM fin_system_select_plan
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     query_order = """

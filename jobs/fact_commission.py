@@ -88,7 +88,7 @@ def extract_commission_data():
     df_fin_order = pd.read_sql("""
         SELECT quo_num,numpay,order_number
         FROM fin_order 
-        WHERE datekey >= '2024-01-01' AND datekey < '2025-08-01'
+        WHERE datekey BETWEEN '{start_str}' AND '{end_str}'
     """, task_engine)
 
     df_system_pay = pd.read_sql("""
