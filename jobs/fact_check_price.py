@@ -197,7 +197,7 @@ def clean_fact_check_price(df_logs: pd.DataFrame, df_checkprice: pd.DataFrame) -
 def load_fact_check_price(df: pd.DataFrame):
     try:
         logger.info("\ud83d\udd10 Loading to DB...")
-        table_name = 'fact_check_price_test'
+        table_name = 'fact_check_price'
         pk_column = ['id_cus', 'brand', 'model', 'submodel', 'yearcar', 'car_code',
                      'sum_insured', 'type_camera', 'type_addon', 'transaction_date']
         df = df.drop_duplicates(subset=pk_column)
