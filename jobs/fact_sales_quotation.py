@@ -60,7 +60,6 @@ def extract_sales_quotation_data():
         WHERE datestart >= '2025-01-01' AND datestart < '2025-08-04'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
         ORDER BY datestart DESC
-        LIMIT 100000
     """, source_engine)
 
     # ✅ ดึงเฉพาะข้อมูลที่จำเป็นจาก fin_order และเพิ่ม LIMIT
@@ -68,7 +67,6 @@ def extract_sales_quotation_data():
         SELECT quo_num, order_number, chanel, datekey, status AS status_fo
         FROM fin_order
         WHERE quo_num IS NOT NULL
-        LIMIT 100000
     """, source_engine_task)
 
     df_pay = pd.read_sql("""
@@ -81,7 +79,6 @@ def extract_sales_quotation_data():
         WHERE datestart >= '2025-01-01' AND datestart < '2025-08-04'
           AND type_insure IN ('ประกันรถ', 'ตรอ')
         ORDER BY datestart DESC
-        LIMIT 100000
     """, source_engine)
 
     print(f"📦 df_plan shape: {df_plan.shape}")
@@ -272,6 +269,11 @@ def load_sales_quotation_data(df: pd.DataFrame):
         print("⚠️ ไม่มีข้อมูลที่จะประมวลผล")
         return
     
+    # ตรวจสอบว่ามีคอลัมน์ pk_column ใน DataFrame
+    if pk_column not in df.columns:
+        print(f"❌ ไม่พบคอลัมน์ {pk_column} ในข้อมูล")
+        return
+    
     print(f"📊 เริ่มประมวลผลข้อมูล {len(df)} rows")
 
     # ลบข้อมูลซ้ำใน DataFrame ก่อน
@@ -283,6 +285,8 @@ def load_sales_quotation_data(df: pd.DataFrame):
     if len(quotation_nums) == 0:
         print("⚠️ ไม่มี quotation_num ที่ valid")
         return
+    
+    print(f"📊 พบ quotation_num ที่ valid: {len(quotation_nums)} รายการ")
 
     # ✅ ใช้ batch processing สำหรับการตรวจสอบข้อมูลที่มีอยู่
     if len(quotation_nums) > 0:
@@ -293,13 +297,21 @@ def load_sales_quotation_data(df: pd.DataFrame):
             
             for i in range(0, len(quotation_nums), batch_size):
                 batch = quotation_nums[i:i + batch_size]
+                if len(batch) == 0:
+                    continue
+                    
                 placeholders = ','.join(['%s'] * len(batch))
                 query = f"SELECT {pk_column} FROM {table_name} WHERE {pk_column} IN ({placeholders})"
-                params = [(str(qnum),) for qnum in batch]
+                params = [str(qnum) for qnum in batch]
                 
-                with target_engine.connect() as conn:
-                    batch_existing = pd.read_sql(query, conn, params=params)
-                    existing_ids_list.append(batch_existing)
+                try:
+                    with target_engine.connect() as conn:
+                        batch_existing = pd.read_sql(query, conn, params=params)
+                        if not batch_existing.empty:
+                            existing_ids_list.append(batch_existing)
+                except Exception as batch_error:
+                    print(f"⚠️ เกิดข้อผิดพลาดใน batch {i//batch_size + 1}: {batch_error}")
+                    continue
             
             existing_ids = pd.concat(existing_ids_list, ignore_index=True) if existing_ids_list else pd.DataFrame(columns=[pk_column])
             print(f"✅ พบข้อมูลที่มีอยู่ {len(existing_ids)} rows")
@@ -309,7 +321,12 @@ def load_sales_quotation_data(df: pd.DataFrame):
     else:
         existing_ids = pd.DataFrame(columns=[pk_column])
     
-    existing_quotation_nums = set(existing_ids[pk_column].astype(str))
+    # ตรวจสอบว่า existing_ids มีข้อมูลและมีคอลัมน์ pk_column
+    if existing_ids.empty or pk_column not in existing_ids.columns:
+        existing_quotation_nums = set()
+    else:
+        existing_quotation_nums = set(existing_ids[pk_column].astype(str))
+    
     new_quotation_nums = set(quotation_nums.astype(str)) - existing_quotation_nums
     common_quotation_nums = set(quotation_nums.astype(str)) & existing_quotation_nums
 
@@ -375,13 +392,21 @@ def load_sales_quotation_data(df: pd.DataFrame):
                 
                 for i in range(0, len(common_quotation_nums), batch_size):
                     batch = list(common_quotation_nums)[i:i + batch_size]
+                    if len(batch) == 0:
+                        continue
+                        
                     update_placeholders = ','.join(['%s'] * len(batch))
                     update_query = f"SELECT * FROM {table_name} WHERE {pk_column} IN ({update_placeholders})"
-                    update_params = [(str(qnum),) for qnum in batch]
+                    update_params = [str(qnum) for qnum in batch]
                     
-                    with target_engine.connect() as conn:
-                        batch_existing = pd.read_sql(update_query, conn, params=update_params)
-                        df_existing_list.append(batch_existing)
+                    try:
+                        with target_engine.connect() as conn:
+                            batch_existing = pd.read_sql(update_query, conn, params=update_params)
+                            if not batch_existing.empty:
+                                df_existing_list.append(batch_existing)
+                    except Exception as batch_error:
+                        print(f"⚠️ เกิดข้อผิดพลาดใน update batch {i//batch_size + 1}: {batch_error}")
+                        continue
                 
                 df_existing_for_update = pd.concat(df_existing_list, ignore_index=True) if df_existing_list else pd.DataFrame()
                 print(f"✅ ดึงข้อมูลเดิมสำเร็จ {len(df_existing_for_update)} rows")

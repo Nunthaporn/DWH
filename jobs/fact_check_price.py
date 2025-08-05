@@ -18,6 +18,25 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+def clean_numeric_column(series):
+    """
+    Clean numeric column by removing commas, spaces, and converting to numeric
+    """
+    # Convert to string and remove commas and spaces
+    cleaned = series.astype(str).str.replace(',', '', regex=False)
+    cleaned = cleaned.str.replace(' ', '', regex=False)
+    
+    # Replace empty strings with None
+    cleaned = cleaned.replace('', None)
+    
+    # Convert to numeric, coercing errors to NaN
+    cleaned = pd.to_numeric(cleaned, errors="coerce")
+    
+    # Convert NaN to None for database compatibility
+    cleaned = cleaned.where(pd.notnull(cleaned), None)
+    
+    return cleaned
+
 # DB: Source (MariaDB)
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
@@ -103,8 +122,27 @@ def clean_fact_check_price(df_logs: pd.DataFrame, df_checkprice: pd.DataFrame) -
         check.drop(columns=['idcar', 'company', 'status', 'type_driver', 'status_send'], inplace=True)
 
         df_combined = pd.concat([logs, check], ignore_index=True)
+        
+        # Clean numeric columns that might contain empty strings
+        numeric_columns = ['id_cus', 'yearcar', 'sum_insured', 'deductible']
+        for col in numeric_columns:
+            if col in df_combined.columns:
+                df_combined[col] = clean_numeric_column(df_combined[col])
+        
+        # Clean string columns by replacing empty strings with None
+        string_columns = ['brand', 'model', 'submodel', 'car_code', 'type_camera', 'type_addon', 
+                         'select_quotation', 'province_car', 'type_insurance', 'input_type']
+        for col in string_columns:
+            if col in df_combined.columns:
+                df_combined[col] = df_combined[col].replace('', None)
+        
+        # Handle transaction_date
         df_combined['transaction_date'] = pd.to_datetime(df_combined['transaction_date'], errors='coerce')
         df_combined['transaction_date'] = df_combined['transaction_date'].dt.strftime('%Y%m%d').astype('Int64')
+        
+        # Replace NaT with None for transaction_date
+        df_combined['transaction_date'] = df_combined['transaction_date'].replace({pd.NaT: None})
+        
         df_combined = df_combined.drop_duplicates()
         logger.info(f"\u2705 Cleaned shape: {df_combined.shape}")
         logger.info(f"\u2705 Columns: {list(df_combined.columns)}")
@@ -138,6 +176,20 @@ def load_fact_check_price(df: pd.DataFrame):
         if extra_columns:
             logger.warning(f"\u26a0 Extra columns in DataFrame: {extra_columns}")
             df = df.drop(columns=extra_columns)
+
+        # Final data cleaning before insert
+        # Replace any remaining empty strings with None
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].replace('', None)
+        
+        # Log data quality information
+        logger.info(f"\u2705 Data shape before insert: {df.shape}")
+        logger.info(f"\u2705 Null values per column:")
+        for col in df.columns:
+            null_count = df[col].isnull().sum()
+            if null_count > 0:
+                logger.info(f"   {col}: {null_count} null values")
 
         with target_engine.begin() as conn:
             conn.execute(table.insert().values(df.to_dict(orient='records')))
