@@ -116,219 +116,150 @@ def load_card_agent_data(df: pd.DataFrame):
         print("⚠️ No valid data to process")
         return
 
-    # ✅ โหลดเฉพาะ agent_id ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
-    agent_ids = df[pk_column].tolist()
+    # ✅ ใช้ temporary table เพื่อเพิ่มประสิทธิภาพ
+    temp_table_name = f'temp_{table_name}_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}'
     
-    if not agent_ids:
-        df_existing = pd.DataFrame()
-    else:
-        # สร้าง query string โดยตรงแทนการใช้ placeholders
-        agent_ids_str = ','.join([f"'{id}'" for id in agent_ids])
-        query_existing = f"""
-            SELECT * FROM {table_name} 
-            WHERE {pk_column} IN ({agent_ids_str})
+    # ✅ สร้าง temporary table และ insert ข้อมูลใหม่
+    with target_engine.begin() as conn:
+        # สร้าง temporary table
+        create_temp_table_sql = f"""
+            CREATE TEMP TABLE {temp_table_name} AS 
+            SELECT * FROM {table_name} WHERE 1=0
         """
-
-        with target_engine.connect() as conn:
-            df_existing = pd.read_sql(
-                text(query_existing), 
-                conn
-            )
-
-    print(f"📊 New data: {len(df)} rows")
-    print(f"📊 Existing data found: {len(df_existing)} rows")
-
-    # ✅ กรอง agent_id ซ้ำจากข้อมูลเก่า
-    if not df_existing.empty:
-        df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
-
-    # ✅ Identify agent_id ใหม่ (ไม่มีใน DB)
-    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
-    new_ids = set(df[pk_column]) - existing_ids
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
-
-    # ✅ Identify agent_id ที่มีอยู่แล้ว
-    common_ids = set(df[pk_column]) & existing_ids
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-    ]
-    
-    print(f"🔍 Columns to compare for updates: {compare_cols}")
-    print(f"🔍 Excluded columns (audit fields): {exclude_columns}")
-
-    # ✅ เปรียบเทียบข้อมูลแบบ Vectorized (เร็วกว่า apply)
-    df_to_update = pd.DataFrame()
-    if not df_common_new.empty and not df_common_old.empty:
-        # Merge ด้วย suffix (_new, _old)
-        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
+        conn.execute(text(create_temp_table_sql))
         
-        # ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
-        available_cols = []
-        for col in compare_cols:
-            if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
-                available_cols.append(col)
-        
-        if available_cols:
-            # สร้าง boolean mask สำหรับแถวที่มีความแตกต่าง
-            diff_mask = pd.Series(False, index=merged.index)
+        # Insert ข้อมูลใหม่ลง temporary table
+        if not df.empty:
+            # แปลง DataFrame เป็น records
+            records = []
+            current_time = pd.Timestamp.now()
+            for _, row in df.iterrows():
+                record = {}
+                for col, value in row.items():
+                    if pd.isna(value) or value == pd.NaT or value == '':
+                        record[col] = None
+                    else:
+                        record[col] = value
+                # ✅ ตั้งค่า audit fields สำหรับ insert
+                record['create_at'] = current_time
+                record['update_at'] = current_time
+                records.append(record)
             
-            for col in available_cols:
-                col_new = f"{col}_new"
-                col_old = f"{col}_old"
-                
-                # เปรียบเทียบแบบ vectorized
-                new_vals = merged[col_new]
-                old_vals = merged[col_old]
-                
-                # จัดการ NaN values
-                both_nan = (pd.isna(new_vals) & pd.isna(old_vals))
-                different = (new_vals != old_vals) & ~both_nan
-                
-                diff_mask |= different
-            
-            # กรองแถวที่มีความแตกต่าง
-            df_diff = merged[diff_mask].copy()
-            
-            if not df_diff.empty:
-                # เตรียมข้อมูลสำหรับ update
-                update_cols = [f"{col}_new" for col in available_cols]
-                all_cols = [pk_column] + update_cols
-                
-                # ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
-                existing_cols = [col for col in all_cols if col in df_diff.columns]
-                
-                if len(existing_cols) > 1:
-                    df_to_update = df_diff[existing_cols].copy()
-                    # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
-                    new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
-                    df_to_update.columns = new_col_names
-
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_to_update)} rows")
-    
-    # ✅ แสดงตัวอย่างข้อมูลที่จะ insert และ update
-    if not df_to_insert.empty:
-        print("🔍 Sample data to INSERT:")
-        sample_insert = df_to_insert.head(2)
-        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
-            if col in sample_insert.columns:
-                print(f"   {col}: {sample_insert[col].tolist()}")
-    
-    if not df_to_update.empty:
-        print("🔍 Sample data to UPDATE:")
-        sample_update = df_to_update.head(2)
-        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
-            if col in sample_update.columns:
-                print(f"   {col}: {sample_update[col].tolist()}")
-
-    # ✅ Load table metadata
-    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-
-    # ✅ Insert (Batch operation)
-    if not df_to_insert.empty:
-        # แปลง DataFrame เป็น records
-        records = []
-        current_time = pd.Timestamp.now()
-        for _, row in df_to_insert.iterrows():
-            record = {}
-            for col, value in row.items():
-                if pd.isna(value) or value == pd.NaT or value == '':
-                    record[col] = None
-                else:
-                    record[col] = value
-            # ✅ ตั้งค่า audit fields สำหรับ insert
-            record['create_at'] = current_time
-            record['update_at'] = current_time
-            records.append(record)
-        
-        # Insert แบบ batch
-        with target_engine.begin() as conn:
+            # Insert แบบ batch
+            metadata = Table(table_name, MetaData(), autoload_with=target_engine)
             conn.execute(metadata.insert(), records)
 
-    # ✅ Update (Batch operation)
-    if not df_to_update.empty:
-        # แปลง DataFrame เป็น records
-        records = []
-        for _, row in df_to_update.iterrows():
-            record = {}
-            for col, value in row.items():
-                if pd.isna(value) or value == pd.NaT or value == '':
-                    record[col] = None
-                else:
-                    record[col] = value
-            records.append(record)
+    # ✅ ใช้ SQL เพื่อหา records ที่ต้อง insert และ update
+    with target_engine.connect() as conn:
+        # หา records ใหม่ (ไม่มีในตารางหลัก)
+        insert_query = f"""
+            SELECT t.* 
+            FROM {temp_table_name} t
+            LEFT JOIN {table_name} m ON t.{pk_column} = m.{pk_column}
+            WHERE m.{pk_column} IS NULL
+        """
+        df_to_insert = pd.read_sql(text(insert_query), conn)
         
-        # Update แบบ batch - เฉพาะคอลัมน์ที่ต้องการ update
+        # หา records ที่ต้อง update (มีในตารางหลักแต่ข้อมูลต่างกัน)
+        update_query = f"""
+            SELECT t.*, m.{pk_column} as existing_{pk_column}
+            FROM {temp_table_name} t
+            INNER JOIN {table_name} m ON t.{pk_column} = m.{pk_column}
+            WHERE (
+                COALESCE(t.title, '') != COALESCE(m.title, '') OR
+                COALESCE(t.agent_name, '') != COALESCE(m.agent_name, '') OR
+                COALESCE(t.id_card_ins, '') != COALESCE(m.id_card_ins, '') OR
+                COALESCE(t.type_ins, '') != COALESCE(m.type_ins, '') OR
+                COALESCE(t.revoke_type_ins, '') != COALESCE(m.revoke_type_ins, '') OR
+                COALESCE(t.company_ins, '') != COALESCE(m.company_ins, '') OR
+                COALESCE(t.card_issued_date_ins::text, '') != COALESCE(m.card_issued_date_ins::text, '') OR
+                COALESCE(t.card_expiry_date_ins::text, '') != COALESCE(m.card_expiry_date_ins::text, '') OR
+                COALESCE(t.id_card_life, '') != COALESCE(m.id_card_life, '') OR
+                COALESCE(t.type_life, '') != COALESCE(m.type_life, '') OR
+                COALESCE(t.revoke_type_life, '') != COALESCE(m.revoke_type_life, '') OR
+                COALESCE(t.company_life, '') != COALESCE(m.company_life, '') OR
+                COALESCE(t.card_issued_date_life::text, '') != COALESCE(m.card_issued_date_life::text, '') OR
+                COALESCE(t.card_expiry_date_life::text, '') != COALESCE(m.card_expiry_date_life::text, '')
+            )
+        """
+        df_to_update = pd.read_sql(text(update_query), conn)
+
+    print(f"📊 New data: {len(df)} rows")
+    print(f"🆕 Insert: {len(df_to_insert)} rows")
+    print(f"🔄 Update: {len(df_to_update)} rows")
+
+    # ✅ Insert records ใหม่
+    if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            for record in records:
-                stmt = pg_insert(metadata).values(**record)
-                # ✅ เฉพาะคอลัมน์ที่ต้องการ update (ไม่รวม audit fields)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name not in [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
-                }
-                # ✅ เพิ่ม update_at เป็นเวลาปัจจุบัน
-                update_columns['update_at'] = pd.Timestamp.now()
-                
-                print(f"🔍 Updating columns for agent_id {record.get(pk_column)}: {list(update_columns.keys())}")
-                
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[pk_column],
-                    set_=update_columns
-                )
-                conn.execute(stmt)
+            # ลบคอลัมน์ existing_agent_id ออกถ้ามี
+            if 'existing_agent_id' in df_to_insert.columns:
+                df_to_insert = df_to_insert.drop('existing_agent_id', axis=1)
+            
+            # แปลงเป็น records
+            records = df_to_insert.to_dict('records')
+            metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+            conn.execute(metadata.insert(), records)
+
+    # ✅ Update records ที่มีอยู่แล้ว - ใช้ batch UPDATE
+    if not df_to_update.empty:
+        with target_engine.begin() as conn:
+            # ลบคอลัมน์ existing_agent_id ออก
+            if 'existing_agent_id' in df_to_update.columns:
+                df_to_update = df_to_update.drop('existing_agent_id', axis=1)
+            
+            # ใช้ batch UPDATE แทนการทำทีละแถว
+            update_columns = [
+                'title', 'agent_name', 'id_card_ins', 'type_ins', 'revoke_type_ins', 
+                'company_ins', 'card_issued_date_ins', 'card_expiry_date_ins',
+                'id_card_life', 'type_life', 'revoke_type_life', 'company_life',
+                'card_issued_date_life', 'card_expiry_date_life', 'update_at'
+            ]
+            
+            # สร้าง batch UPDATE statement
+            set_clause = ', '.join([f"{col} = t.{col}" for col in update_columns if col != 'update_at'])
+            set_clause += ", update_at = NOW()"
+            
+            # ใช้ CASE WHEN สำหรับ batch update
+            agent_ids = df_to_update[pk_column].tolist()
+            if agent_ids:
+                # แบ่งเป็น chunks เพื่อหลีกเลี่ยง query ที่ยาวเกินไป
+                chunk_size = 1000
+                for i in range(0, len(agent_ids), chunk_size):
+                    chunk_ids = agent_ids[i:i+chunk_size]
+                    ids_str = ','.join([f"'{id}'" for id in chunk_ids])
+                    
+                    update_sql = f"""
+                        UPDATE {table_name} m
+                        SET {set_clause}
+                        FROM {temp_table_name} t
+                        WHERE m.{pk_column} = t.{pk_column}
+                        AND m.{pk_column} IN ({ids_str})
+                    """
+                    conn.execute(text(update_sql))
+
+    # ✅ ลบ temporary table
+    with target_engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name}"))
 
     print("✅ Insert/update completed.")
-    
-    # ✅ ตรวจสอบผลลัพธ์
-    print("🔍 Verification - checking audit fields...")
-    if not df_to_insert.empty or not df_to_update.empty:
-        # ดึงข้อมูลที่เพิ่ง insert/update มาเพื่อตรวจสอบ
-        all_agent_ids = []
-        if not df_to_insert.empty:
-            all_agent_ids.extend(df_to_insert[pk_column].tolist())
-        if not df_to_update.empty:
-            all_agent_ids.extend(df_to_update[pk_column].tolist())
-        
-        if all_agent_ids:
-            agent_ids_str = ','.join([f"'{id}'" for id in all_agent_ids[:5]])  # ตรวจสอบแค่ 5 รายการแรก
-            verify_query = f"""
-                SELECT {pk_column}, create_at, update_at 
-                FROM {table_name} 
-                WHERE {pk_column} IN ({agent_ids_str})
-                ORDER BY update_at DESC
-            """
-            
-            with target_engine.connect() as conn:
-                verify_df = pd.read_sql(text(verify_query), conn)
-                print("🔍 Recent records audit fields:")
-                for _, row in verify_df.iterrows():
-                    print(f"   {pk_column}: {row[pk_column]}, create_at: {row['create_at']}, update_at: {row['update_at']}")
 
 @job
 def dim_card_agent_etl():
     load_card_agent_data(clean_card_agent_data(extract_card_agent_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_card_agent_data()
+# if __name__ == "__main__":
+#     df_raw = extract_card_agent_data()
 
-    df_clean = clean_card_agent_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_card_agent_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_card_agent.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_card_agent.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "dim_card_agent.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_card_agent.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_card_agent_data(df_clean)
-    print("🎉 completed! Data upserted to dim_card_agent.")
+#     load_card_agent_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_card_agent.")
