@@ -404,16 +404,16 @@ def load_check_price_data(df: pd.DataFrame):
 def fact_check_price_etl():
     load_check_price_data(clean_check_price_data(extract_check_price_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_check_price_data()
-    # print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_check_price_data()
+#     # print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_check_price_data(df_raw)
-#     print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_check_price_data(df_raw)
+# #     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "fact_check_price.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_check_price.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_check_price_data(df_clean)
-    print("🎉 completed! Data upserted to fact_check_price.")
+#     load_check_price_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_check_price.")
