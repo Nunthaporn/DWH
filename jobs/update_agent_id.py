@@ -28,7 +28,7 @@ def extract_quotation_idcus():
 
 @op
 def extract_fact_sales_quotation():
-    df = pd.read_sql("SELECT * FROM fact_sales_quotation", target_engine)
+    df = pd.read_sql("SELECT * FROM fact_sales_quotation WHERE agent_id IS NULL", target_engine)
     df = df.drop(columns=['create_at', 'update_at', 'agent_id'], errors='ignore')
     return df
 
@@ -68,6 +68,7 @@ def update_agent_id(df_selected: pd.DataFrame):
                 stmt = (
                     update(table)
                     .where(table.c.quotation_num == record['quotation_num'])
+                    .where(table.c.payment_plan_id.is_(None))
                     .values(
                         agent_id=record['agent_id'],
                         update_at=datetime.now()
