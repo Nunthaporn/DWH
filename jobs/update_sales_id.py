@@ -28,7 +28,7 @@ def extract_quotation_idcus_system():
 
 @op
 def extract_fact_sales_quotation_for_sales():
-    df = pd.read_sql("SELECT * FROM fact_sales_quotation", target_engine)
+    df = pd.read_sql("SELECT * FROM fact_sales_quotation WHERE sales_id IS NULL", target_engine)
     df = df.drop(columns=['create_at', 'update_at', 'sales_id'], errors='ignore')
     return df
 
@@ -68,6 +68,7 @@ def update_sales_id(df_selected: pd.DataFrame):
                 stmt = (
                     update(table)
                     .where(table.c.quotation_num == record['quotation_num'])
+                    .where(table.c.sales_id.is_(None))  # อัพเดตเฉพาะที่ sales_id เป็น NULL
                     .values(
                         sales_id=record['sales_id'],
                         update_at=datetime.now()
@@ -86,3 +87,4 @@ def update_fact_sales_quotation_sales_id():
             extract_dim_sales()
         )
     )
+

@@ -32,7 +32,7 @@ def extract_dim_payment_plan_data():
 
 @op
 def extract_fact_sales_quotation_for_payment_plan():
-    query = "SELECT * FROM fact_sales_quotation"
+    query = "SELECT * FROM fact_sales_quotation WHERE payment_plan_id IS NULL"
     df = pd.read_sql(query, target_engine)
     df = df.drop(columns=['payment_plan_id', 'create_at', 'update_at'], errors='ignore')
     return df
@@ -67,6 +67,7 @@ def update_dim_payment_plan_in_sales(df_merged: pd.DataFrame):
                 stmt = (
                     update(table)
                     .where(table.c.quotation_num == record['quotation_num'])
+                    .where(table.c.payment_plan_id.is_(None))  # อัพเดตเฉพาะที่ payment_plan_id เป็น NULL
                     .values(
                         payment_plan_id=record['payment_plan_id'],
                         update_at=datetime.now()
