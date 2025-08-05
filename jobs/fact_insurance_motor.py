@@ -171,7 +171,7 @@ def extract_motor_data():
     plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}' 
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}' 
         AND type_insure = 'ประกันรถ'
     """
     df_plan = execute_query_with_retry(source_engine, plan_query)
@@ -190,7 +190,7 @@ def extract_motor_data():
     pay_query = """
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
     """
     df_pay = execute_query_with_retry(source_engine, pay_query)
 

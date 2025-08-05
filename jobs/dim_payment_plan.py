@@ -34,7 +34,7 @@ def extract_payment_data():
     query1 = """
         SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
         FROM fin_system_pay
-        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_pay = pd.read_sql(query1, source_engine)

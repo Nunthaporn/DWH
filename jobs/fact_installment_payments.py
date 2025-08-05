@@ -90,7 +90,7 @@ def extract_installment_data():
                 df_plan = pd.read_sql(f"""
                     SELECT quo_num
                     FROM fin_system_select_plan
-                    WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+                    WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
                     AND type_insure IN ('ประกันรถ', 'ตรอ')
                 """, fresh_source_1)
                 fresh_source_1.dispose()
