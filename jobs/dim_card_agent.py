@@ -128,12 +128,21 @@ def load_card_agent_data(df: pd.DataFrame):
         """
         conn.execute(text(create_temp_table_sql))
         
-        # Insert ข้อมูลใหม่ลง temporary table
+        # Insert ข้อมูลใหม่ลง temporary table (กรอง duplicate ก่อน)
         if not df.empty:
             # แปลง DataFrame เป็น records
             records = []
             current_time = pd.Timestamp.now()
+            seen_agent_ids = set()  # ใช้เพื่อตรวจสอบ duplicate
+            
             for _, row in df.iterrows():
+                agent_id = row[pk_column]
+                
+                # ข้ามถ้า agent_id ซ้ำ
+                if agent_id in seen_agent_ids:
+                    continue
+                seen_agent_ids.add(agent_id)
+                
                 record = {}
                 for col, value in row.items():
                     if pd.isna(value) or value == pd.NaT or value == '':
@@ -145,9 +154,10 @@ def load_card_agent_data(df: pd.DataFrame):
                 record['update_at'] = current_time
                 records.append(record)
             
-            # Insert แบบ batch
-            metadata = Table(table_name, MetaData(), autoload_with=target_engine)
-            conn.execute(metadata.insert(), records)
+            # Insert แบบ batch (เฉพาะ records ที่ไม่ซ้ำ)
+            if records:
+                metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+                conn.execute(metadata.insert(), records)
 
     # ✅ ใช้ SQL เพื่อหา records ที่ต้อง insert และ update
     with target_engine.connect() as conn:
