@@ -137,7 +137,6 @@ def extract_car_data():
             FROM fin_system_pay
             WHERE type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY datestart DESC
-            LIMIT 1000
         """
         
         query_plan = """
@@ -147,7 +146,6 @@ def extract_car_data():
             FROM fin_system_select_plan
             WHERE type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY datestart DESC
-            LIMIT 1000
         """
     
     try:
