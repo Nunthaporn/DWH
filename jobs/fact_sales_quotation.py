@@ -63,12 +63,12 @@ def extract_sales_quotation_data():
         
         # ✅ เพิ่มประสิทธิภาพ: ใช้ LIMIT และปรับปรุง query
         df_plan = pd.read_sql("""
-            SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
+            SELECT quo_num, type_insure, update_at, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp
             FROM fin_system_select_plan 
-            WHERE datestart BETWEEN '2025-01-01' AND '2025-08-05'
+            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-05'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """, source_engine)
 
         # ✅ ดึงเฉพาะข้อมูลที่จำเป็นจาก fin_order และเพิ่ม LIMIT
@@ -79,15 +79,15 @@ def extract_sales_quotation_data():
         """, source_engine_task)
 
         df_pay = pd.read_sql("""
-            SELECT quo_num, datestart, numpay, show_price_ins, show_price_prb, show_price_total,
+            SELECT quo_num, update_at, numpay, show_price_ins, show_price_prb, show_price_total,
                    show_price_check, show_price_service, show_price_taxcar, show_price_fine,
                    show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
                    discount_mkt, discount_government, discount_government_fin,
                    discount_government_ins, coupon_addon, status AS status_fsp
             FROM fin_system_pay 
-            WHERE datestart BETWEEN '2025-01-01' AND '2025-08-05'
+            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-05'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY datestart DESC
+            ORDER BY update_at DESC
         """, source_engine)
 
         logger.info(f"📦 df_plan shape: {df_plan.shape}")
@@ -120,8 +120,8 @@ def clean_sales_quotation_data(inputs):
         # ✅ เปลี่ยนชื่อคอลัมน์
         column_mapping = {
             "quo_num": "quotation_num",
-            "datestart_x": "quotation_date",
-            "datestart_y": "transaction_date",
+            "update_at_x": "quotation_date",
+            "update_at_y": "transaction_date",
             "datekey": "order_time",
             "type_insure": "type_insurance",
             "id_government_officer": "rights_government",
