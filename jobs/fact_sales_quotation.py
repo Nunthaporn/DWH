@@ -66,7 +66,7 @@ def extract_sales_quotation_data():
             SELECT quo_num, type_insure, update_at, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp
             FROM fin_system_select_plan 
-            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-05'
+            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
         """, source_engine)
@@ -85,7 +85,7 @@ def extract_sales_quotation_data():
                    discount_mkt, discount_government, discount_government_fin,
                    discount_government_ins, coupon_addon, status AS status_fsp
             FROM fin_system_pay 
-            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-05'
+            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
               AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
         """, source_engine)
@@ -435,23 +435,23 @@ def fact_sales_quotation_etl():
     df_clean = clean_sales_quotation_data(data)
     load_sales_quotation_data(df_clean)
 
-# if __name__ == "__main__":
-#     try:
-#         logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
+if __name__ == "__main__":
+    try:
+        logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
         
-#         df_plan, df_order, df_pay = extract_sales_quotation_data()
-#         df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+        df_plan, df_order, df_pay = extract_sales_quotation_data()
+        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
 
-#         # output_path = "fact_sales_quotation.xlsx"
-#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#         # print(f"💾 Saved to {output_path}")
+        # output_path = "fact_sales_quotation.xlsx"
+        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-#         load_sales_quotation_data(df_clean)
+        load_sales_quotation_data(df_clean)
         
-#         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
+        logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
         
-#     except Exception as e:
-#         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
-#         import traceback
-#         traceback.print_exc()
+    except Exception as e:
+        logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
+        import traceback
+        traceback.print_exc()
 #         raise
