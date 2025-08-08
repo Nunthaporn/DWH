@@ -99,3 +99,20 @@ def update_fact_sales_quotation_agent_id():
             extract_dim_agent()
         )
     )
+
+# if __name__ == "__main__":
+#     # Step 1: Extract
+#     df_quotation = extract_quotation_idcus()
+#     df_fact = extract_fact_sales_quotation()
+#     df_agent = extract_dim_agent()
+
+#     # Step 2: Clean & Join
+#     df_joined = join_and_clean_agent_data(df_quotation, df_fact, df_agent)
+
+#     # output_path = "agent_id.xlsx"
+#     # df_joined.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
+
+#     update_agent_id(df_joined)
+
+#     print("🎉 completed! Data upserted to agent_id.")

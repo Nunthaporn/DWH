@@ -103,7 +103,7 @@ def clean_card_agent_data(df: pd.DataFrame) -> pd.DataFrame:
 
 @op
 def load_card_agent_data(df: pd.DataFrame):
-    table_name = 'dim_card_agent'
+    table_name = 'dim_agent_card'
     pk_column = 'agent_id'
 
     # ✅ กรอง agent_id ซ้ำจาก DataFrame ใหม่
@@ -277,7 +277,7 @@ def load_card_agent_data(df: pd.DataFrame):
                 # ✅ เพิ่ม update_at เป็นเวลาปัจจุบัน
                 update_columns['update_at'] = pd.Timestamp.now()
                 
-                print(f"🔍 Updating columns for agent_id {record.get(pk_column)}: {list(update_columns.keys())}")
+                # print(f"🔍 Updating columns for agent_id {record.get(pk_column)}: {list(update_columns.keys())}")
                 
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
@@ -316,19 +316,19 @@ def load_card_agent_data(df: pd.DataFrame):
 def dim_card_agent_etl():
     load_card_agent_data(clean_card_agent_data(extract_card_agent_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_card_agent_data()
+if __name__ == "__main__":
+    df_raw = extract_card_agent_data()
 
-#     df_clean = clean_card_agent_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_card_agent_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_card_agent.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_card_agent.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "dim_card_agent.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_card_agent.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_card_agent_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_card_agent.")
+    load_card_agent_data(df_clean)
+    print("🎉 completed! Data upserted to dim_card_agent.")
