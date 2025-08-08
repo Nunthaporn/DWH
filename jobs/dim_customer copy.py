@@ -21,7 +21,6 @@ target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
-# ✅ Extract
 @op
 def extract_customer_data():
     query_pay = """
@@ -120,27 +119,37 @@ def clean_customer_data(df: pd.DataFrame):
 
     df['customer_telnumber'] = df['customer_telnumber'].apply(clean_tel)
 
-    # ✅ ลบ fuzzy duplicates ใน customer_card
+    # ✅ ลบ fuzzy duplicates แบบเลือกชื่อดีที่สุดในแต่ละ customer_card
     def remove_fuzzy_duplicates(df, threshold=90):
         df['customer_card_clean'] = df['customer_card'].astype(str).str.strip()
         df['customer_name_clean'] = df['customer_name'].astype(str).str.strip().str.lower()
 
-        keep_rows = []
+        best_rows = []
         for card, group in df.groupby('customer_card_clean'):
             names = group['customer_name'].dropna().unique().tolist()
-            seen = set()
-            for i, name1 in enumerate(names):
-                if name1 in seen:
-                    continue
-                for name2 in names[i+1:]:
-                    score = fuzz.ratio(name1.strip().lower(), name2.strip().lower())
-                    if score >= threshold:
-                        seen.add(name2)
-            keep_rows.extend(group[~group['customer_name'].isin(seen)].index.tolist())
+            if len(names) <= 1:
+                best_rows.extend(group.index.tolist())
+                continue
+            best_name = max(names, key=lambda x: len(str(x).strip()))
+            best_index = group[group['customer_name'] == best_name].index.tolist()
+            best_rows.extend(best_index)
 
-        return df.loc[keep_rows].copy()
+        return df.loc[best_rows].copy()
 
     df = remove_fuzzy_duplicates(df)
+
+    # ✅ ลบแถวที่ customer_card และ customer_name ซ้ำแบบเป๊ะ
+    df = df.drop_duplicates(subset=['customer_card', 'customer_name']).copy()
+
+    # ✅ ลบอักขระที่ Excel ไม่รองรับ
+    def remove_illegal_excel_chars(text):
+        if not isinstance(text, str):
+            return text
+        return re.sub(r'[\x00-\x1F\x7F]', '', text)
+
+    for col in df.select_dtypes(include='object').columns:
+        df[col] = df[col].apply(remove_illegal_excel_chars)
+
     df = df.drop(columns=['customer_card_clean', 'customer_name_clean'], errors='ignore')
     df = df.replace(r'NaN', np.nan, regex=True)
     return df
@@ -245,13 +254,13 @@ if __name__ == "__main__":
 
     # print(df_clean.head(10))
 
-    # output_path = "dim_customer.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
-
-    output_path = "dim_customer.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    output_path = "dim_customer.csv"
+    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
     print(f"💾 Saved to {output_path}")
+
+    # output_path = "dim_customer.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
     # load_customer_data(df_clean)
     # print("🎉 Test completed! Data upserted to dim_customer.")
