@@ -127,36 +127,23 @@ def execute_query_with_retry(engine, query, max_retries=3, delay=5):
     for attempt in range(max_retries):
         try:
             print(f"🔄 Attempt {attempt + 1}/{max_retries} - Executing query...")
-
-            # ✅ ใช้ connection object แบบ with
-            with engine.connect() as conn:
-                df = pd.read_sql(query, conn)
-
+            df = pd.read_sql(query, engine)
             print(f"✅ Query executed successfully on attempt {attempt + 1}")
             return df
-
         except (OperationalError, DisconnectionError) as e:
-            print(f"⚠️ Operational error on attempt {attempt + 1}: {str(e)}")
-
-            # ✅ ตรวจจับข้อความ error ที่เกี่ยวข้องกับ transaction
-            if "invalid transaction" in str(e) or "rollback" in str(e).lower():
-                try:
-                    # ✅ พยายาม rollback ด้วย connection object ใหม่
-                    with engine.begin() as conn:
-                        conn.rollback()
-                        print("🔁 Rolled back failed transaction")
-                except Exception as rollback_err:
-                    print(f"⚠️ Rollback failed or not needed: {rollback_err}")
-
-            if attempt < max_retries - 1:
-                print(f"⏳ Waiting {delay} seconds before retry...")
-                time.sleep(delay)
-                delay *= 2  # Exponential backoff
-                engine.dispose()  # ✅ force recreate engine connection
+            if "Lost connection" in str(e) or "connection was forcibly closed" in str(e):
+                print(f"⚠️ Connection lost on attempt {attempt + 1}: {str(e)}")
+                if attempt < max_retries - 1:
+                    print(f"⏳ Waiting {delay} seconds before retry...")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    # Dispose and recreate engine to force new connections
+                    engine.dispose()
+                else:
+                    print(f"❌ All retry attempts failed")
+                    raise
             else:
-                print(f"❌ All retry attempts failed")
                 raise
-
         except Exception as e:
             print(f"❌ Unexpected error: {str(e)}")
             raise
@@ -173,18 +160,19 @@ def close_engines():
 
 @op
 def extract_motor_data():
-    # now = datetime.now()
+    now = datetime.now()
 
-    # start_time = now.replace(minute=0, second=0, microsecond=0)
-    # end_time = now.replace(minute=59, second=59, microsecond=999999)
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
 
-    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
 
     plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06' 
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}' 
+        AND type_insure = 'ประกันรถ'
     """
     df_plan = execute_query_with_retry(source_engine, plan_query)
 
@@ -202,7 +190,7 @@ def extract_motor_data():
     pay_query = """
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
     """
     df_pay = execute_query_with_retry(source_engine, pay_query)
 
@@ -298,12 +286,7 @@ def clean_motor_data(data_tuple):
     df['date_expired'] = pd.to_datetime(df['date_expired'], errors='coerce')
     df['date_expired'] = df['date_expired'].dt.strftime('%Y%m%d').astype('Int64')
     
-    df['ems_amount'] = (
-        df['ems_amount']
-        .apply(remove_commas_from_numeric)  # ลบ , และตัวอักษรที่ไม่ควรมี
-    )
-
-    df['ems_amount'] = pd.to_numeric(df['ems_amount'], errors='coerce').fillna(0).astype(int)
+    df['ems_amount'] = df['ems_amount'].fillna(0).astype(int)
     
     # ทำความสะอาดข้อมูลจังหวัด - เก็บแค่จังหวัดเท่านั้น
     def clean_province(province):
@@ -382,7 +365,6 @@ def clean_motor_data(data_tuple):
     # ทำความสะอาดคอลัมน์ delivery_type
     if 'delivery_type' in df.columns:
         df['delivery_type'] = df['delivery_type'].replace('nor', 'normal')
-        df['delivery_type'] = df['delivery_type'].replace('ปกติ', 'normal')
         print(f"📦 Cleaned delivery_type column - changed 'nor' to 'normal'")
 
     # ✅ ทำความสะอาดคอลัมน์ insurance_class (type) - เก็บแค่ค่าที่กำหนดเท่านั้น
@@ -595,34 +577,34 @@ def load_motor_data(df: pd.DataFrame):
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
-if __name__ == "__main__":
-    try:
-        print("🚀 Starting fact_insurance_motor ETL process...")
+# if __name__ == "__main__":
+#     try:
+#         print("🚀 Starting fact_insurance_motor ETL process...")
         
-        # Extract data with retry mechanism
-        print("📥 Extracting data from source databases...")
-        df_raw = extract_motor_data()
-        print("✅ Data extraction completed")
+#         # Extract data with retry mechanism
+#         print("📥 Extracting data from source databases...")
+#         df_raw = extract_motor_data()
+#         print("✅ Data extraction completed")
 
-        # Clean data
-        print("🧹 Cleaning and transforming data...")
-        df_clean = clean_motor_data((df_raw))
-        print("✅ Data cleaning completed")
-        print("✅ Cleaned columns:", df_clean.columns)
+#         # Clean data
+#         print("🧹 Cleaning and transforming data...")
+#         df_clean = clean_motor_data((df_raw))
+#         print("✅ Data cleaning completed")
+#         print("✅ Cleaned columns:", df_clean.columns)
 
-        # Save to Excel for inspection
-        output_path = "fact_insurance_motor.xlsx"
-        df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        print(f"💾 Saved to {output_path}")
+#         # Save to Excel for inspection
+#         # output_path = "fact_insurance_motor.xlsx"
+#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#         # print(f"💾 Saved to {output_path}")
 
-        # # Uncomment to load to database
-        # print("📤 Loading data to target database...")
-        # load_motor_data(df_clean)
-        # print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+#         # Uncomment to load to database
+#         print("📤 Loading data to target database...")
+#         load_motor_data(df_clean)
+#         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
         
-    except Exception as e:
-        print(f"❌ ETL process failed: {str(e)}")
-        raise
-    finally:
-        # Always close database connections
-        close_engines()
+#     except Exception as e:
+#         print(f"❌ ETL process failed: {str(e)}")
+#         raise
+#     finally:
+#         # Always close database connections
+#         close_engines()
