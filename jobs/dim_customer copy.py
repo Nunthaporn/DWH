@@ -7,6 +7,7 @@ from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from fuzzywuzzy import fuzz
 
 # ✅ โหลด .env
 load_dotenv()
@@ -26,16 +27,14 @@ def extract_customer_data():
     query_pay = """
         SELECT quo_num, address, province, amphoe, district, zipcode, datestart
         FROM fin_system_pay
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
-
+        WHERE datestart >= '2025-01-01' AND datestart < '2025-08-10'
     """
     df_pay = pd.read_sql(query_pay, source_engine)
 
     query_plan = """
         SELECT quo_num, idcard, title, name, lastname, birthDate, career, gender, tel, email, datestart
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-07-01'
-
+        WHERE datestart >= '2025-01-01' AND datestart < '2025-08-10'
     """
     df_plan = pd.read_sql(query_plan, source_engine)
 
@@ -43,12 +42,8 @@ def extract_customer_data():
     df_merged = df_merged.replace(r'NaN', np.nan, regex=True)
     return df_merged
 
-# ✅ Clean
 @op
 def clean_customer_data(df: pd.DataFrame):
-    df = df.drop_duplicates(subset=['address', 'province', 'amphoe', 'district', 'zipcode'])
-    df = df.drop_duplicates(subset=['name', 'lastname'])
-    df = df.drop_duplicates(subset=['idcard'])
     df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
 
     df['full_name'] = df.apply(
@@ -60,25 +55,14 @@ def clean_customer_data(df: pd.DataFrame):
     df = df.drop(columns=['name', 'lastname', 'quo_num'])
 
     df['birthDate'] = pd.to_datetime(df['birthDate'], errors='coerce')
-
-    # ✅ ป้องกัน NaT กลายเป็น string "NaT"
     df['birthDate'] = df['birthDate'].where(df['birthDate'].notna(), None)
 
-    # ✅ คำนวณอายุ
     df['age'] = df['birthDate'].apply(
         lambda x: (
             date.today().year - x.year - ((date.today().month, date.today().day) < (x.month, x.day))
             if isinstance(x, pd.Timestamp) else pd.NA
         )
     ).astype('Int64')
-
-    # df['birthDate'] = pd.to_datetime(df['birthDate'], errors='coerce')
-    # df['age'] = df['birthDate'].apply(
-    #     lambda x: (
-    #         date.today().year - x.year - ((date.today().month, date.today().day) < (x.month, x.day))
-    #         if pd.notnull(x) else pd.NA
-    #     )
-    # ).astype('Int64')
 
     df = df.rename(columns={
         'idcard': 'customer_card',
@@ -135,8 +119,30 @@ def clean_customer_data(df: pd.DataFrame):
         return digits if digits else None
 
     df['customer_telnumber'] = df['customer_telnumber'].apply(clean_tel)
-    df = df.replace(r'NaN', np.nan, regex=True)
 
+    # ✅ ลบ fuzzy duplicates ใน customer_card
+    def remove_fuzzy_duplicates(df, threshold=90):
+        df['customer_card_clean'] = df['customer_card'].astype(str).str.strip()
+        df['customer_name_clean'] = df['customer_name'].astype(str).str.strip().str.lower()
+
+        keep_rows = []
+        for card, group in df.groupby('customer_card_clean'):
+            names = group['customer_name'].dropna().unique().tolist()
+            seen = set()
+            for i, name1 in enumerate(names):
+                if name1 in seen:
+                    continue
+                for name2 in names[i+1:]:
+                    score = fuzz.ratio(name1.strip().lower(), name2.strip().lower())
+                    if score >= threshold:
+                        seen.add(name2)
+            keep_rows.extend(group[~group['customer_name'].isin(seen)].index.tolist())
+
+        return df.loc[keep_rows].copy()
+
+    df = remove_fuzzy_duplicates(df)
+    df = df.drop(columns=['customer_card_clean', 'customer_name_clean'], errors='ignore')
+    df = df.replace(r'NaN', np.nan, regex=True)
     return df
 
 @op
@@ -239,8 +245,12 @@ if __name__ == "__main__":
 
     # print(df_clean.head(10))
 
-    output_path = "dim_customer.csv"
-    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # output_path = "dim_customer.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
+
+    output_path = "dim_customer.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
     print(f"💾 Saved to {output_path}")
 
     # load_customer_data(df_clean)

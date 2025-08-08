@@ -57,8 +57,7 @@ def extract_agent_data():
            user_registered,
            status, fin_new_group, fin_new_mem,
            type_agent, typebuy, user_email, name_store, address, city, district,
-           province, province_cur, area_cur, postcode, tel, date_active, card_ins_type, file_card_ins,
-           card_ins_type_life, file_card_ins_life
+           province, province_cur, area_cur, postcode, tel, date_active
     FROM wp_users
     WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
         AND user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
@@ -231,16 +230,11 @@ def clean_agent_data(df: pd.DataFrame):
         "career": "job",
         "agent_region": "agent_region",
         "defect_status": "defect_status",
-        "card_ins_type": "card_ins_type",
-        "file_card_ins": "file_card_ins",
-        "card_ins_type_life": "card_ins_type_life",
-        "file_card_ins_life": "file_card_ins_life"
+
     }
     df = df.rename(columns=rename_columns)
     df['defect_status'] = np.where(df['agent_id'].str.contains('-defect', na=False), 'defect', None)
 
-    # Clean fields
-    df['card_ins_type_life'] = df['card_ins_type_life'].apply(lambda x: 'B' if isinstance(x, str) and 'แทน' in x else x)
     df['is_experienced_fix'] = df['is_experienced'].apply(lambda x: 'เคยขาย' if str(x).strip().lower() == 'ไม่เคยขาย' else 'ไม่เคยขาย')
     df = df.drop(columns=['is_experienced'])
     df.rename(columns={'is_experienced_fix': 'is_experienced'}, inplace=True)
@@ -394,8 +388,8 @@ def clean_agent_data(df: pd.DataFrame):
     
     df_cleaned["zipcode"] = df_cleaned["zipcode"].apply(clean_zipcode)
 
-    # ✅ กรองแถวที่มี card_ins_type เป็น "ญาตเป็นนายหน้า"
-    df_cleaned = df_cleaned[df_cleaned["card_ins_type"] != "ญาตเป็นนายหน้า"]
+    # # ✅ กรองแถวที่มี card_ins_type เป็น "ญาตเป็นนายหน้า"
+    # df_cleaned = df_cleaned[df_cleaned["card_ins_type"] != "ญาตเป็นนายหน้า"]
 
     # ✅ ทำความสะอาด agent_address - ลบสระด้านหน้า, -, :, . และตัวอักษรพิเศษ
     def clean_address(address):
