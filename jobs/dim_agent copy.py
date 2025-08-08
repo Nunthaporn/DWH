@@ -45,7 +45,7 @@ target_engine = create_engine(
 @op
 def extract_agent_data():
 
-    query_main = f"""
+    query_main = text("""
     SELECT cuscode, name, rank,
            user_registered,
            status, fin_new_group, fin_new_mem,
@@ -56,8 +56,14 @@ def extract_agent_data():
     WHERE user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
         AND name NOT LIKE '%%ทดสอบ%%'
         AND name NOT LIKE '%%tes%%'
+        AND cuscode NOT LIKE 'ADMIN-SALE001%%'
+        AND cuscode NOT LIKE 'center_sale%%'
+        AND cuscode NOT LIKE 'Client-sale%%'
+        AND cuscode NOT LIKE 'Sale%%'
+        AND cuscode NOT LIKE 'south%%'
+        AND cuscode NOT LIKE 'mng_sale%%'
         AND cuscode NOT LIKE 'bkk%%'
-        AND cuscode NOT LIKE '%%east%%'
+        AND cuscode NOT LIKE 'east%%'
         AND cuscode NOT LIKE 'north%%'
         AND cuscode NOT LIKE 'central%%'
         AND cuscode NOT LIKE 'upc%%'
@@ -77,7 +83,7 @@ def extract_agent_data():
         AND cuscode NOT LIKE '%%FIN-TestApp%%'
         AND cuscode NOT LIKE '%%FIN-Tester1%%'
         AND cuscode NOT LIKE '%%FIN-Tester2%%';
-    """
+    """)
 
     df_main = pd.read_sql(query_main, source_engine)
 
@@ -149,9 +155,6 @@ def extract_agent_data():
     # แปลง career เป็น string และทำความสะอาด
     df_merged['career'] = df_merged['career'].astype(str)
     df_merged['career'] = df_merged['career'].str.strip()
-    
-    # ตั้งค่า default สำหรับ career ที่เป็น NaN หรือ 'nan'
-    df_merged.loc[df_merged['career'].isin(['nan', 'None', '', 'NULL']), 'career'] = 'ไม่ระบุ'
     
     # แสดงผลลัพธ์หลังทำความสะอาด
     career_after_clean = df_merged['career'].value_counts()
@@ -266,6 +269,13 @@ def clean_agent_data(df: pd.DataFrame):
     df_cleaned["zipcode"] = df_cleaned["zipcode"].where(df_cleaned["zipcode"].str.len() == 5, np.nan)
     df_cleaned["agent_name"] = df_cleaned["agent_name"].str.lstrip()
     df_cleaned["is_experienced"] = df_cleaned["is_experienced"].apply(lambda x: 'no' if str(x).strip().lower() == 'ไม่เคยขาย' else 'yes')
+
+    # ✅ ทำความสะอาด job/career column - แปลง NaN และ None เป็น None
+    df_cleaned["job"] = df_cleaned["job"].where(pd.notna(df_cleaned["job"]), None)
+    df_cleaned["job"] = df_cleaned["job"].replace('NaN', None)
+    df_cleaned["job"] = df_cleaned["job"].replace('nan', None)
+    df_cleaned["job"] = df_cleaned["job"].replace('NULL', None)
+    df_cleaned["job"] = df_cleaned["job"].replace('null', None)
 
     # ✅ เปลี่ยน "Others" เป็น "อื่นๆ" ในคอลัมน์ province
     df_cleaned["province"] = df_cleaned["province"].replace("Others", "อื่นๆ")
@@ -411,6 +421,12 @@ def clean_agent_data(df: pd.DataFrame):
         return cleaned_address
     
     df_cleaned["agent_address"] = df_cleaned["agent_address"].apply(clean_address)
+
+    # ✅ ทำความสะอาด agent_address column - แปลง NaN และ None เป็น None
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].where(pd.notna(df_cleaned["agent_address"]), None)
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('NaN', None)
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('None', None)
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('NULL', None)
 
     # ✅ ลบ space ที่อยู่ด้านหน้าข้อความในทุกคอลัมน์
     def clean_leading_spaces(text):
@@ -598,9 +614,13 @@ def load_to_wh(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
 
+@op
+def clean_null_values_op(df: pd.DataFrame) -> pd.DataFrame:
+    return df.replace(['None', 'none', 'nan', 'NaN', ''], np.nan)
+
 @job
 def dim_agent_etl():
-    load_to_wh(clean_agent_data(extract_agent_data()))
+    load_to_wh(clean_agent_data(clean_null_values_op(extract_agent_data())))
 
 if __name__ == "__main__":
     df_raw = extract_agent_data()
@@ -609,9 +629,11 @@ if __name__ == "__main__":
     df_clean = clean_agent_data((df_raw))
     print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "dim_agent.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+    df_clean = clean_null_values_op(df_clean)
 
-    # load_to_wh(df_clean)
-    # print("🎉 Test completed! Data upserted to dim_agent.")
+    # output_path = "dim_agent.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
+
+    load_to_wh(df_clean)
+    print("🎉 Test completed! Data upserted to dim_agent.")

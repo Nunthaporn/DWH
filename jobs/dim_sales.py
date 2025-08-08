@@ -519,9 +519,9 @@ if __name__ == "__main__":
     df_clean = clean_sales_data((df_raw))
     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_sales.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+    output_path = "dim_sales.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
 
     load_sales_data(df_clean)
     print("🎉 completed! Data upserted to dim_sales.")

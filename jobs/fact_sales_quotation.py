@@ -61,17 +61,19 @@ def extract_sales_quotation_data():
     try:
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
         
-        # ✅ เพิ่มประสิทธิภาพ: ใช้ LIMIT และปรับปรุง query
         df_plan = pd.read_sql("""
             SELECT quo_num, type_insure, update_at, id_government_officer, status_gpf, quo_num_old,
-                   status AS status_fssp
+                   status AS status_fssp, type_car, chanel_key, id_cus  
             FROM fin_system_select_plan 
             WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
-              AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY update_at DESC
+                AND id_cus NOT LIKE '%%FIN-TestApp%%'
+                AND id_cus NOT LIKE '%%FIN-TestApp3%%'
+                AND id_cus NOT LIKE '%%FIN-TestApp2%%'
+                AND id_cus NOT LIKE '%%FIN-TestApp-2025%%'
+                AND id_cus NOT LIKE '%%FIN-Tester1%%'
+                AND id_cus NOT LIKE '%%FIN-Tester2%%'
         """, source_engine)
 
-        # ✅ ดึงเฉพาะข้อมูลที่จำเป็นจาก fin_order และเพิ่ม LIMIT
         df_order = pd.read_sql("""
             SELECT quo_num, order_number, chanel, datekey, status AS status_fo
             FROM fin_order
@@ -86,31 +88,59 @@ def extract_sales_quotation_data():
                    discount_government_ins, coupon_addon, status AS status_fsp
             FROM fin_system_pay 
             WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
-              AND type_insure IN ('ประกันรถ', 'ตรอ')
-            ORDER BY update_at DESC
         """, source_engine)
 
-        logger.info(f"📦 df_plan shape: {df_plan.shape}")
-        logger.info(f"📦 df_order shape: {df_order.shape}")
-        logger.info(f"📦 df_pay shape: {df_pay.shape}")
+        df_risk = pd.read_sql("""
+            SELECT quo_num, type 
+            FROM fin_detail_plan_risk  
+            WHERE type = 'คอนโด'
+        """, source_engine)
 
-        return df_plan, df_order, df_pay
-        
+        df_pa = pd.read_sql("""
+            SELECT quo_num, special_package 
+            FROM fin_detail_plan_pa  
+            WHERE special_package = 'CHILD'
+        """, source_engine)
+
+        df_health = pd.read_sql("""
+            SELECT quo_num, special_package 
+            FROM fin_detail_plan_health  
+            WHERE special_package = 'CHILD'
+        """, source_engine)
+
+        df_wp = pd.read_sql("""
+            SELECT cuscode as id_cus, display_permission
+            FROM wp_users 
+            WHERE display_permission IN ('สำนักงานฟิน', 'หน้าร้านฟิน')
+                AND cuscode NOT LIKE '%%FIN-TestApp%%'
+                AND cuscode NOT LIKE '%%FIN-TestApp3%%'
+                AND cuscode NOT LIKE '%%FIN-TestApp2%%'
+                AND cuscode NOT LIKE '%%FIN-TestApp-2025%%'
+                AND cuscode NOT LIKE '%%FIN-TestApp%%'
+                AND cuscode NOT LIKE '%%FIN-Tester1%%'
+                AND cuscode NOT LIKE '%%FIN-Tester2%%';
+        """, source_engine)
+
+        logger.info(f"📦 Shapes: plan={df_plan.shape}, order={df_order.shape}, pay={df_pay.shape}, risk={df_risk.shape}, pa={df_pa.shape}, health={df_health.shape}, wp={df_wp.shape}")
+        return df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp
+
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
         raise
 
 @op
 def clean_sales_quotation_data(inputs):
-    """Clean and transform the extracted data"""
     try:
-        df, df1, df2 = inputs
-        
+        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp = inputs
         logger.info("🧹 เริ่มทำความสะอาดข้อมูล...")
-        
-        # ✅ เพิ่มประสิทธิภาพ: ใช้ merge แบบเดียวและลดการ copy
-        df_merged = df.merge(df1, on='quo_num', how='left')
-        df_merged = df_merged.merge(df2, on='quo_num', how='left')
+
+        # ✅ Merge ทุกตารางโดยใช้ df_plan เป็นหลัก
+        df_merged = df_plan.merge(df_order, on='quo_num', how='left')
+        df_merged = df_merged.merge(df_pay, on='quo_num', how='left')
+        df_merged = df_merged.merge(df_risk, on='quo_num', how='left', suffixes=('', '_risk'))
+        df_merged = df_merged.merge(df_pa, on='quo_num', how='left', suffixes=('', '_pa'))
+        df_merged = df_merged.merge(df_health, on='quo_num', how='left', suffixes=('', '_health'))
+        df_merged = df_merged.merge(df_wp, on='id_cus', how='left')
         
         # ✅ ทำความสะอาดข้อมูลแบบ vectorized
         df_merged = df_merged.replace(['nan', 'NaN', 'null', ''], np.nan)
@@ -149,12 +179,62 @@ def clean_sales_quotation_data(inputs):
         }
         df_merged.rename(columns=column_mapping, inplace=True)
 
-        # ✅ Add column: sale_team
-        df_merged['sale_team'] = df_merged['type_insurance'].map({
-            'ตรอ': 'ตรอ',
-            'ประกันรถ': 'Motor agency'
-        })
-    
+        def assign_sale_team(row):
+            id_cus = str(row.get('id_cus') or '')
+            type_insurance_raw = row.get('type_insurance')
+            type_car_raw = row.get('type_car')
+
+            type_insurance = str(type_insurance_raw).strip().lower()
+            type_car = str(type_car_raw).strip().lower()
+            chanel_key = str(row.get('chanel_key')).strip()
+            special_package = str(row.get('special_package')).strip().upper()
+            special_package_health = str(row.get('special_package_health')).strip().upper()
+
+            if id_cus.startswith('FTR'):
+                return 'Telesales'
+
+            if type_car == 'fleet':
+                return 'fleet'
+            if type_car == 'ตะกาฟุล':
+                return 'ตะกาฟุล'
+
+            if type_insurance == 'ประกันรถ':
+                return 'Motor agency'
+            if type_insurance == 'ตรอ':
+                return 'ตรอ'
+
+            if chanel_key == 'CHILD':
+                return 'ประกันเด็ก'
+            if chanel_key in ['หน้าร้าน', 'หน้าร้านฟิน', 'สำนักงานฟิน']:
+                return 'หน้าร้าน'
+            if chanel_key == 'ตะกาฟุล':
+                return 'ตะกาฟุล'
+            if chanel_key == 'WEB-SUBBROKER':
+                return 'Subbroker'
+
+            if str(row.get('type')).strip() == 'คอนโด':
+                return 'ประกันคอนโด'
+            if special_package == 'CHILD' or special_package_health == 'CHILD':
+                return 'ประกันเด็ก'
+            if row.get('display_permission') in ['หน้าร้านฟิน', 'สำนักงานฟิน']:
+                return 'หน้าร้าน'
+
+            # ✅ ตรวจสอบว่า type_insurance และ type_car เป็น None, NaN, หรือ ''
+            if pd.isna(type_insurance_raw) or type_insurance in ['', 'none', 'nan']:
+                if pd.isna(type_car_raw) or type_car in ['', 'none', 'nan']:
+                    return 'N/A'
+
+            return 'Non Motor'
+
+        df_merged['sale_team'] = df_merged.apply(assign_sale_team, axis=1)
+
+        cols_to_drop = [
+            'id_cus','type_car','chanel_key','special_package','special_package_health','type','display_permission'
+        ]
+
+        # ✅ ลบเฉพาะคอลัมน์ที่มีอยู่จริงใน DataFrame
+        df_merged.drop(columns=[col for col in cols_to_drop if col in df_merged.columns], inplace=True)
+
         # ✅ แปลงวันที่แบบ vectorized
         date_columns = ['transaction_date', 'order_time', 'quotation_date']
         for col in date_columns:
@@ -439,10 +519,10 @@ if __name__ == "__main__":
     try:
         logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
         
-        df_plan, df_order, df_pay = extract_sales_quotation_data()
-        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay))
+        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp = extract_sales_quotation_data()
+        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp))
 
-        # output_path = "fact_sales_quotation.xlsx"
+        # output_path = "fact_sales_quotation1.xlsx"
         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
         # print(f"💾 Saved to {output_path}")
 
@@ -454,4 +534,4 @@ if __name__ == "__main__":
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
         import traceback
         traceback.print_exc()
-#         raise
+        raise

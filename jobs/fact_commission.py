@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime, timedelta
+from sqlalchemy import text
 
 def clean_nan_values(df):
     """
@@ -71,24 +72,24 @@ target_engine = create_engine(
 
 @op
 def extract_commission_data():
-    now = datetime.now()
+    # now = datetime.now()
 
-    start_time = now.replace(minute=0, second=0, microsecond=0)
-    end_time = now.replace(minute=59, second=59, microsecond=999999)
+    # start_time = now.replace(minute=0, second=0, microsecond=0)
+    # end_time = now.replace(minute=59, second=59, microsecond=999999)
 
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
 
     df_select_plan = pd.read_sql("""
         SELECT quo_num,id_cus,no_car,current_campaign 
         FROM fin_system_select_plan 
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
     """, source_engine)
 
     df_fin_order = pd.read_sql("""
         SELECT quo_num,numpay,order_number
         FROM fin_order 
-        WHERE datekey BETWEEN '{start_str}' AND '{end_str}'
+        WHERE datekey BETWEEN '2025-01-01' AND '2025-08-06'
     """, task_engine)
 
     df_system_pay = pd.read_sql("""
@@ -96,7 +97,7 @@ def extract_commission_data():
                show_price_com_count,show_com_addon,condition_install,
                percent_install,chanel_main
         FROM fin_system_pay 
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
     """, source_engine)
 
     df_com_rank = pd.read_sql("""
@@ -413,11 +414,10 @@ def load_commission_data(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
     
-    # 🔍 Final verification - check if any NaN values were inserted
     try:
         with target_engine.connect() as conn:
-            # Check for any NULL values in numeric columns
-            result = conn.execute(f"""
+            # ✅ ใช้ text(...) เพื่อให้ SQLAlchemy ยอมรัน dynamic SQL นี้
+            result = conn.execute(text("""
                 SELECT 
                     column_name, 
                     data_type,
@@ -444,18 +444,17 @@ def load_commission_data(df: pd.DataFrame):
                             ELSE NULL
                         END as column_value
                     FROM information_schema.columns c
-                    CROSS JOIN {table_name} t
-                    WHERE c.table_name = '{table_name}' 
+                    CROSS JOIN fact_commission t
+                    WHERE c.table_name = 'fact_commission' 
                     AND c.table_schema = 'public'
                 ) subq
                 GROUP BY column_name, data_type
                 ORDER BY column_name
-            """)
-            
+            """))
+
             print("\n🔍 Database verification results:")
             for row in result:
                 print(f"  - {row[0]} ({row[1]}): {row[3]} NULL out of {row[2]} total rows")
-                
     except Exception as e:
         print(f"⚠️ Could not verify database: {e}")
 
@@ -463,52 +462,52 @@ def load_commission_data(df: pd.DataFrame):
 def fact_commission_etl():
     load_commission_data(clean_commission_data(extract_commission_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_commission_data()
+if __name__ == "__main__":
+    df_raw = extract_commission_data()
 
-#     df_clean = clean_commission_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_commission_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # 🔍 Final check before loading to database
-#     final_nan_check = df_clean.isnull().sum()
-#     if final_nan_check.sum() > 0:
-#         print("\n⚠️ Final NaN check before database loading:")
-#         for col, count in final_nan_check[final_nan_check > 0].items():
-#             print(f"  - {col}: {count} NaN values")
-#     else:
-#         print("\n✅ No NaN values found before database loading")
+    # 🔍 Final check before loading to database
+    final_nan_check = df_clean.isnull().sum()
+    if final_nan_check.sum() > 0:
+        print("\n⚠️ Final NaN check before database loading:")
+        for col, count in final_nan_check[final_nan_check > 0].items():
+            print(f"  - {col}: {count} NaN values")
+    else:
+        print("\n✅ No NaN values found before database loading")
     
-#     # 🔍 Final comma check before loading to database
-#     numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
-#                         'after_tax_commission', 'paid_commission', 'commission_addon',
-#                         'commission', 'com_invite', 'com_rank']
+    # 🔍 Final comma check before loading to database
+    numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
+                        'after_tax_commission', 'paid_commission', 'commission_addon',
+                        'commission', 'com_invite', 'com_rank']
     
-#     print("\n🔍 Final comma check before database loading:")
-#     for col in numeric_cols_main:
-#         if col in df_clean.columns:
-#             comma_count = df_clean[col].astype(str).str.contains(',').sum()
-#             if comma_count > 0:
-#                 print(f"  - ⚠️ {col}: {comma_count} values still have commas")
-#                 # Show remaining examples
-#                 examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
-#                 print(f"    Remaining examples: {examples.tolist()}")
-#             else:
-#                 print(f"  - ✅ {col}: No comma values found")
+    print("\n🔍 Final comma check before database loading:")
+    for col in numeric_cols_main:
+        if col in df_clean.columns:
+            comma_count = df_clean[col].astype(str).str.contains(',').sum()
+            if comma_count > 0:
+                print(f"  - ⚠️ {col}: {comma_count} values still have commas")
+                # Show remaining examples
+                examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
+                print(f"    Remaining examples: {examples.tolist()}")
+            else:
+                print(f"  - ✅ {col}: No comma values found")
     
-#     # Show sample of cleaned numeric data
-#     print("\n📊 Sample of cleaned numeric data:")
-#     for col in numeric_cols_main[:3]:  # Show first 3 columns
-#         if col in df_clean.columns:
-#             sample_values = df_clean[col].dropna().head(3)
-#             print(f"  - {col}: {sample_values.tolist()}")
+    # Show sample of cleaned numeric data
+    print("\n📊 Sample of cleaned numeric data:")
+    for col in numeric_cols_main[:3]:  # Show first 3 columns
+        if col in df_clean.columns:
+            sample_values = df_clean[col].dropna().head(3)
+            print(f"  - {col}: {sample_values.tolist()}")
 
-#     # output_path = "fact_commission.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_commission.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "fact_commission.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_commission.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_commission_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_commission.")
+    load_commission_data(df_clean)
+    print("🎉 completed! Data upserted to fact_commission.")

@@ -7,8 +7,10 @@ import time
 import gc
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, inspect
+from sqlalchemy import create_engine, MetaData, Table, inspect, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.sql.elements import TextClause
+from typing import Union, List
 
 # ✅ Load env
 load_dotenv()
@@ -47,254 +49,223 @@ target_engine = create_engine(
     }
 )
 
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+
+def load_query_raw(engine, query: str) -> pd.DataFrame:
+    raw_conn = None
+    try:
+        raw_conn = engine.raw_connection()
+        cursor = raw_conn.cursor()
+        cursor.execute(query)
+        return pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
+    except Exception as e:
+        print(f"❌ Error loading query: {e}")
+        return pd.DataFrame()
+    finally:
+        if raw_conn:
+            try: raw_conn.close()
+            except Exception as e: print(f"⚠️ Error closing: {e}")
+        engine.dispose()
+
+def load_data_in_batches(engine, table_name: str, order_numbers: List[str], batch_size=10000) -> pd.DataFrame:
+    all_results = []
+    for batch in chunk_list(order_numbers, batch_size):
+        formatted = "', '".join(batch)
+        query = f"SELECT * FROM {table_name} WHERE order_number IN ('{formatted}')"
+        df_batch = load_query_raw(engine, query)
+        all_results.append(df_batch)
+    return pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+
 @op
 def extract_installment_data():
-    now = datetime.now()
+    print("🔄 Loading data from databases...")
 
-    start_time = now.replace(minute=0, second=0, microsecond=0)  
-    end_time = now.replace(minute=59, second=59, microsecond=999999) 
-
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
-
-    # ✅ สร้าง engines ใหม่สำหรับแต่ละ query เพื่อหลีกเลี่ยง PendingRollbackError
+    # แก้ตรงนี้เพื่อให้ connection มี transaction แบบ manual
     def create_fresh_engine(engine_url, engine_name):
-        """สร้าง engine ใหม่สำหรับแต่ละ query"""
         try:
-            fresh_engine = create_engine(
+            return create_engine(
                 engine_url,
-                pool_size=5,
-                max_overflow=10,
+                pool_size=1,
+                max_overflow=2,
                 pool_timeout=30,
-                pool_recycle=1800,
+                pool_recycle=300,
                 pool_pre_ping=True,
-                echo=False
+                echo=False,
+                connect_args={
+                    'connect_timeout': 60,
+                    'autocommit': False,  # 🔄 แก้จาก True เป็น False
+                    'charset': 'utf8mb4',
+                    'sql_mode': 'STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'
+                }
             )
-            return fresh_engine
         except Exception as e:
-            print(f"❌ Error creating fresh {engine_name} engine: {e}")
+            print(f"❌ Error creating {engine_name} engine: {e}")
             return None
 
-    try:
-        print("🔄 Loading data from databases...")
-        
-        # ✅ สร้าง fresh engines สำหรับแต่ละ query
-        source_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
-        task_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
-        
-        # ✅ โหลดข้อมูลทีละส่วนพร้อม fresh engines
-        print("📊 Loading plan data...")
-        fresh_source_1 = create_fresh_engine(source_url, "source_1")
-        if fresh_source_1:
-            try:
-                df_plan = pd.read_sql(f"""
-                    SELECT quo_num
-                    FROM fin_system_select_plan
-                    WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
-                    AND type_insure IN ('ประกันรถ', 'ตรอ')
-                """, fresh_source_1)
-                fresh_source_1.dispose()
-            except Exception as e:
-                print(f"❌ Error loading plan data: {e}")
-                fresh_source_1.dispose()
-                df_plan = pd.DataFrame()
-        else:
-            df_plan = pd.DataFrame()
+    # ✅ Connection URLs
+    source_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+    task_url = f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
 
-        # ✅ โหลด installment data
-        df_installment = pd.DataFrame()
-        if not df_plan.empty:
-            print("📊 Loading installment data...")
-            fresh_source_2 = create_fresh_engine(source_url, "source_2")
-            if fresh_source_2:
-                try:
-                    quo_nums = "','".join(df_plan['quo_num'].dropna().astype(str))
-                    df_installment = pd.read_sql(f"""
-                        SELECT quo_num, money_one, money_two, money_three, money_four,
-                               money_five, money_six, money_seven, money_eight, money_nine,
-                               money_ten, money_eleven, money_twelve,
-                               date_one, date_two, date_three, date_four, date_five,
-                               date_six, date_seven, date_eight, date_nine, date_ten,
-                               date_eleven, date_twelve, numpay
-                        FROM fin_installment
-                        WHERE quo_num IN ('{quo_nums}')
-                    """, fresh_source_2)
-                    fresh_source_2.dispose()
-                except Exception as e:
-                    print(f"❌ Error loading installment data: {e}")
-                    fresh_source_2.dispose()
-                    df_installment = pd.DataFrame()
+    # ✅ Load installment plan data
+    print("📊 Loading plan + installment via JOIN...")
+    df_plan = pd.DataFrame()
+    df_installment = pd.DataFrame()
 
-        # ✅ โหลด order data
-        print("📊 Loading order data...")
-        fresh_task_1 = create_fresh_engine(task_url, "task_1")
-        if fresh_task_1:
-            try:
+    fresh_source = create_fresh_engine(source_url, "source")
+    if fresh_source:
+        try:
+            with fresh_source.begin() as conn:
+                df_installment = pd.read_sql("""
+                    SELECT p.quo_num,
+                        i.money_one, i.money_two, i.money_three, i.money_four,
+                        i.money_five, i.money_six, i.money_seven, i.money_eight, i.money_nine,
+                        i.money_ten, i.money_eleven, i.money_twelve,
+                        i.date_one, i.date_two, i.date_three, i.date_four, i.date_five,
+                        i.date_six, i.date_seven, i.date_eight, i.date_nine, i.date_ten,
+                        i.date_eleven, i.date_twelve, i.numpay
+                    FROM fin_system_select_plan p
+                    JOIN fin_installment i ON p.quo_num = i.quo_num
+                    WHERE p.update_at BETWEEN '2025-01-01' AND '2025-08-06'
+                """, conn)
+                print(f"✅ Loaded {len(df_installment)} installment records")
+                df_plan = df_installment[['quo_num']].drop_duplicates()
+        except Exception as e:
+            print(f"❌ Error loading plan/installment data: {e}")
+        finally:
+            fresh_source.dispose()
+    else:
+        print("⚠️ Failed to create fresh source engine for plan/installment")
+
+    # ✅ Load order data
+    print("📊 Loading order data...")
+    df_order = pd.DataFrame()
+    fresh_task_1 = create_fresh_engine(task_url, "task_1")
+    if fresh_task_1:
+        try:
+            with fresh_task_1.begin() as conn:
                 df_order = pd.read_sql("""
                     SELECT quo_num, order_number
                     FROM fin_order
-                    WHERE type_insure IN ('ประกันรถ', 'ตรอ')
-                """, fresh_task_1)
-                fresh_task_1.dispose()
-            except Exception as e:
-                print(f"❌ Error loading order data: {e}")
-                fresh_task_1.dispose()
-                df_order = pd.DataFrame()
-        else:
-            df_order = pd.DataFrame()
+                """, conn)
+                print(f"✅ Loaded {len(df_order)} order records")
+        except Exception as e:
+            print(f"❌ Error loading order data: {e}")
+        finally:
+            fresh_task_1.dispose()
 
-        # ✅ โหลด finance และ bill data
-        df_finance = pd.DataFrame()
-        df_bill = pd.DataFrame()
-        if not df_order.empty:
-            print("📊 Loading finance and bill data...")
-            fresh_task_2 = create_fresh_engine(task_url, "task_2")
-            if fresh_task_2:
+    order_list = list(df_order["order_number"].dropna().astype(str).unique())
+    print(f"📦 Loading bill data in batches... ({len(order_list)} orders)")
+
+    if not df_order.empty:
+        print("📊 Loading finance and bill data...")
+
+        order_nums = "','".join(df_order['order_number'].dropna().astype(str))
+
+        # ✅ Create engine สำหรับ finance
+        task_engine_finance = create_fresh_engine(task_url, "task_engine_finance")
+
+        # ✅ Query
+        query_finance = f"""
+            SELECT order_number, numpay,
+                moneypay_one, datepay_one,
+                moneypay_two, datepay_two,
+                moneypay_three, datepay_three,
+                moneypay_four, datepay_four,
+                moneypay_five, datepay_five,
+                moneypay_six, datepay_six,
+                moneypay_seven, datepay_seven,
+                moneypay_eight, datepay_eight,
+                moneypay_nine, datepay_nine,
+                moneypay_ten, datepay_ten,
+                moneypay_eleven, datepay_eleven,
+                moneypay_twelve, datepay_twelve
+            FROM fin_finance
+            WHERE order_number IN ('{order_nums}')
+        """
+        df_finance = load_data_in_batches(task_engine_finance, "fin_finance", order_list)
+        print(f"✅ Loaded {len(df_finance)} finance records")
+
+    task_engine_bill = create_fresh_engine(task_url, "task_engine_bill")
+    if task_engine_bill:
+        conn = None
+        try:
+            conn = task_engine_bill.connect()
+            df_bill = pd.read_sql(f"""
+                SELECT ...
+                FROM fin_bill
+                WHERE order_number IN ('{order_nums}')
+            """, conn)
+            print(f"✅ Loaded {len(df_bill)} bill records")
+        except Exception as e:
+            print(f"❌ Error loading bill: {e}")
+            if conn:
                 try:
-                    order_nums = "','".join(df_order['order_number'].dropna().astype(str))
-                    
-                    df_finance = pd.read_sql(f"""
-                        SELECT order_number, datepay_one, datepay_two, datepay_three, datepay_four,
-                               datepay_five, datepay_six, datepay_seven, datepay_eight,
-                               datepay_nine, datepay_ten, datepay_eleven, datepay_twelve,
-                               moneypay_one, moneypay_two, moneypay_three, moneypay_four,
-                               moneypay_five, moneypay_six, moneypay_seven, moneypay_eight,
-                               moneypay_nine, moneypay_ten, moneypay_eleven, moneypay_twelve,
-                               numpay
-                        FROM fin_finance
-                        WHERE order_number IN ('{order_nums}')
-                    """, fresh_task_2)
+                    conn.rollback()
+                except Exception as rb_e:
+                    print(f"⚠️ Rollback error: {rb_e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception as close_e:
+                    print(f"⚠️ Error closing conn: {close_e}")
+            task_engine_bill.dispose()
 
-                    df_bill = pd.read_sql(f"""
-                        SELECT order_number, bill_receipt, bill_receipt2, bill_receipt3,
-                               bill_receipt4, bill_receipt5, bill_receipt6, bill_receipt7,
-                               bill_receipt8, bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
-                        FROM fin_bill
-                        WHERE order_number IN ('{order_nums}')
-                    """, fresh_task_2)
-                    fresh_task_2.dispose()
-                except Exception as e:
-                    print(f"❌ Error loading finance/bill data: {e}")
-                    fresh_task_2.dispose()
-                    df_finance = pd.DataFrame()
-                    df_bill = pd.DataFrame()
+        # ✅ Query
+        query_bill = f"""
+            SELECT order_number,
+                bill_receipt, bill_receipt2, bill_receipt3, bill_receipt4,
+                bill_receipt5, bill_receipt6, bill_receipt7, bill_receipt8,
+                bill_receipt9, bill_receipt10, bill_receipt11, bill_receipt12
+            FROM fin_bill
+            WHERE order_number IN ('{order_nums}')
+        """
 
-        # ✅ โหลด late fee data
-        print("📊 Loading late fee data...")
-        fresh_task_3 = create_fresh_engine(task_url, "task_3")
-        if fresh_task_3:
-            try:
+        df_bill = load_data_in_batches(task_engine_bill, "fin_bill", order_list)
+        print(f"✅ Loaded {len(df_bill)} bill records")
+
+    # ✅ Load late fee data
+    print("📊 Loading late fee data...")
+    df_late_fee = pd.DataFrame()
+    fresh_task_3 = create_fresh_engine(task_url, "task_3")
+    if fresh_task_3:
+        try:
+            with fresh_task_3.begin() as conn:
                 df_late_fee = pd.read_sql("""
                     SELECT orderNumber, penaltyPay, numPay
                     FROM FIN_Account_AttachSlip_PathImageSlip
                     WHERE checkPay IN ('ค่าปรับ', 'ค่างวด/ค่าปรับ')
-                """, fresh_task_3)
-                fresh_task_3.dispose()
-            except Exception as e:
-                print(f"❌ Error loading late fee data: {e}")
-                fresh_task_3.dispose()
-                df_late_fee = pd.DataFrame()
-        else:
-            df_late_fee = pd.DataFrame()
+                """, conn)
+                print(f"✅ Loaded {len(df_late_fee)} late fee records")
+        except Exception as e:
+            print(f"❌ Error loading late fee data: {e}")
+        finally:
+            fresh_task_3.dispose()
 
-        # ✅ โหลด test data
-        print("📊 Loading test data...")
-        fresh_source_3 = create_fresh_engine(source_url, "source_3")
-        if fresh_source_3:
-            try:
+    # ✅ Load test data
+    print("📊 Loading test data...")
+    df_test = pd.DataFrame()
+    fresh_source_2 = create_fresh_engine(source_url, "source_2")
+    if fresh_source_2:
+        try:
+            with fresh_source_2.begin() as conn:
                 df_test = pd.read_sql("""
                     SELECT quo_num
                     FROM fin_system_select_plan
-                    WHERE name IN ('ทดสอบ','test')
-                      AND type_insure IN ('ประกันรถ', 'ตรอ')
-                """, fresh_source_3)
-                fresh_source_3.dispose()
-            except Exception as e:
-                print(f"❌ Error loading test data: {e}")
-                fresh_source_3.dispose()
-                df_test = pd.DataFrame()
-        else:
-            df_test = pd.DataFrame()
-        
-        # ✅ ลด memory usage โดยการลบข้อมูลที่ไม่จำเป็น
-        gc.collect()
-        
-    except Exception as e:
-        print(f"❌ Error during data extraction: {e}")
-        # ✅ ปิด engines ทั้งหมดในกรณีที่เกิด error
-        engines_to_dispose = []
-        
-        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-        for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
-                         'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
-            if var_name in locals():
-                engine = locals()[var_name]
-                if engine is not None:
-                    engines_to_dispose.append((var_name, engine))
-        
-        for engine_name, engine in engines_to_dispose:
-            try:
-                engine.dispose()
-                print(f"✅ {engine_name} engine disposed successfully")
-            except Exception as dispose_error:
-                print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
-        
-        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
-        try:
-            # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-            for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
-                             'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
-                if var_name in locals():
-                    engine = locals()[var_name]
-                    if engine is not None:
-                        try:
-                            engine.dispose()
-                            print(f"✅ {var_name} engine disposed successfully in exception handler")
-                        except Exception as dispose_error:
-                            print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error}")
-        except Exception as cleanup_error:
-            print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
-        
-        raise e
+                    WHERE name IN ('ทดสอบ', 'test')
+                """, conn)
+                print(f"✅ Loaded {len(df_test)} test records")
+        except Exception as e:
+            print(f"❌ Error loading test data: {e}")
+        finally:
+            fresh_source_2.dispose()
 
-    # ✅ ลด debug prints เหลือแค่ข้อมูลสำคัญ
+    # ✅ Done
     print(f"📦 Data loaded: plan({df_plan.shape[0]}), installment({df_installment.shape[0]}), "
           f"order({df_order.shape[0]}), finance({df_finance.shape[0]}), "
           f"bill({df_bill.shape[0]}), late_fee({df_late_fee.shape[0]}), test({df_test.shape[0]})")
-
-    # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิด
-    engines_to_check = []
-    
-    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-    for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
-                     'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
-        if var_name in locals():
-            engine = locals()[var_name]
-            if engine is not None:
-                engines_to_check.append((var_name, engine))
-    
-    for engine_name, engine in engines_to_check:
-        try:
-            engine.dispose()
-            print(f"✅ {engine_name} engine disposed successfully")
-        except Exception as dispose_error:
-            print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
-
-    # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วนท้าย
-    try:
-        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-        for var_name in ['fresh_source_1', 'fresh_source_2', 'fresh_source_3', 
-                         'fresh_task_1', 'fresh_task_2', 'fresh_task_3']:
-            if var_name in locals():
-                engine = locals()[var_name]
-                if engine is not None:
-                    try:
-                        engine.dispose()
-                        print(f"✅ {var_name} engine disposed successfully")
-                    except Exception as dispose_error:
-                        print(f"⚠️ {var_name} engine disposal failed: {dispose_error}")
-    except Exception as e:
-        print(f"⚠️ Error during final engine cleanup: {e}")
 
     return df_plan, df_installment, df_order, df_finance, df_bill, df_late_fee, df_test
 
@@ -825,8 +796,8 @@ def load_installment_data(df: pd.DataFrame):
             # สร้าง connection ใหม่ทุกครั้ง
             with fresh_target.connect() as conn:
                 # ตั้งค่า timeout และ connection parameters
-                conn.execute("SET statement_timeout = 300000")  # 5 minutes
-                conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                conn.execute(text("SET statement_timeout = 300000"))  # 5 minutes
+                conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))  # 5 minutes
                 
                 df_existing = pd.read_sql(
                     f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
@@ -1097,7 +1068,7 @@ def load_installment_data(df: pd.DataFrame):
             print(f"📤 Processing {len(df_to_insert_valid)} valid records for insertion...")
             
             # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
-            batch_size = 1000
+            batch_size = 5000
             total_batches = (len(df_to_insert_valid) + batch_size - 1) // batch_size
             
             # ✅ ใช้ connection แยกสำหรับแต่ละ batch
@@ -1126,8 +1097,8 @@ def load_installment_data(df: pd.DataFrame):
                     try:
                         with fresh_target_batch.begin() as conn:
                             # ตั้งค่า timeout
-                            conn.execute("SET statement_timeout = 300000")  # 5 minutes
-                            conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                            conn.execute(text("SET statement_timeout = 300000"))  # 5 minutes
+                            conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))  # 5 minutes
                             
                             stmt = pg_insert(metadata).values(records)
                             update_columns = {
@@ -1209,7 +1180,7 @@ def load_installment_data(df: pd.DataFrame):
             print(f"📝 Processing {len(df_diff_valid)} valid records for update...")
             
             # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
-            batch_size = 1000
+            batch_size = 5000
             total_batches = (len(df_diff_valid) + batch_size - 1) // batch_size
             
             # ✅ ใช้ connection แยกสำหรับแต่ละ batch
@@ -1238,8 +1209,8 @@ def load_installment_data(df: pd.DataFrame):
                     try:
                         with fresh_target_update.begin() as conn:
                             # ตั้งค่า timeout
-                            conn.execute("SET statement_timeout = 300000")  # 5 minutes
-                            conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
+                            conn.execute(text("SET statement_timeout = 300000"))  # 5 minutes
+                            conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))  # 5 minutes
                             
                             stmt = pg_insert(metadata).values(records)
                             update_columns = {

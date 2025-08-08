@@ -23,21 +23,11 @@ target_engine = create_engine(
 
 @op
 def extract_payment_data():
-    # now = datetime.now()
-
-    # start_time = now.replace(minute=0, second=0, microsecond=0)
-    # end_time = now.replace(minute=59, second=59, microsecond=999999)
-
-    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
-
-    start_str = '2025-01-01'
-    end_str = '2025-08-06'
 
     query1 = f"""
         SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
         FROM fin_system_pay
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
 
     """
     df_pay = pd.read_sql(query1, source_engine)
@@ -85,6 +75,11 @@ def clean_payment_data(df: pd.DataFrame):
         (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ตัดบัตรเครดิต')),
         (chm.eq('ผ่อนชำระ') & (cb.isin(['qrcode', '']) | cb.str.startswith('ธนาคาร')) & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนโอน')),
+        (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ผ่อนโอน')),
+        (chm.eq('ผ่อนโอน') & cb.eq('') & ch.eq('ผ่อนโอน')),
+        (chm.eq('ผ่อนบัตรเครดิต') & cb.eq('ธนาคารกรุงไทย') & ch.eq('ผ่อนบัตร')),
+        (chm.eq('ตัดบัตรเครดิต') & cb.eq('creditcard') & ch.eq('ผ่อนบัตร')),
+        (chm.eq('ตัดบัตรเครดิต') & cb.eq('creditcard') & ch.eq('ตัดบัตรเครดิต')),
     ]
 
     choices = [
@@ -143,6 +138,9 @@ def clean_payment_data(df: pd.DataFrame):
         'chanel': 'payment_reciever',
         'status_paybill': 'payment_type'
     })
+
+    df['payment_reciever'] = df['payment_reciever'].replace('เข้าประกัน1', 'เข้าประกัน')
+    df['payment_reciever'] = df['payment_reciever'].replace('เข้าฟิลลิป', 'เข้าฟินลิป')
 
     # ✅ Clean values
     df = df[~df['quotation_num'].str.endswith('-r', na=False)]
@@ -296,9 +294,9 @@ if __name__ == "__main__":
     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
     # print(f"💾 Saved to {output_path}")
 
-    output_path = "dim_payment_plan.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+    # output_path = "dim_payment_plan.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_payment_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_payment_plan.")
+    load_payment_data(df_clean)
+    print("🎉 completed! Data upserted to dim_payment_plan.")
