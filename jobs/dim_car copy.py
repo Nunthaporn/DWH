@@ -26,9 +26,7 @@ source_engine = create_engine(
     max_overflow=10,
     pool_pre_ping=True,
     pool_recycle=3600,
-    connect_args={
-        "connect_timeout": 30
-    }
+    connect_args={"connect_timeout": 30}
 )
 
 # ✅ DB target (PostgreSQL)
@@ -44,10 +42,7 @@ target_engine = create_engine(
     max_overflow=10,
     pool_pre_ping=True,
     pool_recycle=3600,
-    connect_args={
-        "connect_timeout": 30,
-        "application_name": "dim_car_etl"
-    }
+    connect_args={"connect_timeout": 30, "application_name": "dim_car_etl"}
 )
 
 def retry_db_operation(operation, max_retries=3, delay=2):
@@ -61,107 +56,91 @@ def retry_db_operation(operation, max_retries=3, delay=2):
             print(f"⚠️ Database connection error (attempt {attempt + 1}/{max_retries}): {e}")
             print(f"⏳ Retrying in {delay} seconds...")
             time.sleep(delay)
-            delay *= 2  # Exponential backoff
+            delay *= 2
 
 @op
 def extract_car_data():
-    # now = datetime.now()
-
-    # start_time = now - timedelta(days=1)
-    # end_time = now
-
-    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
-    
+    # ปรับช่วงเวลาได้ตามต้องการ
     start_str = '2025-01-01'
-    end_str = '2025-08-06'
-    
-    # print(f"🔍 Querying data from {start_str} to {end_str}")
+    end_str = '2025-08-09'
 
-    # ✅ ตรวจสอบการเชื่อมต่อฐานข้อมูลก่อน
     try:
         with source_engine.connect() as conn:
-            # ตรวจสอบว่าตารางมีอยู่หรือไม่
             inspector = inspect(conn)
             tables = inspector.get_table_names()
-            # print(f"🔍 Available tables: {tables}")
-            
             if 'fin_system_pay' not in tables:
                 print("❌ ERROR: Table 'fin_system_pay' not found!")
                 return pd.DataFrame()
             if 'fin_system_select_plan' not in tables:
                 print("❌ ERROR: Table 'fin_system_select_plan' not found!")
                 return pd.DataFrame()
-            
-            # ✅ ตรวจสอบจำนวนข้อมูลในตารางแบบจำกัดเวลา
-            count_pay = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN '{start_str}' AND '{end_str}'")).scalar()
-            count_plan = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN '{start_str}' AND '{end_str}'")).scalar()
+
+            count_pay = conn.execute(
+                text("SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN :s AND :e"),
+                {"s": start_str, "e": end_str}
+            ).scalar()
+            count_plan = conn.execute(
+                text("SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN :s AND :e"),
+                {"s": start_str, "e": end_str}
+            ).scalar()
             print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
-            
-            # ✅ ถ้าไม่มีข้อมูลใน 7 วัน ให้ลอง 3 วัน
+
             if count_pay == 0 and count_plan == 0:
                 print("⚠️ No data in 7 days, trying 3 days...")
                 now = datetime.now()
-                start_time_3 = now - timedelta(days=3)
-                start_str_3 = start_time_3.strftime('%Y-%m-%d %H:%M:%S')
-                count_pay_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN '{start_str_3}' AND '{end_str}'")).scalar()
-                count_plan_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN '{start_str_3}' AND '{end_str}'")).scalar()
-                
+                start_str_3 = (now - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+                count_pay_3 = conn.execute(
+                    text("SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN :s AND :e"),
+                    {"s": start_str_3, "e": end_str}
+                ).scalar()
+                count_plan_3 = conn.execute(
+                    text("SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN :s AND :e"),
+                    {"s": start_str_3, "e": end_str}
+                ).scalar()
+
                 if count_pay_3 > 0 or count_plan_3 > 0:
                     print(f"✅ Found data in 3 days - fin_system_pay: {count_pay_3}, fin_system_select_plan: {count_plan_3}")
                     start_str = start_str_3
-                    start_time = start_time_3
                 else:
                     print("⚠️ No data in 3 days, using last 1000 records")
-                    # ใช้ LIMIT 1000 แทนการ query ข้อมูลทั้งหมด
                     start_str = None
                     end_str = None
-            
     except Exception as e:
         print(f"❌ ERROR connecting to database: {e}")
         return pd.DataFrame()
 
-    # ✅ ปรับ query ให้มีประสิทธิภาพมากขึ้น
     if start_str and end_str:
         query_pay = f"""
             SELECT quo_num, id_motor1, id_motor2, update_at
             FROM fin_system_pay
             WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
-            -- AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
         """
-        
         query_plan = f"""
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
                    weight_car, cc_car, color_car, update_at
             FROM fin_system_select_plan
             WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
-            -- AND type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
         """
     else:
-        # ✅ ใช้ LIMIT แทนการ query ข้อมูลทั้งหมด
         query_pay = """
             SELECT quo_num, id_motor1, id_motor2, update_at
             FROM fin_system_pay
-            -- WHERE type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
             LIMIT 1000
         """
-        
         query_plan = """
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
                    weight_car, cc_car, color_car, update_at
             FROM fin_system_select_plan
-            -- WHERE type_insure IN ('ประกันรถ', 'ตรอ')
             ORDER BY update_at DESC
             LIMIT 1000
         """
-    
+
     try:
-        # ✅ ใช้ DBAPI connection แทน SQLAlchemy connection
         with source_engine.connect() as conn:
             df_pay = pd.read_sql(query_pay, conn.connection)
         print(f"📦 df_pay: {df_pay.shape}")
@@ -170,7 +149,6 @@ def extract_car_data():
         df_pay = pd.DataFrame()
 
     try:
-        # ✅ ใช้ DBAPI connection แทน SQLAlchemy connection
         with source_engine.connect() as conn:
             df_plan = pd.read_sql(query_plan, conn.connection)
         print(f"📦 df_plan: {df_plan.shape}")
@@ -178,12 +156,9 @@ def extract_car_data():
         print(f"❌ ERROR querying fin_system_select_plan: {e}")
         df_plan = pd.DataFrame()
 
-    # ✅ Merge ข้อมูลแบบมีประสิทธิภาพ
     if not df_pay.empty and not df_plan.empty:
-        # ✅ ลบ duplicates ก่อน merge
         df_pay = df_pay.drop_duplicates(subset=['quo_num'], keep='first')
         df_plan = df_plan.drop_duplicates(subset=['quo_num'], keep='first')
-        
         df_merged = pd.merge(df_pay, df_plan, on='quo_num', how='left')
         print(f"📊 After merge: {df_merged.shape}")
     elif not df_pay.empty:
@@ -195,56 +170,45 @@ def extract_car_data():
     else:
         print("❌ No data found in both tables")
         df_merged = pd.DataFrame()
-    
-    # ✅ ลบ duplicates ครั้งเดียว
+
     if not df_merged.empty:
         df_merged = df_merged.drop_duplicates()
         print(f"📊 After removing duplicates: {df_merged.shape}")
-    
-    # ✅ ตรวจสอบข้อมูลที่สำคัญ
+
     if 'id_motor2' in df_merged.columns:
         valid_car_ids = df_merged['id_motor2'].notna().sum()
         print(f"✅ Valid car_ids: {valid_car_ids}/{len(df_merged)}")
-    
+
     return df_merged
 
 @op
 def clean_car_data(df: pd.DataFrame):
-    # ✅ ตรวจสอบว่า DataFrame ว่างเปล่าหรือไม่
     if df.empty:
         print("⚠️ WARNING: Input DataFrame is empty!")
-        print("🔍 Returning empty DataFrame with expected columns")
-        # สร้าง DataFrame ว่างที่มีคอลัมน์ที่คาดหวัง
         expected_columns = [
-            'quotation_num', 'car_id', 'engine_number', 'car_registration', 
-            'car_province', 'camera', 'car_no', 'car_brand', 'car_series', 
-            'car_subseries', 'car_year', 'car_detail', 'vehicle_group', 
-            'vehbodytypedesc', 'seat_count', 'vehicle_weight', 'engine_capacity', 
+            'quotation_num', 'car_id', 'engine_number', 'car_registration',
+            'car_province', 'camera', 'car_no', 'car_brand', 'car_series',
+            'car_subseries', 'car_year', 'car_detail', 'vehicle_group',
+            'vehbodytypedesc', 'seat_count', 'vehicle_weight', 'engine_capacity',
             'vehicle_color'
         ]
         return pd.DataFrame(columns=expected_columns)
-    
+
     print(f"🔍 Starting data cleaning with {len(df)} records")
-    
-    # ✅ ตรวจสอบว่าคอลัมน์ที่จำเป็นมีอยู่หรือไม่
+
     required_cols = ['id_motor2', 'idcar', 'quo_num']
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
         print(f"⚠️ WARNING: Missing required columns: {missing_cols}")
-        print(f"🔍 Available columns: {list(df.columns)}")
-        # ใช้คอลัมน์ที่มีอยู่เท่านั้น
-        available_cols = [col for col in required_cols if col in df.columns]
-        if not available_cols:
+        if not any(col in df.columns for col in required_cols):
             print("❌ ERROR: No required columns found!")
             return pd.DataFrame()
-    
-    # ✅ ลบ duplicates ครั้งเดียว
+
     print(f"📊 Before removing duplicates: {df.shape}")
     if 'id_motor2' in df.columns:
         df = df.drop_duplicates(subset=['id_motor2'], keep='first')
         print(f"📊 After removing id_motor2 duplicates: {df.shape}")
-    
-    # ✅ ลบคอลัมน์ update_at ที่ซ้ำ
+
     df = df.drop(columns=['update_at_x', 'update_at_y'], errors='ignore')
 
     rename_columns = {
@@ -268,28 +232,15 @@ def clean_car_data(df: pd.DataFrame):
         "color_car": "vehicle_color"
     }
 
-    # ✅ เปลี่ยนชื่อเฉพาะคอลัมน์ที่มีอยู่
-    existing_columns = [col for col in rename_columns.keys() if col in df.columns]
+    existing_columns = [c for c in rename_columns if c in df.columns]
     if existing_columns:
-        rename_dict = {col: rename_columns[col] for col in existing_columns}
-        df = df.rename(columns=rename_dict)
-        print(f"✅ Renamed {len(existing_columns)} columns: {list(rename_dict.values())}")
-    else:
-        print("⚠️ WARNING: No columns to rename found!")
-        print(f"🔍 Available columns: {list(df.columns)}")
-    
-    # ✅ ตรวจสอบว่าการเปลี่ยนชื่อคอลัมน์ทำงานถูกต้อง
-    print("🔍 Column renaming check:")
-    if 'car_id' in df.columns:
-        car_id_count = df['car_id'].notna().sum()
-        print(f"✅ car_id column exists with {car_id_count} valid values")
-    else:
-        print("⚠️ WARNING: car_id column not found after renaming!")
-        print(f"🔍 Available columns: {list(df.columns)}")
-        # สร้างคอลัมน์ car_id ว่างถ้าไม่มี
+        df = df.rename(columns={c: rename_columns[c] for c in existing_columns})
+        print(f"✅ Renamed {len(existing_columns)} columns")
+
+    if 'car_id' not in df.columns:
+        print("⚠️ WARNING: car_id column not found after renaming! Creating empty column.")
         df['car_id'] = None
-        print("➕ Created empty car_id column")
-    
+
     df = df.replace(r'^\s*$', pd.NA, regex=True)
     df_temp = df.replace(r'^\s*$', np.nan, regex=True)
     df['non_empty_count'] = df_temp.notnull().sum(axis=1)
@@ -297,71 +248,43 @@ def clean_car_data(df: pd.DataFrame):
     valid_mask = df['car_id'].astype(str).str.strip().ne('') & df['car_id'].notna()
     df_with_id = df[valid_mask]
     df_without_id = df[~valid_mask]
-    print(f"📊 Records with valid car_id: {len(df_with_id)}")
-    print(f"📊 Records without car_id: {len(df_without_id)}")
-    
+    print(f"📊 Records with valid car_id: {len(df_with_id)} / without: {len(df_without_id)}")
+
     df_with_id_cleaned = df_with_id.sort_values('non_empty_count', ascending=False).drop_duplicates(subset='car_id', keep='first')
-    print(f"📊 After removing car_id duplicates: {len(df_with_id_cleaned)}")
-    
-    df_cleaned = pd.concat([df_with_id_cleaned, df_without_id], ignore_index=True)
-    df_cleaned = df_cleaned.drop(columns=['non_empty_count'])
-
+    df_cleaned = pd.concat([df_with_id_cleaned, df_without_id], ignore_index=True).drop(columns=['non_empty_count'])
     df_cleaned.columns = df_cleaned.columns.str.lower()
-    
-    # ✅ ตรวจสอบว่าคอลัมน์ car_id ยังคงอยู่หลังจากเปลี่ยนเป็นตัวพิมพ์เล็ก
-    print("🔍 After converting columns to lowercase:")
-    if 'car_id' in df_cleaned.columns:
-        car_id_count = df_cleaned['car_id'].notna().sum()
-        print(f"✅ car_id column exists with {car_id_count} valid values")
-    else:
-        print("⚠️ WARNING: car_id column not found after lowercase conversion!")
-        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        # สร้างคอลัมน์ car_id ว่างถ้าไม่มี
-        df_cleaned['car_id'] = None
-        print("➕ Created empty car_id column after lowercase conversion")
 
-    df_cleaned['seat_count'] = df_cleaned['seat_count'].replace("อื่นๆ", np.nan)
-    df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce')
-
-    province_list = ["กรุงเทพมหานคร", "กระบี่", "กาญจนบุรี", "กาฬสินธุ์", "กำแพงเพชร",
-        "ขอนแก่น", "จันทบุรี", "ฉะเชิงเทรา", "ชลบุรี", "ชัยนาท", "ชัยภูมิ",
-        "ชุมพร", "เชียงใหม่", "เชียงราย", "ตรัง", "ตราด", "ตาก", "นครนายก",
-        "นครปฐม", "นครพนม", "นครราชสีมา", "นครศรีธรรมราช", "นครสวรรค์",
-        "นนทบุรี", "นราธิวาส", "น่าน", "บึงกาฬ", "บุรีรัมย์", "ปทุมธานี",
-        "ประจวบคีรีขันธ์", "ปราจีนบุรี", "ปัตตานี", "พระนครศรีอยุธยา",
-        "พังงา", "พัทลุง", "พิจิตร", "พิษณุโลก", "เพชรบุรี", "เพชรบูรณ์",
-        "แพร่", "พะเยา", "ภูเก็ต", "มหาสารคาม", "มุกดาหาร", "แม่ฮ่องสอน",
-        "ยะลา", "ยโสธร", "ระนอง", "ระยอง", "ราชบุรี", "ร้อยเอ็ด", "ลพบุรี",
-        "ลำปาง", "ลำพูน", "เลย", "ศรีสะเกษ", "สกลนคร", "สงขลา", "สตูล",
-        "สมุทรปราการ", "สมุทรสงคราม", "สมุทรสาคร", "สระแก้ว", "สระบุรี",
-        "สิงห์บุรี", "สุโขทัย", "สุพรรณบุรี", "สุราษฎร์ธานี", "สุรินทร์",
-        "หนองคาย", "หนองบัวลำภู", "อ่างทอง", "อุดรธานี", "อุทัยธานี",
-        "อุตรดิตถ์", "อุบลราชธานี", "อำนาจเจริญ"]
+    # ทำความสะอาดค่า
+    province_list = ["กรุงเทพมหานคร","กระบี่","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร",
+        "ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี","ชัยนาท","ชัยภูมิ",
+        "ชุมพร","เชียงใหม่","เชียงราย","ตรัง","ตราด","ตาก","นครนายก",
+        "นครปฐม","นครพนม","นครราชสีมา","นครศรีธรรมราช","นครสวรรค์",
+        "นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี",
+        "ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา",
+        "พังงา","พัทลุง","พิจิตร","พิษณุโลก","เพชรบุรี","เพชรบูรณ์",
+        "แพร่","พะเยา","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน",
+        "ยะลา","ยโสธร","ระนอง","ระยอง","ราชบุรี","ร้อยเอ็ด","ลพบุรี",
+        "ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา","สตูล",
+        "สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี",
+        "สิงห์บุรี","สุโขทัย","สุพรรณบุรี","สุราษฎร์ธานี","สุรินทร์",
+        "หนองคาย","หนองบัวลำภู","อ่างทอง","อุดรธานี","อุทัยธานี",
+        "อุตรดิตถ์","อุบลราชธานี","อำนาจเจริญ"]
 
     def extract_clean_plate(value):
         if pd.isnull(value) or str(value).strip() == "":
             return None
-        
         try:
-            # แบ่งด้วย / และเอาแค่ส่วนแรก
             parts = re.split(r'[\/]', str(value).strip())
             if not parts or not parts[0]:
                 return None
-            
-            # แบ่งด้วยช่องว่างและเอาแค่ส่วนแรก
             words = parts[0].split()
             if not words:
                 return None
-            
-            text = words[0]
-            
-            # ลบชื่อจังหวัดออก
+            textv = words[0]
             for prov in province_list:
-                if prov in text:
-                    text = text.replace(prov, "").strip()
-            
-            # ตรวจสอบรูปแบบทะเบียนรถ
-            reg_match = re.match(r'^((?:\d{1,2})?[ก-ฮ]{1,3}\d{1,4})', text)
+                if prov in textv:
+                    textv = textv.replace(prov, "").strip()
+            reg_match = re.match(r'^((?:\d{1,2})?[ก-ฮ]{1,3}\d{1,4})', textv)
             if reg_match:
                 final_plate = reg_match.group(1).replace('-', '')
                 match_two_digits = re.match(r'^(\d{2})([ก-ฮ].*)$', final_plate)
@@ -370,793 +293,245 @@ def clean_car_data(df: pd.DataFrame):
                 if final_plate.startswith("0"):
                     final_plate = final_plate[1:]
                 return final_plate
-            else:
-                return None
-        except (IndexError, AttributeError, TypeError) as e:
-            # ถ้าเกิด error ให้ return None
+            return None
+        except (IndexError, AttributeError, TypeError):
             return None
 
-    df_cleaned['car_registration'] = df_cleaned['car_registration'].apply(extract_clean_plate)
+    if 'car_registration' in df_cleaned.columns:
+        df_cleaned['car_registration'] = df_cleaned['car_registration'].apply(extract_clean_plate)
 
-    # ✅ ปรับ pattern ใหม่: รองรับ "-", ".", "none", "NaN", "UNDEFINE", "undefined"
     pattern_to_none = r'^[-\.]+$|^(?i:none|nan|undefine|undefined)$'
     df_cleaned = df_cleaned.replace(pattern_to_none, np.nan, regex=True)
 
-    # ✅ ทำความสะอาด engine_number ให้มีเฉพาะ A-Z, a-z, 0-9
-    def clean_engine_number(value):
-        if pd.isnull(value):
+    def clean_engine_number(v):
+        if pd.isnull(v):
             return None
-        cleaned = re.sub(r'[^A-Za-z0-9]', '', str(value))
+        cleaned = re.sub(r'[^A-Za-z0-9]', '', str(v))
         return cleaned if cleaned else None
 
-    df_cleaned['engine_number'] = df_cleaned['engine_number'].apply(clean_engine_number)
+    if 'engine_number' in df_cleaned.columns:
+        df_cleaned['engine_number'] = df_cleaned['engine_number'].apply(clean_engine_number)
 
-    # ✅ ทำความสะอาด car_province ให้มีเฉพาะจังหวัด
-    def clean_province(value):
-        if pd.isnull(value):
-            return None
-        value = str(value).strip()
-        if value in province_list:
-            return value
-        return None
+    def has_thai_chars(v):
+        if pd.isnull(v):
+            return False
+        return bool(re.search(r'[ก-๙]', str(v)))
 
-    if 'car_province' in df_cleaned.columns:
-        df_cleaned['car_province'] = df_cleaned['car_province'].apply(clean_province)
-    else:
-        print("⚠️ Column 'car_province' not found in DataFrame")
-        
-    # ✅ ฟังก์ชันสำหรับลบ space และเครื่องหมายพิเศษหน้าข้อมูล
-    def clean_leading_spaces(value):
-        if pd.isnull(value):
-            return value
-        value = str(value).strip()
-        # ลบ space และเครื่องหมายพิเศษที่อยู่ด้านหน้า
-        value = re.sub(r'^[\s\-–_\.\/\+"\']+', '', value)
-        # ลบช่องว่างที่ซ้ำกัน
-        value = re.sub(r'\s+', ' ', value)
-        # ลบช่องว่างที่ต้นและท้าย
-        return value.strip()
-    
-    # ✅ แทนที่ applymap ที่ deprecated ด้วย map และลบ space หน้าข้อมูล
+    # ตัด car_id ที่มีตัวไทย
+    df_cleaned = df_cleaned[~df_cleaned['car_id'].apply(has_thai_chars)]
+
+    # ล้าง space / ตัวพิเศษทุกคอลัมน์ string
     for col in df_cleaned.columns:
         if df_cleaned[col].dtype == 'object':
             df_cleaned[col] = df_cleaned[col].map(lambda x: x.strip() if isinstance(x, str) else x)
-            # ลบ space และเครื่องหมายพิเศษที่อยู่ด้านหน้าข้อมูล
             df_cleaned[col] = df_cleaned[col].map(lambda x: re.sub(r'^[\s\-–_\.\/\+"\']+', '', str(x)) if isinstance(x, str) else x)
-            # ลบช่องว่างที่ซ้ำกัน
             df_cleaned[col] = df_cleaned[col].map(lambda x: re.sub(r'\s+', ' ', str(x)).strip() if isinstance(x, str) else x)
-    
-    # if 'car_brand' in df_cleaned.columns:
-    #     df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
-        
-    # if 'car_brand' in df_cleaned.columns:
-    #     df_cleaned['car_brand'] = df_cleaned['car_brand'].replace("-", np.nan)
 
-    def has_thai_chars(value):
-        if pd.isnull(value):
-            return False
-        return bool(re.search(r'[ก-๙]', str(value)))
+    # ปรับชื่อ/แปล brand/series/subseries
+    def remove_leading_vowels(v):
+        if pd.isnull(v): return v
+        v = str(v).strip()
+        v = re.sub(r"^[\u0E30-\u0E39\u0E47-\u0E4E\u0E3A\s\-_\.\/\+]+", "", v)
+        v = re.sub(r'\s+', ' ', v)
+        return v.strip()
 
-    df_cleaned = df_cleaned[~df_cleaned['car_id'].apply(has_thai_chars)]
-    
-    series_noise_pattern = r"^[_\.\/\+].*|^<=200CC$|^>250CC$|^‘NQR 75$"
-
-    # ✅ ตรวจสอบว่าคอลัมน์ car_series และ car_subseries มีอยู่หรือไม่
-    if 'car_series' in df_cleaned.columns:
-        df_cleaned['car_series'] = df_cleaned['car_series'].replace(series_noise_pattern, np.nan, regex=True)
-
-    else:
-        print("⚠️ Column 'car_series' not found in DataFrame")
-        
-    if 'car_subseries' in df_cleaned.columns:
-        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].replace(series_noise_pattern, np.nan, regex=True)
-    else:
-        print("⚠️ Column 'car_subseries' not found in DataFrame")
-
-    def remove_leading_vowels(value):
-        if pd.isnull(value):
-            return value
-        # ลบสระและเครื่องหมายกำกับไทยต้นข้อความ รวมถึง space และเครื่องหมายพิเศษ
-        value = str(value).strip()
-        # ลบสระและเครื่องหมายกำกับไทยที่อยู่ด้านหน้า
-        value = re.sub(r"^[\u0E30-\u0E39\u0E47-\u0E4E\u0E3A\s\-_\.\/\+]+", "", value)
-        # ลบช่องว่างที่ซ้ำกัน
-        value = re.sub(r'\s+', ' ', value)
-        # ลบช่องว่างที่ต้นและท้ายอีกครั้ง
-        return value.strip()
-    
-
-    # ✅ แปลงชื่อยี่ห้อรถจากภาษาไทยเป็นภาษาอังกฤษ
-    def translate_car_brand(value):
-        if pd.isnull(value):
-            return None
-        
-        value = str(value).strip()
-        
-        # แปลงชื่อยี่ห้อรถจากภาษาไทยเป็นภาษาอังกฤษ
+    def translate_car_brand(v):
+        if pd.isnull(v): return None
+        v = str(v).strip()
         brand_translations = {
-            'ยามาฮ่า': 'Yamaha',
-            'ฮอนด้า': 'Honda',
-            'เวสป้า': 'Vespa',
-            'คาวาซากิ': 'Kawasaki',
-            'Kavasaki': 'Kawasaki',
-            'Mitsubushi Fuso': 'Mitsubishi Fuso',
-            'Peugeot': 'Peugeot',
-            'Roya Enfield': 'Royal Enfield',
-            'Ssang Yong': 'SsangYong',
-            'Stallions': 'Stallion',
-            'Takano': 'Tadano',
-            'Toyata':'Toyota',
-            'Zontes':'Zonetes',
-            'บีเอ็มดับบลิว': 'BMW',
-            'B.M.W': 'BMW',
-            'totota': 'Toyota',
-            'ไทเกอร์': 'Tiger',
-            'FORO': 'Ford',
-            'FORD': 'Ford',
-            'ฮาร์เลย์ เดวิดสัน': 'Harley Davidson',
-            'Alfaromeo': 'Alfa Romeo',
-            '-':'ไม่ระบุ',
-            '–':'ไม่ระบุ',
-            'N/A':'ไม่ระบุ'
+            'ยามาฮ่า': 'Yamaha','ฮอนด้า': 'Honda','เวสป้า': 'Vespa','คาวาซากิ': 'Kawasaki',
+            'Kavasaki': 'Kawasaki','Mitsubushi Fuso': 'Mitsubishi Fuso','Peugeot': 'Peugeot',
+            'Roya Enfield': 'Royal Enfield','Ssang Yong': 'SsangYong','Stallions': 'Stallion',
+            'Takano': 'Tadano','Toyata':'Toyota','Zontes':'Zonetes','บีเอ็มดับบลิว': 'BMW',
+            'B.M.W': 'BMW','totota': 'Toyota','ไทเกอร์': 'Tiger','FORO': 'Ford','FORD': 'Ford',
+            'ฮาร์เลย์ เดวิดสัน': 'Harley Davidson','Alfaromeo': 'Alfa Romeo',
+            '-':'ไม่ระบุ','–':'ไม่ระบุ','N/A':'ไม่ระบุ'
         }
-        
-        # ตรวจสอบและแปลงชื่อยี่ห้อ
-        for thai_brand, english_brand in brand_translations.items():
-            if thai_brand.lower() in value.lower():
-                return english_brand
-        
-        return value
-    
-    # ✅ ฟังก์ชันใหม่สำหรับจัดการการพิมพ์ตัวอักษรและเพิ่ม space
-    def format_car_name(value):
-        if pd.isnull(value):
-            return None
-        
-        value = str(value).strip()
-        
-        # ถ้าค่าว่างหรือไม่มีข้อมูล ให้ return None
-        if value in ['', 'nan', 'None', 'NULL', 'undefined', 'UNDEFINED']:
-            return None
-        
-        # ลบ space และเครื่องหมายพิเศษที่อยู่ด้านหน้าและท้าย
-        value = re.sub(r'^[\s\_\.\/\+"\']+', '', value)
-        value = re.sub(r'[\s\_\.\/\+"\']+$', '', value)
-        value = value.strip()
-        
-        # ถ้าค่าว่างหลังจากทำความสะอาด ให้ return None
-        if not value:
-            return None
-        
-        # แปลงเป็นตัวพิมพ์เล็กทั้งหมดก่อน
-        value = value.lower()
-        
-        # เพิ่ม space ระหว่างตัวพิมพ์ใหญ่และตัวพิมพ์เล็ก (เช่น ALFAROMEO -> ALFA ROMEO)
-        value = re.sub(r'([a-z])([A-Z])', r'\1 \2', value)
-        
-        # เพิ่ม space ระหว่างตัวอักษรที่ติดกัน (เช่น ALFAROMEO -> ALFA ROMEO)
-        value = re.sub(r'([a-z])([a-z])([A-Z])', r'\1\2 \3', value)
-        
-        # แปลงเป็น Title Case (ตัวแรกเป็นตัวพิมพ์ใหญ่ที่เหลือเป็นตัวพิมพ์เล็ก)
-        value = value.title()
-        
-        # จัดการกรณีพิเศษแบบอัตโนมัติ
-        # 1. ชื่อยี่ห้อสั้นที่ต้องเป็นตัวพิมพ์ใหญ่ทั้งหมด (เช่น BMW, RAM, GMC)
-        if len(value) <= 3 and value.isalpha():
-            return value.upper()
-        
-        # 2. รูปแบบรุ่นรถที่ต้องเป็นตัวพิมพ์ใหญ่ (เช่น GT3, GT2, RS, GTS, Turbo)
-        model_patterns = [
-            r'^gt\d+$',  # GT3, GT2, GT1, etc.
-            r'^rs$',     # RS
-            r'^gts$',    # GTS
-            r'^turbo$',  # Turbo
-            r'^spyder$', # Spyder
-            r'^targa$',  # Targa
-            r'^carrera$', # Carrera
-            r'^boxster$', # Boxster
-            r'^cayman$',  # Cayman
-            r'^macan$',   # Macan
-            r'^cayenne$', # Cayenne
-            r'^panamera$', # Panamera
-            r'^taycan$',  # Taycan
-            r'^918$',     # 918
-            r'^911$',     # 911
-            r'^suv$',     # SUV
-            r'^mpv$',     # MPV
-            r'^sedan$',   # Sedan
-            r'^hatchback$', # Hatchback
-            r'^wagon$',   # Wagon
-            r'^coupe$',   # Coupe
-            r'^roadster$', # Roadster
-            r'^convertible$', # Convertible
-            r'^cabriolet$', # Cabriolet
-            r'^pickup$',  # Pickup
-            r'^van$',     # Van
-            r'^minivan$', # Minivan
-            r'^crossover$', # Crossover
-            r'^supercar$', # Supercar
-            r'^hypercar$', # Hypercar
-            r'^muscle car$', # Muscle Car
-            r'^hot hatch$', # Hot Hatch
-            r'^sports car$', # Sports Car
-            r'^luxury car$', # Luxury Car
-            r'^grand tourer$', # Grand Tourer
-        ]
-        
-        for pattern in model_patterns:
-            if re.match(pattern, value.lower()):
-                return value.upper()
+        for th,en in brand_translations.items():
+            if th.lower() in v.lower():
+                return en
+        return v
 
-        return value
+    def format_car_name(v):
+        if pd.isnull(v): return None
+        v = str(v).strip()
+        if v in ['', 'nan', 'None', 'NULL', 'undefined', 'UNDEFINED']:
+            return None
+        v = re.sub(r'^[\s\_\.\/\+"\']+', '', v)
+        v = re.sub(r'[\s\_\.\/\+"\']+$', '', v)
+        if not v: return None
+        v = v.lower()
+        v = re.sub(r'([a-z])([A-Z])', r'\1 \2', v)
+        v = re.sub(r'([a-z])([a-z])([A-Z])', r'\1\2 \3', v)
+        v = v.title()
+        if len(v) <= 3 and v.isalpha():
+            return v.upper()
+        return v
 
     if 'car_series' in df_cleaned.columns:
-        df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels)
-        # ✅ แปลงชื่อยี่ห้อรถจากภาษาไทยเป็นภาษาอังกฤษใน car_series
-        df_cleaned['car_series'] = df_cleaned['car_series'].apply(translate_car_brand)
-        # ✅ จัดการการพิมพ์ตัวอักษรและเพิ่ม space
-        df_cleaned['car_series'] = df_cleaned['car_series'].apply(format_car_name)
-        
+        df_cleaned['car_series'] = df_cleaned['car_series'].apply(remove_leading_vowels).apply(translate_car_brand).apply(format_car_name)
     if 'car_subseries' in df_cleaned.columns:
-        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels)
-        # ✅ แปลงชื่อยี่ห้อรถจากภาษาไทยเป็นภาษาอังกฤษใน car_subseries
-        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(translate_car_brand)
-        # ✅ จัดการการพิมพ์ตัวอักษรและเพิ่ม space
-        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(format_car_name)
-    
-    # ✅ ทำความสะอาด car_brand
+        df_cleaned['car_subseries'] = df_cleaned['car_subseries'].apply(remove_leading_vowels).apply(translate_car_brand).apply(format_car_name)
     if 'car_brand' in df_cleaned.columns:
-        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(remove_leading_vowels)
-        # ✅ แปลงชื่อยี่ห้อรถจากภาษาไทยเป็นภาษาอังกฤษ
-        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(translate_car_brand)
-        # ✅ จัดการการพิมพ์ตัวอักษรและเพิ่ม space
-        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(format_car_name)
-    else:
-        print("⚠️ Column 'car_brand' not found in DataFrame")
-    
-    # ✅ ทำความสะอาด space สำหรับคอลัมน์อื่นๆ ที่สำคัญ
-    if 'car_detail' in df_cleaned.columns:
-        df_cleaned['car_detail'] = df_cleaned['car_detail'].apply(format_car_name)
-        
-        df_cleaned['car_detail'] = df_cleaned['car_detail'].replace({
-            'มี': 'มีการต่อเติม',
-            'ไม่มี': 'ไม่มีการต่อเติม'
-        })
-    
-    if 'vehicle_color' in df_cleaned.columns:
-        df_cleaned['vehicle_color'] = df_cleaned['vehicle_color'].apply(format_car_name)
+        df_cleaned['car_brand'] = df_cleaned['car_brand'].apply(remove_leading_vowels).apply(translate_car_brand).apply(format_car_name)
 
-    # ✅ ใช้ format_car_name สำหรับ car_no
-    if 'car_no' in df_cleaned.columns:
-        df_cleaned['car_no'] = df_cleaned['car_no'].apply(format_car_name)
-        # df_cleaned['car_no'] = df_cleaned['car_no'].replace("ไม่มี", np.nan)
-    else:
-        print("⚠️ Column 'car_no' not found in DataFrame")
-
-    # ✅ ทำความสะอาด vehbodytypedesc ให้เก็บแค่ภาษาไทย
-    def clean_vehbodytypedesc_thai(value):
-        if pd.isnull(value):
-            return None
-        
-        value = str(value).strip()
-        
-        # ถ้าค่าว่างหรือไม่มีข้อมูล ให้ return None
-        if value in ['', 'nan', 'None', 'NULL', 'undefined', 'UNDEFINED']:
-            return None
-        
-        # ลบ space และเครื่องหมายพิเศษที่อยู่ด้านหน้าและท้าย
-        value = re.sub(r'^[\s\_\.\/\+"\']+', '', value)
-        value = re.sub(r'[\s\_\.\/\+"\']+$', '', value)
-        value = value.strip()
-        
-        # ถ้าค่าว่างหลังจากทำความสะอาด ให้ return None
-        if not value:
-            return None
-        
-        # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
-        if not re.search(r'[ก-๙]', value):
-            # ถ้าไม่มีตัวอักษรไทย ให้ return None
-            return None
-        
-        # ลบตัวอักษรภาษาอังกฤษและตัวเลขออก เหลือแค่ภาษาไทย
-        value = re.sub(r'[a-zA-Z0-9]', '', value)
-        
-        # ลบช่องว่างที่ซ้ำกัน
-        value = re.sub(r'\s+', ' ', value)
-        
-        # ลบช่องว่างที่ต้นและท้าย
-        value = value.strip()
-        
-        # ถ้าค่าว่างหลังจากทำความสะอาด ให้ return None
-        if not value:
-            return None
-        
-        return value
+    def clean_vehbodytypedesc_thai(v):
+        if pd.isnull(v): return None
+        v = str(v).strip()
+        if v in ['', 'nan', 'None', 'NULL', 'undefined', 'UNDEFINED']: return None
+        v = re.sub(r'^[\s\_\.\/\+"\']+', '', v)
+        v = re.sub(r'[\s\_\.\/\+"\']+$', '', v).strip()
+        if not v or not re.search(r'[ก-๙]', v): return None
+        v = re.sub(r'[a-zA-Z0-9]', '', v)
+        v = re.sub(r'\s+', ' ', v).strip()
+        return v or None
 
     if 'vehbodytypedesc' in df_cleaned.columns:
         df_cleaned['vehbodytypedesc'] = df_cleaned['vehbodytypedesc'].apply(clean_vehbodytypedesc_thai)
-        print("✅ Cleaned vehbodytypedesc to keep only Thai text")
-    else:
-        print("⚠️ Column 'vehbodytypedesc' not found in DataFrame")
 
-        # ✅ Debug: แสดงตัวอย่างการทำความสะอาด car_brand
-        print("🔍 Car brand cleaning examples:")
-        sample_brands = df_cleaned['car_brand'].dropna().head(10)
-        for brand in sample_brands:
-            print(f"   - {brand}")
-        
-        # ✅ แสดงสถิติ car_brand
-        brand_stats = df_cleaned['car_brand'].value_counts().head(10)
-        print("🔍 Top 10 car brands:")
-        for brand, count in brand_stats.items():
-            print(f"   - {brand}: {count}")
-    
-    # ✅ Debug: แสดงตัวอย่างการจัดการการพิมพ์ตัวอักษร
-    print("🔍 Text formatting examples:")
-    for col in ['car_brand', 'car_series', 'car_subseries']:
-        if col in df_cleaned.columns:
-            sample_values = df_cleaned[col].dropna().head(5)
-            if not sample_values.empty:
-                print(f"   {col}: {sample_values.tolist()}")
-    
-    # ✅ Debug: แสดงตัวอย่างการทำงานของ format_car_name
-    print("🔍 format_car_name function test:")
-    test_values = [' ALFAROMEO ', 'BMW', 'mercedes-benz', 'GT3RS', '4C', 'ID.3', 'e-up']
-    for test_val in test_values:
-        result = format_car_name(test_val)
-        print(f"   '{test_val}' → '{result}'")
-    
-    # ✅ Debug: แสดงตัวอย่างการลบ space
-    print("🔍 Space cleaning examples:")
-    for col in ['car_brand', 'car_series', 'car_subseries', 'car_detail', 'vehicle_color']:
-        if col in df_cleaned.columns:
-            sample_values = df_cleaned[col].dropna().head(3)
-            if not sample_values.empty:
-                print(f"   {col}: {sample_values.tolist()}")
-    
-    # ✅ Debug: แสดงตัวอย่างการทำความสะอาด car_detail
-    print("🔍 car_detail cleaning examples:")
-    if 'car_detail' in df_cleaned.columns:
-        sample_values = df_cleaned['car_detail'].dropna().head(5)
-        if not sample_values.empty:
-            print(f"   car_detail: {sample_values.tolist()}")
-        else:
-            print("   car_detail: No valid values found")
-    else:
-        print("   car_detail: Column not found")
+    def clean_float_only(v):
+        if pd.isnull(v): return None
+        v = str(v).strip()
+        v = re.sub(r'\.{2,}', '.', v)
+        if v in ['', '.', '-']: return None
+        try: return float(v)
+        except ValueError: return None
 
-    def clean_engine_capacity(value):
-        if pd.isnull(value):
-            return None
-        value = str(value).strip()
-        # ลบจุดซ้ำ เช่น "1..2" → "1.2"
-        value = re.sub(r'\.{2,}', '.', value)
-        # พยายามแปลงเป็น float
-        try:
-            float_val = float(value)
-            return float_val
-        except ValueError:
-            return None
-
-    if 'engine_capacity' in df_cleaned.columns:
-        df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_engine_capacity)
-    else:
-        print("⚠️ Column 'engine_capacity' not found in DataFrame")
-
-    def clean_float_only(value):
-        if pd.isnull(value):
-            return None
-        value = str(value).strip()
-        value = re.sub(r'\.{2,}', '.', value)
-        if value in ['', '.', '-']:
-            return None
-        try:
-            return float(value)
-        except ValueError:
-            return None
-
-    if 'engine_capacity' in df_cleaned.columns:
-        df_cleaned['engine_capacity'] = df_cleaned['engine_capacity'].apply(clean_float_only)
-    if 'vehicle_weight' in df_cleaned.columns:
-        df_cleaned['vehicle_weight'] = df_cleaned['vehicle_weight'].apply(clean_float_only)
-    else:
-        print("⚠️ Column 'vehicle_weight' not found in DataFrame")
+    for c in ['engine_capacity', 'vehicle_weight']:
+        if c in df_cleaned.columns:
+            df_cleaned[c] = df_cleaned[c].apply(clean_float_only)
     if 'seat_count' in df_cleaned.columns:
         df_cleaned['seat_count'] = df_cleaned['seat_count'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
-    else:
-        print("⚠️ Column 'seat_count' not found in DataFrame")
-    if 'car_year' in df_cleaned.columns:
-        df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
-    else:
-        print("⚠️ Column 'car_year' not found in DataFrame")
-
-    if 'seat_count' in df_cleaned.columns:
         df_cleaned['seat_count'] = pd.to_numeric(df_cleaned['seat_count'], errors='coerce').astype('Int64')
     if 'car_year' in df_cleaned.columns:
+        df_cleaned['car_year'] = df_cleaned['car_year'].apply(lambda x: int(clean_float_only(x)) if clean_float_only(x) is not None else None)
         df_cleaned['car_year'] = pd.to_numeric(df_cleaned['car_year'], errors='coerce').astype('Int64')
-    df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True)
-    df_cleaned = df_cleaned.drop_duplicates()
-    
-    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งหลังจากทำความสะอาดทั้งหมด
+
+    df_cleaned = df_cleaned.replace(r'NaN', np.nan, regex=True).drop_duplicates()
     if 'car_id' in df_cleaned.columns:
-        car_id_duplicates = df_cleaned['car_id'].duplicated()
-        if car_id_duplicates.any():
-            print(f"⚠️ WARNING: Found {car_id_duplicates.sum()} duplicate car_ids after cleaning!")
-            duplicate_ids = df_cleaned[car_id_duplicates]['car_id'].tolist()
-            print(f"🔍 Sample duplicate car_ids: {duplicate_ids[:5]}")
-            # ลบ duplicates
+        dups = df_cleaned['car_id'].duplicated()
+        if dups.any():
+            print(f"⚠️ WARNING: Found {dups.sum()} duplicate car_ids after cleaning! Dropping dups.")
             df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
-            print(f"📊 After removing final car_id duplicates: {df_cleaned.shape}")
 
-    # ✅ ตรวจสอบค่า NaN หลังการทำความสะอาด
-    print("🔍 NaN check after cleaning:")
-    final_nan_check = df_cleaned.isna().sum()
-    final_nan_cols = final_nan_check[final_nan_check > 0]
-    
-    if len(final_nan_cols) > 0:
-        print("⚠️ Columns with NaN after cleaning:")
-        for col, count in final_nan_cols.items():
-            percentage = (count / len(df_cleaned)) * 100
-            print(f"   - {col}: {count} NaN values ({percentage:.2f}%)")
-    else:
-        print("✅ No NaN values found after cleaning")
-    
-    # ✅ ตรวจสอบ car_id ที่เป็น NaN (สำคัญที่สุด)
     if 'car_id' in df_cleaned.columns:
-        car_id_nan = df_cleaned['car_id'].isna().sum()
-        total_records = len(df_cleaned)
-        print(f"🔍 car_id status: {total_records - car_id_nan}/{total_records} valid records")
-        
-        if car_id_nan > 0:
-            print(f"⚠️ WARNING: {car_id_nan} records have NaN car_id")
-            # ลบข้อมูลที่มี car_id เป็น NaN
+        nan_cnt = df_cleaned['car_id'].isna().sum()
+        if nan_cnt > 0:
             df_cleaned = df_cleaned[df_cleaned['car_id'].notna()].copy()
-            print(f"✅ Removed {car_id_nan} records with NaN car_id")
-            print(f"📊 Remaining records: {len(df_cleaned)}")
-            
-            # ตรวจสอบว่ายังมีข้อมูลเหลืออยู่หรือไม่
-            if len(df_cleaned) == 0:
-                print("⚠️ WARNING: No records remaining after removing NaN car_id!")
-                print("🔍 This means all records had NaN car_id values")
-                # ส่งคืน DataFrame ว่างแทนที่จะ raise error
-                return pd.DataFrame(columns=df_cleaned.columns)
-        else:
-            print("✅ All car_id values are valid")
+            print(f"✅ Removed {nan_cnt} records with NaN car_id")
     else:
-        print("⚠️ WARNING: Column 'car_id' not found in DataFrame!")
-        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        # สร้างคอลัมน์ car_id ว่าง
         df_cleaned['car_id'] = None
-        print("➕ Created empty car_id column")
-    
-    print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
-    
-    # ✅ ตรวจสอบว่าคอลัมน์ car_id ยังคงอยู่
-    if 'car_id' not in df_cleaned.columns:
-        print("⚠️ WARNING: Column 'car_id' is missing after cleaning!")
-        print(f"🔍 Available columns: {list(df_cleaned.columns)}")
-        # สร้างคอลัมน์ car_id ว่าง
-        df_cleaned['car_id'] = None
-        print("➕ Created empty car_id column after cleaning")
-    
-    # ✅ ตรวจสอบว่ามีข้อมูลใน car_id หรือไม่
-    car_id_count = df_cleaned['car_id'].notna().sum()
-    print(f"✅ Records with valid car_id: {car_id_count}/{len(df_cleaned)}")
-    
-    if car_id_count == 0:
-        print("⚠️ WARNING: No valid car_id records found!")
-        if len(df_cleaned) > 0:
-            print("🔍 Sample of car_id values:")
-            print(df_cleaned['car_id'].head(10))
-        else:
-            print("🔍 DataFrame is empty")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำครั้งสุดท้าย
-    if 'car_id' in df_cleaned.columns:
-        df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
-        print(f"📊 Final records after removing car_id duplicates: {len(df_cleaned)}")
 
+    print(f"📊 Final cleaned data shape: {df_cleaned.shape}")
+    print(f"✅ Records with valid car_id: {df_cleaned['car_id'].notna().sum()}/{len(df_cleaned)}")
+    df_cleaned = df_cleaned.drop_duplicates(subset=['car_id'], keep='first')
+    print(f"📊 Final records after removing car_id duplicates: {len(df_cleaned)}")
     return df_cleaned
+
+# ---------- NEW: Safe UPSERT & Force-update helpers ----------
+
+def upsert_batches(table, rows, key_col, update_cols, batch_size=5000):
+    """
+    UPSERT แบบ batch เปิด transaction ใหม่ต่อ batch
+    ถ้า batch ใด fail จะ rollback เฉพาะ batch นั้นแล้วไปต่อ
+    """
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i+batch_size]
+        try:
+            with target_engine.begin() as conn:  # NEW TX for each batch
+                stmt = pg_insert(table).values(batch).on_conflict_do_update(
+                    index_elements=[table.c[key_col]],
+                    set_={c: getattr(pg_insert(table).excluded, c) for c in update_cols}
+                )
+                conn.execute(stmt)
+            print(f"✅ Upserted batch {i//batch_size + 1}/{(len(rows)+batch_size-1)//batch_size} ({len(batch)} rows)")
+        except Exception as e:
+            print(f"❌ Upsert batch {i//batch_size + 1} failed: {e}")
+            # ไม่ใช้ conn ต่อ ปล่อย rollback แล้วไป batch ถัดไป
+
+def force_update_quotation_num(df, table_name, pk_column):
+    """
+    บังคับอัปเดต quotation_num เฉพาะแถวที่ df มีค่า (ไม่ใช่ NaN/None)
+    ใช้ executemany เป็น batch และเปิด TX ใหม่ทุกรอบ
+    """
+    if 'quotation_num' not in df.columns:
+        print("ℹ️ Column 'quotation_num' not in DataFrame, skip forcing")
+        return
+    pairs = df[[pk_column, 'quotation_num']].dropna(subset=['quotation_num']).to_dict(orient='records')
+    if not pairs:
+        print("ℹ️ No quotation_num present in DataFrame to force-update")
+        return
+
+    print(f"🔧 Forcing quotation_num update for {len(pairs)} rows (executemany by batch)")
+    batch_size = 2000
+    for i in range(0, len(pairs), batch_size):
+        batch = pairs[i:i+batch_size]
+        try:
+            with target_engine.begin() as conn:  # NEW TX per batch
+                conn.execute(
+                    text(f"UPDATE {table_name} SET quotation_num = :q WHERE {pk_column} = :k"),
+                    [{"q": r["quotation_num"], "k": r["car_id"]} for r in batch]
+                )
+            print(f"✅ Forced quotation_num batch {i//batch_size + 1}")
+        except Exception as e:
+            print(f"⚠️ Force-update batch {i//batch_size + 1} failed: {e}")
+            # Fallback per-row with AUTOCOMMIT เพื่อกัน TX ค้าง
+            with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                for r in batch:
+                    try:
+                        conn.execute(
+                            text(f"UPDATE {table_name} SET quotation_num = :q WHERE {pk_column} = :k"),
+                            {"q": r["quotation_num"], "k": r["car_id"]}
+                        )
+                    except Exception as ee:
+                        print(f"❌ Failed per-row PK={r['car_id']}: {ee}")
 
 @op
 def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
     pk_column = 'car_id'
 
-    # ✅ ตรวจสอบว่า DataFrame ว่างเปล่าหรือไม่
     if df.empty:
-        print("⚠️ WARNING: Input DataFrame is empty!")
-        print("🔍 Skipping database operations")
+        print("⚠️ WARNING: Input DataFrame is empty! Skipping DB ops")
         return
-    
-    # ✅ ตรวจสอบว่าคอลัมน์ car_id มีอยู่ใน DataFrame หรือไม่
-    print(f"🔍 Available columns in DataFrame: {list(df.columns)}")
-    print(f"🔍 DataFrame shape: {df.shape}")
-    
+
     if pk_column not in df.columns:
-        print(f"⚠️ WARNING: Column '{pk_column}' not found in DataFrame!")
-        print(f"🔍 Available columns: {list(df.columns)}")
-        print(f"📊 DataFrame info:")
-        print(df.info())
-        print("🔍 Skipping database operations due to missing primary key column")
+        print(f"⚠️ WARNING: Column '{pk_column}' not found in DataFrame! Skipping DB ops")
         return
-    
-    # ✅ ตรวจสอบว่าตารางมี column 'quotation_num' หรือไม่ — ถ้าไม่มีก็สร้าง
+
+    # ✅ ตรวจสอบ/เพิ่มคอลัมน์ quotation_num
     def check_and_add_column():
-        with target_engine.connect() as conn:
+        with target_engine.begin() as conn:
             inspector = inspect(conn)
-            columns = [col['name'] for col in inspector.get_columns(table_name)]
-            if 'quotation_num' not in columns:
+            cols = [c['name'] for c in inspector.get_columns(table_name)]
+            if 'quotation_num' not in cols:
                 print("➕ Adding missing column 'quotation_num' to dim_car")
-                conn.execute(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR')
-                conn.commit()
-    
+                conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR'))
     retry_db_operation(check_and_add_column)
 
-    # ✅ กรอง car_id ซ้ำจาก DataFrame ใหม่
+    # ✅ เตรียมข้อมูลสำหรับ upsert (ทั้ง insert+update ทำพร้อมกัน)
     df = df[~df[pk_column].duplicated(keep='first')].copy()
-    print(f"📊 After removing duplicates: {df.shape}")
+    df = df[df[pk_column].notna()].copy()
 
-    # ✅ ตรวจสอบค่า NaN ในข้อมูลก่อนเข้า database
-    print("🔍 Checking for NaN values before database insertion:")
-    nan_check = df.isna().sum()
-    columns_with_nan = nan_check[nan_check > 0]
-    
-    if len(columns_with_nan) > 0:
-        print("⚠️ Columns with NaN values:")
-        for col, count in columns_with_nan.items():
-            print(f"   - {col}: {count} NaN values")
-        
-        # แสดงตัวอย่างข้อมูลที่มี NaN
-        print("🔍 Sample records with NaN values:")
-        for col in columns_with_nan.index:
-            sample_nan = df[df[col].isna()][[pk_column, col]].head(3)
-            if not sample_nan.empty:
-                print(f"   {col} NaN examples:")
-                for _, row in sample_nan.iterrows():
-                    print(f"     - {pk_column}: {row[pk_column]}, {col}: NaN")
+    # โหลด metadata
+    metadata = MetaData()
+    table = Table(table_name, metadata, autoload_with=target_engine)
+
+    # ระบุคอลัมน์ที่จะอัปเดต (ยกเว้น PK และ audit fields)
+    exclude_cols = {pk_column, 'car_sk', 'create_at', 'update_at'}
+    update_cols = [c for c in df.columns if c not in exclude_cols]
+
+    rows_to_upsert = df.replace({np.nan: None}).to_dict(orient='records')
+    if rows_to_upsert:
+        print(f"🔄 Upsert total rows: {len(rows_to_upsert)}")
+        upsert_batches(table, rows_to_upsert, pk_column, update_cols, batch_size=5000)
     else:
-        print("✅ No NaN values found in the data")
-    
-    # ✅ ตรวจสอบข้อมูลที่สำคัญ (car_id ไม่ควรเป็น NaN)
-    critical_nan = df[pk_column].isna().sum()
-    if critical_nan > 0:
-        print(f"⚠️ WARNING: {critical_nan} records have NaN in {pk_column} (primary key)")
-        # ลบข้อมูลที่มี car_id เป็น NaN
-        df = df[df[pk_column].notna()].copy()
-        print(f"✅ Removed {critical_nan} records with NaN {pk_column}")
-    
-    print(f"📊 Final data shape after NaN check: {df.shape}")
-    
-    # ✅ ตรวจสอบว่ายังมีข้อมูลเหลืออยู่หรือไม่
-    if df.empty:
-        print("⚠️ WARNING: No valid data remaining after NaN check!")
-        print("🔍 Skipping database operations")
-        return
+        print("ℹ️ Nothing to upsert")
 
-    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
-    # today_str = datetime.now().strftime('%Y-%m-%d')
+    # ✅ บังคับคืนค่า quotation_num ให้แน่นอน
+    force_update_quotation_num(df, table_name, pk_column)
 
-    # ✅ Load ข้อมูลทั้งหมดจาก PostgreSQL เพื่อตรวจสอบ car_id ที่มีอยู่แล้ว
-    print("🔍 Loading existing data from database...")
-    with target_engine.connect() as conn:
-        df_existing = pd.read_sql(
-            f"SELECT {pk_column} FROM {table_name}",
-            conn
-        )
-
-    print(f"📊 Existing records in database: {len(df_existing)}")
-
-    # ✅ กรอง car_id ซ้ำจากข้อมูลเก่า
-    df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
-
-    # ✅ Identify car_id ใหม่ (ไม่มีใน DB)
-    new_ids = set(df[pk_column]) - set(df_existing[pk_column])
-    df_to_insert = df[df[pk_column].isin(new_ids)].copy()
-    print(f"🆕 New car_ids to insert: {len(df_to_insert)}")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลที่จะ insert
-    if not df_to_insert.empty:
-        df_to_insert = df_to_insert.drop_duplicates(subset=[pk_column], keep='first')
-        print(f"📊 After removing duplicates: {len(df_to_insert)} records to insert")
-
-    # ✅ Identify car_id ที่มีอยู่แล้ว
-    common_ids = set(df[pk_column]) & set(df_existing[pk_column])
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
-    print(f"🔄 Existing car_ids to update: {len(df_common_new)}")
-
-    # ✅ Merge ด้วย suffix (_new, _old) - เฉพาะเมื่อมีข้อมูลที่จะ update
-    if not df_common_new.empty and not df_common_old.empty:
-        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-        
-        # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-        exclude_columns = [pk_column, 'car_sk', 'create_at', 'update_at']
-        compare_cols = [
-            col for col in df.columns
-            if col not in exclude_columns
-            and f"{col}_new" in merged.columns
-            and f"{col}_old" in merged.columns
-        ]
-    else:
-        merged = pd.DataFrame()
-        compare_cols = []
-
-    # ✅ ตรวจสอบว่ามีคอลัมน์ที่สามารถเปรียบเทียบได้หรือไม่
-    if not compare_cols:
-        print("⚠️ No comparable columns found for update")
-        df_diff_renamed = pd.DataFrame()
-    else:
-        # ✅ ฟังก์ชันเปรียบเทียบอย่างปลอดภัยจาก pd.NA
-        def is_different(row):
-            for col in compare_cols:
-                val_new = row.get(f"{col}_new")
-                val_old = row.get(f"{col}_old")
-                if pd.isna(val_new) and pd.isna(val_old):
-                    continue
-                if val_new != val_old:
-                    return True
-            return False
-
-        # ✅ ตรวจหาความแตกต่างจริง
-        df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-        if not df_diff.empty:
-            # ✅ เตรียม DataFrame สำหรับ update โดยใช้ car_id ปกติ (ไม่เติม _new)
-            update_cols = [f"{col}_new" for col in compare_cols]
-            all_cols = [pk_column] + update_cols
-
-            # ✅ ตรวจสอบว่าคอลัมน์ที่ต้องการมีอยู่ใน df_diff หรือไม่
-            available_cols = [col for col in all_cols if col in df_diff.columns]
-            if len(available_cols) != len(all_cols):
-                missing_cols = set(all_cols) - set(df_diff.columns)
-                print(f"⚠️ Missing columns in df_diff: {missing_cols}")
-                print(f"🔍 Available columns: {list(df_diff.columns)}")
-            
-            df_diff_renamed = df_diff[available_cols].copy()
-            # ✅ เปลี่ยนชื่อ column ให้ตรงกับตารางจริง (ลบ _new ออก)
-            new_column_names = [pk_column] + [col.replace('_new', '') for col in available_cols if col != pk_column]
-            df_diff_renamed.columns = new_column_names
-        else:
-            df_diff_renamed = pd.DataFrame()
-
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำในข้อมูลทั้งหมด (ครั้งเดียว)
-    from collections import Counter
-    all_car_ids = []
-    if not df_to_insert.empty:
-        all_car_ids.extend(df_to_insert[pk_column].tolist())
-    if not df_diff_renamed.empty:
-        all_car_ids.extend(df_diff_renamed[pk_column].tolist())
-    
-    if all_car_ids:
-        car_id_counts = Counter(all_car_ids)
-        duplicates = {car_id: count for car_id, count in car_id_counts.items() if count > 1}
-        if duplicates:
-            print(f"⚠️ WARNING: Found {len(duplicates)} duplicate car_ids in all data!")
-            for car_id, count in list(duplicates.items())[:5]:
-                print(f"   - {car_id}: {count} times")
-        else:
-            print("✅ No duplicate car_ids found in all data")
-
-    # ✅ Load table metadata
-    def load_table_metadata():
-        return Table(table_name, MetaData(), autoload_with=target_engine)
-    
-    metadata = retry_db_operation(load_table_metadata)
-
-    # ✅ Insert (กรอง car_id ที่เป็น NaN)
-    df_to_insert_valid = pd.DataFrame()  # ประกาศตัวแปรก่อน
-    
-    if not df_to_insert.empty:
-        # ✅ ตรวจสอบ NaN ในข้อมูลที่จะ Insert
-        print("🔍 Checking NaN in data to insert:")
-        insert_nan_check = df_to_insert.isna().sum()
-        insert_nan_cols = insert_nan_check[insert_nan_check > 0]
-        if len(insert_nan_cols) > 0:
-            print("⚠️ Insert data has NaN in columns:")
-            for col, count in insert_nan_cols.items():
-                print(f"   - {col}: {count} NaN values")
-        
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped} records with NaN {pk_column}")
-        
-        if df_to_insert_valid.empty:
-            print("⚠️ WARNING: No valid data to insert after NaN check!")
-        else:
-            # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งก่อน insert
-            df_to_insert_valid = df_to_insert_valid[~df_to_insert_valid[pk_column].duplicated(keep='first')].copy()
-            print(f"📊 Final records to insert after duplicate check: {len(df_to_insert_valid)}")
-    else:
-        print("ℹ️ No data to insert")
-    
-    # ✅ ตรวจสอบ car_id ซ้ำอีกครั้งในข้อมูลที่ clean แล้ว
-    if not df_to_insert_valid.empty:
-        # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
-        df_to_insert_clean = df_to_insert_valid.replace({np.nan: None})
-        
-        # ✅ ตรวจสอบ car_id ซ้ำครั้งสุดท้าย
-        df_to_insert_clean = df_to_insert_clean.drop_duplicates(subset=[pk_column], keep='first')
-        print(f"📊 Final clean records to insert: {len(df_to_insert_clean)}")
-        
-        # ✅ แสดงตัวอย่าง car_id ที่จะ insert
-        if len(df_to_insert_clean) > 0:
-            sample_car_ids = df_to_insert_clean[pk_column].head(5).tolist()
-            print(f"🔍 Sample car_ids to insert: {sample_car_ids}")
-            
-            def insert_operation():
-                with target_engine.begin() as conn:
-                    # ✅ ใช้ batch insert แบบมีประสิทธิภาพ
-                    batch_size = 5000  # เพิ่มขนาด batch
-                    records = df_to_insert_clean.to_dict(orient='records')
-                    
-                    for i in range(0, len(records), batch_size):
-                        batch = records[i:i + batch_size]
-                        try:
-                            # ✅ ใช้ executemany สำหรับ batch insert
-                            stmt = pg_insert(metadata)
-                            conn.execute(stmt, batch)
-                            print(f"✅ Inserted batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size} ({len(batch)} records)")
-                        except Exception as e:
-                            print(f"❌ Error inserting batch {i//batch_size + 1}: {e}")
-                            # ถ้าเกิด error ให้ insert ทีละ record
-                            for record in batch:
-                                try:
-                                    stmt = pg_insert(metadata).values(**record)
-                                    conn.execute(stmt)
-                                except Exception as single_error:
-                                    print(f"❌ Failed to insert record with {pk_column}: {record.get(pk_column)} - {single_error}")
-            
-            retry_db_operation(insert_operation)
-    else:
-        print("ℹ️ No data to insert")
-
-    # ✅ Update
-    if not df_diff_renamed.empty:
-        # ✅ ตรวจสอบ NaN ในข้อมูลที่จะ Update
-        print("🔍 Checking NaN in data to update:")
-        update_nan_check = df_diff_renamed.isna().sum()
-        update_nan_cols = update_nan_check[update_nan_check > 0]
-        if len(update_nan_cols) > 0:
-            print("⚠️ Update data has NaN in columns:")
-            for col, count in update_nan_cols.items():
-                print(f"   - {col}: {count} NaN values")
-        
-        # ✅ แทนที่ NaN ด้วย None ก่อนส่งไปยังฐานข้อมูล
-        df_diff_renamed_clean = df_diff_renamed.replace({np.nan: None})
-        
-        def update_operation():
-            with target_engine.begin() as conn:
-                # ✅ ใช้ batch update แทนการ update ทีละ record
-                batch_size = 1000
-                records = df_diff_renamed_clean.to_dict(orient='records')
-                
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    try:
-                        # ✅ ใช้ executemany สำหรับ batch update
-                        stmt = pg_insert(metadata)
-                        conn.execute(stmt, batch)
-                        print(f"✅ Updated batch {i//batch_size + 1}/{(len(records) + batch_size - 1)//batch_size} ({len(batch)} records)")
-                    except Exception as e:
-                        print(f"❌ Error updating batch {i//batch_size + 1}: {e}")
-                        # ถ้าเกิด error ให้ update ทีละ record
-                        for record in batch:
-                            try:
-                                stmt = pg_insert(metadata).values(**record)
-                                conn.execute(stmt)
-                            except Exception as single_error:
-                                print(f"❌ Failed to update record with {pk_column}: {record.get(pk_column)} - {single_error}")
-        
-        retry_db_operation(update_operation)
-    else:
-        print("ℹ️ No data to update")
-
-    print("✅ Insert/update completed.")
+    print("✅ Insert/Update completed (UPSERT + forced quotation restore)")
 
 @job
 def dim_car_etl():
@@ -1170,15 +545,7 @@ if __name__ == "__main__":
         df_clean = clean_car_data(df_raw)
         print("✅ Cleaned data shape:", df_clean.shape)
         print("✅ Cleaned columns:", list(df_clean.columns))
-
-        # output_path = "dim_car.xlsx"
-        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        # print(f"💾 Saved to {output_path}")
-
         load_car_data(df_clean)
         print("🎉 completed! Data to dim_car.")
     else:
         print("❌ No data extracted, skipping cleaning and saving")
-
-
-
