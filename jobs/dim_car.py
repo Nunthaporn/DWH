@@ -59,57 +59,60 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 
 @op
 def extract_car_data():
-    now = datetime.now()
+    # now = datetime.now()
 
-    start_time = now - timedelta(days=1)
-    end_time = now
+    # start_time = now - timedelta(days=1)
+    # end_time = now
 
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
 
-    print(f"🔍 Querying data from {start_str} to {end_str}")
+    start_str = ('2025-01-01')
+    end_str = ('2025-08-09')
 
-    # ✅ ตรวจสอบการเชื่อมต่อฐานข้อมูลก่อน
-    try:
-        with source_engine.connect() as conn:
-            # ตรวจสอบว่าตารางมีอยู่หรือไม่
-            inspector = inspect(conn)
-            tables = inspector.get_table_names()
-            print(f"🔍 Available tables: {tables}")
+    # print(f"🔍 Querying data from {start_str} to {end_str}")
+
+    # # ✅ ตรวจสอบการเชื่อมต่อฐานข้อมูลก่อน
+    # try:
+    #     with source_engine.connect() as conn:
+    #         # ตรวจสอบว่าตารางมีอยู่หรือไม่
+    #         inspector = inspect(conn)
+    #         tables = inspector.get_table_names()
+    #         print(f"🔍 Available tables: {tables}")
             
-            if 'fin_system_pay' not in tables:
-                print("❌ ERROR: Table 'fin_system_pay' not found!")
-                return pd.DataFrame()
-            if 'fin_system_select_plan' not in tables:
-                print("❌ ERROR: Table 'fin_system_select_plan' not found!")
-                return pd.DataFrame()
+    #         if 'fin_system_pay' not in tables:
+    #             print("❌ ERROR: Table 'fin_system_pay' not found!")
+    #             return pd.DataFrame()
+    #         if 'fin_system_select_plan' not in tables:
+    #             print("❌ ERROR: Table 'fin_system_select_plan' not found!")
+    #             return pd.DataFrame()
             
-            # ✅ ตรวจสอบจำนวนข้อมูลในตารางแบบจำกัดเวลา
-            count_pay = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
-            count_plan = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
-            print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
+    #         # ✅ ตรวจสอบจำนวนข้อมูลในตารางแบบจำกัดเวลา
+    #         count_pay = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+    #         count_plan = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+    #         print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
             
-            # ✅ ถ้าไม่มีข้อมูลใน 7 วัน ให้ลอง 3 วัน
-            if count_pay == 0 and count_plan == 0:
-                print("⚠️ No data in 7 days, trying 3 days...")
-                start_time_3 = now - timedelta(days=3)
-                start_str_3 = start_time_3.strftime('%Y-%m-%d %H:%M:%S')
-                count_pay_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
-                count_plan_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+    #         # ✅ ถ้าไม่มีข้อมูลใน 7 วัน ให้ลอง 3 วัน
+    #         if count_pay == 0 and count_plan == 0:
+    #             print("⚠️ No data in 7 days, trying 3 days...")
+    #             start_time_3 = now - timedelta(days=3)
+    #             start_str_3 = start_time_3.strftime('%Y-%m-%d %H:%M:%S')
+    #             count_pay_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
+    #             count_plan_3 = conn.execute(text(f"SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN '{start_str_3}' AND '{end_str}' AND type_insure IN ('ประกันรถ', 'ตรอ')")).scalar()
                 
-                if count_pay_3 > 0 or count_plan_3 > 0:
-                    print(f"✅ Found data in 3 days - fin_system_pay: {count_pay_3}, fin_system_select_plan: {count_plan_3}")
-                    start_str = start_str_3
-                    start_time = start_time_3
-                else:
-                    print("⚠️ No data in 3 days, using last 1000 records")
-                    # ใช้ LIMIT 1000 แทนการ query ข้อมูลทั้งหมด
-                    start_str = None
-                    end_str = None
+    #             if count_pay_3 > 0 or count_plan_3 > 0:
+    #                 print(f"✅ Found data in 3 days - fin_system_pay: {count_pay_3}, fin_system_select_plan: {count_plan_3}")
+    #                 start_str = start_str_3
+    #                 start_time = start_time_3
+    #             else:
+    #                 print("⚠️ No data in 3 days, using last 1000 records")
+    #                 # ใช้ LIMIT 1000 แทนการ query ข้อมูลทั้งหมด
+    #                 start_str = None
+    #                 end_str = None
             
-    except Exception as e:
-        print(f"❌ ERROR connecting to database: {e}")
-        return pd.DataFrame()
+    # except Exception as e:
+    #     print(f"❌ ERROR connecting to database: {e}")
+    #     return pd.DataFrame()
 
     # ✅ ปรับ query ให้มีประสิทธิภาพมากขึ้น
     if start_str and end_str:
@@ -914,18 +917,19 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_car_data()
-#     # print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_car_data((df_raw))
-# #     print("✅ Cleaned columns:", df_clean.columns)
+if __name__ == "__main__":
+    df_raw = extract_car_data()
+    # print("✅ Extracted logs:", df_raw.shape)
 
-#     output_path = "dim_car.xlsx"
-#     df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     print(f"💾 Saved to {output_path}")
+    df_clean = clean_car_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-#     load_car_data(df_clean)
-#     print("🎉 Test completed! Data upserted to dim_car.")
+    output_path = "dim_car.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
+
+    load_car_data(df_clean)
+    print("🎉 Test completed! Data upserted to dim_car.")
 
 
