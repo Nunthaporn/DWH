@@ -4,9 +4,9 @@ import numpy as np
 import re
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, inspect
-from sqlalchemy import create_engine, MetaData, Table, inspect
+from sqlalchemy import create_engine, text, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import func
 from datetime import datetime, timedelta
 
 # ✅ โหลด .env
@@ -50,8 +50,7 @@ def extract_agent_data():
            user_registered,
            status, fin_new_group, fin_new_mem,
            type_agent, typebuy, user_email, name_store, address, city, district,
-           province, province_cur, area_cur, postcode, tel, date_active, card_ins_type, file_card_ins,
-           card_ins_type_life, file_card_ins_life
+           province, province_cur, area_cur, postcode, tel, date_active
     FROM wp_users
     WHERE user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
         AND name NOT LIKE '%%ทดสอบ%%'
@@ -153,8 +152,7 @@ def extract_agent_data():
     print(f"🔍 Cleaning career data...")
     
     # แปลง career เป็น string และทำความสะอาด
-    df_merged['career'] = df_merged['career'].astype(str)
-    df_merged['career'] = df_merged['career'].str.strip()
+    df_merged['career'] = df_merged['career'].astype(str).str.strip()
     
     # แสดงผลลัพธ์หลังทำความสะอาด
     career_after_clean = df_merged['career'].value_counts()
@@ -166,51 +164,56 @@ def extract_agent_data():
 
 @op
 def clean_agent_data(df: pd.DataFrame):
-    # Combine region columns
+    # ---------- 0) Normalize defect & agent_id ----------
+    df['cuscode'] = df['cuscode'].astype(str).str.strip()
+    df['status'] = df['status'].astype(str).str.strip().str.lower()
+
+    # ตีความ defect จาก cuscode ที่มี -defect หรือ status == 'defect'
+    is_defect_initial = (
+        df['cuscode'].str.contains(r'-defect$', case=False, na=False) |
+        df['status'].eq('defect')
+    )
+    # ตัด -defect เก่าออกก่อน แล้วค่อยใส่กลับเมื่อเป็น defect
+    base_id = df['cuscode'].str.replace(r'-defect$', '', regex=True, case=False)
+    df['cuscode'] = np.where(is_defect_initial, base_id + '-defect', base_id)
+
+    # ---------- 1) รวม region + agent_main_region ----------
     def combine_columns(a, b):
         a_str = str(a).strip() if pd.notna(a) else ''
         b_str = str(b).strip() if pd.notna(b) else ''
         if a_str == '' and b_str == '':
             return ''
-        elif a_str == '':
+        if a_str == '':
             return b_str
-        elif b_str == '':
+        if b_str == '':
             return a_str
-        elif a_str == b_str:
+        if a_str == b_str:
             return a_str
-        else:
-            return f"{a_str} + {b_str}"
+        return f"{a_str} + {b_str}"
 
+    # รวมค่า fin_new_group และ fin_new_mem
     df['agent_region'] = df.apply(lambda row: combine_columns(row['fin_new_group'], row['fin_new_mem']), axis=1)
-    # ✅ กรอง row ที่ agent_region = 'TEST' ออก
-    df = df[df['agent_region'] != 'TEST']
+
+    # ✅ agent_main_region = agent_region ที่ตัดตัวเลขออก
+    #    เช่น "FIN-BKK1" -> "FIN-BKK", "bkk1 + east2" -> "bkk + east"
+    df['agent_main_region'] = (
+        df['agent_region']
+          .fillna('')
+          .astype(str)
+          .str.replace(r'\d+', '', regex=True)  # ลบตัวเลขทั้งหมด
+          .str.strip()
+    )
+
+    # กรอง TEST ออก แล้วค่อย drop fin_new_* (เพื่อไม่ให้ length mask เพี้ยน)
+    df = df[df['agent_region'] != 'TEST'].copy()
     df = df.drop(columns=['fin_new_group', 'fin_new_mem'])
 
-    # Clean date_active and status_agent
-    df['date_active'] = pd.to_datetime(df['date_active'], errors='coerce')
-    now = pd.Timestamp.now()
-    one_month_ago = now - pd.DateOffset(months=1)
-
-    def check_condition(row):
-        if row['status'] == 'defect':
-            return 'inactive'
-        elif pd.notnull(row['date_active']) and row['date_active'] < one_month_ago:
-            return 'inactive'
-        else:
-            return 'active'
-
-    df['status_agent'] = df.apply(check_condition, axis=1)
-    df = df.drop(columns=['status', 'date_active'])
-
-    df['defect_status'] = np.where(df['cuscode'].str.contains('-defect', na=False), 'defect', None)
-
-    # Rename columns
+    # ---------- 2) Rename columns ----------
     rename_columns = {
         "cuscode": "agent_id",
         "name": "agent_name",
         "rank": "agent_rank",
         "user_registered": "hire_date",
-        "status_agent": "status_agent",
         "type_agent": "type_agent",
         "typebuy": "is_experienced",
         "user_email": "agent_email",
@@ -225,229 +228,158 @@ def clean_agent_data(df: pd.DataFrame):
         "tel": "mobile_number",
         "career": "job",
         "agent_region": "agent_region",
-        "defect_status": "defect_status",
-        "card_ins_type": "card_ins_type",
-        "file_card_ins": "file_card_ins",
-        "card_ins_type_life": "card_ins_type_life",
-        "file_card_ins_life": "file_card_ins_life"
     }
     df = df.rename(columns=rename_columns)
-    df['defect_status'] = np.where(df['agent_id'].str.contains('-defect', na=False), 'defect', None)
 
-    # Clean fields
-    df['card_ins_type_life'] = df['card_ins_type_life'].apply(lambda x: 'B' if isinstance(x, str) and 'แทน' in x else x)
-    df['is_experienced_fix'] = df['is_experienced'].apply(lambda x: 'เคยขาย' if str(x).strip().lower() == 'ไม่เคยขาย' else 'ไม่เคยขาย')
+    # คำนวณ defect_status ใหม่ "หลัง" กรองแถว/รีเนมแล้ว (แก้ปัญหา length mismatch)
+    is_defect_after = (
+        df['agent_id'].str.contains(r'-defect$', case=False, na=False) |
+        df['status'].astype(str).str.strip().str.lower().eq('defect')
+    )
+    df['defect_status'] = np.where(is_defect_after, 'defect', None)
+
+    # เสร็จแล้วค่อยลบ status
+    if 'status' in df.columns:
+        df = df.drop(columns=['status'])
+
+    # ---------- 3) Cleaning fields ----------
+    # flip ตามกฎเดิม
+    df['is_experienced_fix'] = df['is_experienced'].apply(
+        lambda x: 'เคยขาย' if str(x).strip().lower() == 'ไม่เคยขาย' else 'ไม่เคยขาย'
+    )
     df = df.drop(columns=['is_experienced'])
-    df.rename(columns={'is_experienced_fix': 'is_experienced'}, inplace=True)
+    df = df.rename(columns={'is_experienced_fix': 'is_experienced'})
 
+    # rank 1..10 เท่านั้น
     valid_rank = [str(i) for i in range(1, 11)]
     df.loc[~df['agent_rank'].isin(valid_rank), 'agent_rank'] = np.nan
 
-    df['agent_address_cleaned'] = df['agent_address'].apply(lambda addr: re.sub(r'(เลขที่|หมู่ที่|หมู่บ้าน|ซอย|ถนน)[\s\-]*', '', str(addr)).strip())
+    # ที่อยู่
+    df['agent_address_cleaned'] = df['agent_address'].apply(
+        lambda addr: re.sub(r'(เลขที่|หมู่ที่|หมู่บ้าน|ซอย|ถนน)[\s\-]*', '', str(addr)).strip()
+    )
     df = df.drop(columns=['agent_address'])
-    df.rename(columns={'agent_address_cleaned': 'agent_address'}, inplace=True)
+    df = df.rename(columns={'agent_address_cleaned': 'agent_address'})
 
+    # เบอร์โทร (เก็บเลขล้วน)
     df['mobile_number'] = df['mobile_number'].str.replace(r'[^0-9]', '', regex=True)
     df = df.replace(r'^\s*$', pd.NA, regex=True)
 
+    # dedup โดยนับ non-empty
     df_temp = df.replace(r'^\s*$', np.nan, regex=True)
     df['non_empty_count'] = df_temp.notnull().sum(axis=1)
 
     valid_mask = df['agent_id'].astype(str).str.strip().ne('') & df['agent_id'].notna()
     df_with_id = df[valid_mask]
     df_without_id = df[~valid_mask]
-    df_with_id_cleaned = df_with_id.sort_values('non_empty_count', ascending=False).drop_duplicates(subset='agent_id', keep='first')
+    df_with_id_cleaned = (
+        df_with_id.sort_values('non_empty_count', ascending=False)
+                  .drop_duplicates(subset='agent_id', keep='first')
+    )
     df_cleaned = pd.concat([df_with_id_cleaned, df_without_id], ignore_index=True)
     df_cleaned = df_cleaned.drop(columns=['non_empty_count'])
     df_cleaned.columns = df_cleaned.columns.str.lower()
 
+    # hire_date → int YYYYMMDD
     df_cleaned["hire_date"] = pd.to_datetime(df_cleaned["hire_date"], errors='coerce')
-    df_cleaned["hire_date"] = df_cleaned["hire_date"].dt.strftime('%Y%m%d')
-    df_cleaned["hire_date"] = df_cleaned["hire_date"].where(df_cleaned["hire_date"].notnull(), None)
+    df_cleaned["hire_date"] = df_cleaned["hire_date"].dt.strftime('%Y%m%d').where(df_cleaned["hire_date"].notnull(), None)
     df_cleaned["hire_date"] = df_cleaned["hire_date"].astype('Int64')
 
+    # date_active → datetime (ให้ SQLAlchemy map เป็น timestamp) + กัน NaT
+    if 'date_active' in df_cleaned.columns:
+        df_cleaned["date_active"] = pd.to_datetime(df_cleaned["date_active"], errors='coerce')
+
+        # ตัด timezone ออกถ้ามี
+        try:
+            df_cleaned["date_active"] = df_cleaned["date_active"].dt.tz_localize(None)
+        except Exception:
+            pass
+
+        # แปลงเป็น python datetime หรือ None
+        df_cleaned["date_active"] = df_cleaned["date_active"].apply(
+            lambda x: x.to_pydatetime() if pd.notna(x) else None
+        )
+
+
+    # อื่น ๆ
     df_cleaned["zipcode"] = df_cleaned["zipcode"].where(df_cleaned["zipcode"].str.len() == 5, np.nan)
     df_cleaned["agent_name"] = df_cleaned["agent_name"].str.lstrip()
-    df_cleaned["is_experienced"] = df_cleaned["is_experienced"].apply(lambda x: 'no' if str(x).strip().lower() == 'ไม่เคยขาย' else 'yes')
+    df_cleaned["is_experienced"] = df_cleaned["is_experienced"].apply(
+        lambda x: 'no' if str(x).strip().lower() == 'ไม่เคยขาย' else 'yes'
+    )
 
-    # ✅ ทำความสะอาด job/career column - แปลง NaN และ None เป็น None
-    df_cleaned["job"] = df_cleaned["job"].where(pd.notna(df_cleaned["job"]), None)
-    df_cleaned["job"] = df_cleaned["job"].replace('NaN', None)
-    df_cleaned["job"] = df_cleaned["job"].replace('nan', None)
-    df_cleaned["job"] = df_cleaned["job"].replace('NULL', None)
-    df_cleaned["job"] = df_cleaned["job"].replace('null', None)
-
-    # ✅ เปลี่ยน "Others" เป็น "อื่นๆ" ในคอลัมน์ province
+    df_cleaned["job"] = df_cleaned["job"].where(pd.notna(df_cleaned["job"]), None).replace(['NaN','nan','NULL','null'], None)
     df_cleaned["province"] = df_cleaned["province"].replace("Others", "อื่นๆ")
 
-    # ✅ ทำความสะอาด agent_email - เก็บเฉพาะภาษาอังกฤษและรูปแบบ email ที่ถูกต้อง
     def clean_email(email):
         if pd.isna(email) or email == '':
             return None
-        
         email_str = str(email).strip()
-        
-        # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
-        thai_chars = re.findall(r'[ก-๙]', email_str)
-        if thai_chars:
+        if re.findall(r'[ก-๙]', email_str):
             return None
-        
-        # ตรวจสอบรูปแบบ email ที่ถูกต้อง
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if re.match(email_pattern, email_str):
-            return email_str.lower()  # แปลงเป็นตัวพิมพ์เล็ก
-        else:
-            return None
-    
+        return email_str.lower() if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email_str) else None
     df_cleaned["agent_email"] = df_cleaned["agent_email"].apply(clean_email)
 
-    # ✅ ทำความสะอาด agent_name - ลบสระพิเศษด้านหน้าแต่ไม่ลบสระในชื่อ
     def clean_agent_name(name):
         if pd.isna(name) or name == '':
             return None
-        
         name_str = str(name).strip()
-        
-        # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าชื่อ (ไม่ลบสระในชื่อจริง)
-        # ตรวจสอบว่าสระด้านหน้าเป็นสระพิเศษหรือไม่
-        if name_str.startswith(('ิ', 'ี', 'ึ', 'ื', 'ุ', 'ู', '่', '้', '๊', '๋')): 
-            # ลบเฉพาะสระพิเศษที่อยู่ด้านหน้าเท่านั้น
+        if name_str.startswith(('ิ','ี','ึ','ื','ุ','ู','่','้','๊','๋')):
             cleaned_name = re.sub(r'^[ิีึืุู่้๊๋]+', '', name_str)
         else:
             cleaned_name = name_str
-        
-        # ลบตัวอักษรพิเศษที่ไม่ควรมีในชื่อ (ยกเว้นตัวอักษรไทยและอังกฤษ)
         cleaned_name = re.sub(r'[^\u0E00-\u0E7F\u0020\u0041-\u005A\u0061-\u007A]', '', cleaned_name)
-        
-        # ลบช่องว่างที่ซ้ำกัน
-        cleaned_name = re.sub(r'\s+', ' ', cleaned_name)
-        
-        # ลบช่องว่างที่ต้นและท้าย
-        cleaned_name = cleaned_name.strip()
-        
-        # ตรวจสอบว่าชื่อมีความยาวที่เหมาะสม (อย่างน้อย 2 ตัวอักษร)
-        if len(cleaned_name) < 2:
-            return None
-        
-        return cleaned_name
-
+        cleaned_name = re.sub(r'\s+', ' ', cleaned_name).strip()
+        return None if len(cleaned_name) < 2 else cleaned_name
     df_cleaned["agent_name"] = df_cleaned["agent_name"].apply(clean_agent_name)
 
-    # ✅ ทำความสะอาด store_name - เก็บเฉพาะชื่อร้าน
     def clean_store_name(store_name):
         if pd.isna(store_name) or store_name == '':
             return None
-        
-        store_str = str(store_name).strip()
-        
-        # ถ้ามีคำว่า "ร้าน" หรือ "shop" หรือ "store" ให้เก็บไว้
-        if any(keyword in store_str.lower() for keyword in ['ร้าน', 'shop', 'store', 'บริษัท', 'company']):
-            return store_str
-        else:
-            return None
-    
+        s = str(store_name).strip()
+        return s if any(k in s.lower() for k in ['ร้าน','shop','store','บริษัท','company']) else None
     df_cleaned["store_name"] = df_cleaned["store_name"].apply(clean_store_name)
 
-    # ✅ ตรวจสอบและเปลี่ยนค่าที่ไม่ใช่ภาษาไทยเป็น None ในคอลัมน์ที่ระบุ
     def check_thai_text(text):
         if pd.isna(text) or text == '':
             return None
-        
-        text_str = str(text).strip()
-        
-        # ลบ space และ ] หรือ * ที่อยู่ด้านหน้าข้อความ
-        cleaned_text = re.sub(r'^[\s\]\*]+', '', text_str)
-        
-        # กรองข้อมูลที่ไม่ต้องการ
-        unwanted_patterns = [
-            r'^\d+$',    # เป็นตัวเลขล้วนๆ
-            r'^[A-Za-z\s]+$',  # เป็นภาษาอังกฤษล้วนๆ
-        ]
-        
-        for pattern in unwanted_patterns:
+        cleaned_text = re.sub(r'^[\s\]\*]+', '', str(text).strip())
+        for pattern in [r'^\d+$', r'^[A-Za-z\s]+$']:
             if re.match(pattern, cleaned_text):
                 return None
-        
-        # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
-        thai_chars = re.findall(r'[ก-๙]', cleaned_text)
-        if thai_chars:
-            return cleaned_text
-        else:
-            return None
-    
-    # ใช้ฟังก์ชันกับคอลัมน์ที่ระบุ
-    location_columns = ['subdistrict', 'district', 'province', 'current_province', 'current_area']
-    for col in location_columns:
+        return cleaned_text if re.findall(r'[ก-๙]', cleaned_text) else None
+    for col in ['subdistrict','district','province','current_province','current_area']:
         if col in df_cleaned.columns:
             df_cleaned[col] = df_cleaned[col].apply(check_thai_text)
 
-    # ✅ ทำความสะอาด zipcode - เก็บเฉพาะตัวเลข 5 หลัก
     def clean_zipcode(zipcode):
         if pd.isna(zipcode) or zipcode == '':
             return None
-        
-        zipcode_str = str(zipcode).strip()
-        
-        # ตรวจสอบว่าเป็นตัวเลข 5 หลักหรือไม่
-        if re.match(r'^\d{5}$', zipcode_str):
-            return zipcode_str
-        else:
-            return None
-    
+        z = str(zipcode).strip()
+        return z if re.match(r'^\d{5}$', z) else None
     df_cleaned["zipcode"] = df_cleaned["zipcode"].apply(clean_zipcode)
 
-    # ✅ กรองแถวที่มี card_ins_type เป็น "ญาตเป็นนายหน้า"
-    df_cleaned = df_cleaned[df_cleaned["card_ins_type"] != "ญาตเป็นนายหน้า"]
-
-    # ✅ ทำความสะอาด agent_address - ลบสระด้านหน้า, -, :, . และตัวอักษรพิเศษ
     def clean_address(address):
         if pd.isna(address) or address == '':
             return None
-        
-        address_str = str(address).strip()
-        
-        # ลบสระพิเศษที่อยู่ด้านหน้าข้อความ (สระที่ไม่ได้เป็นส่วนของที่อยู่จริง)
-        # ลบเครื่องหมาย -, :, . และตัวอักษรพิเศษ
-        # ใช้ regex ที่ครอบคลุมสระทั้งหมดที่อยู่ด้านหน้า
-        cleaned_address = re.sub(r'^[\u0E30-\u0E3A\u0E47-\u0E4E]+', '', address_str)  # ลบสระด้านหน้า
-        cleaned_address = re.sub(r'[-:.,]', '', cleaned_address)  # ลบเครื่องหมายพิเศษ
-        
-        # ลบช่องว่างที่ซ้ำกัน
-        cleaned_address = re.sub(r'\s+', ' ', cleaned_address)
-        
-        # ลบช่องว่างที่ต้นและท้าย
-        cleaned_address = cleaned_address.strip()
-        
-        return cleaned_address
-    
-    df_cleaned["agent_address"] = df_cleaned["agent_address"].apply(clean_address)
+        s = str(address).strip()
+        s = re.sub(r'^[\u0E30-\u0E3A\u0E47-\u0E4E]+', '', s)
+        s = re.sub(r'[-:.,]', '', s)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+    df_cleaned["agent_address"] = df_cleaned["agent_address"].apply(clean_address).replace(['NaN','None','NULL'], None)
 
-    # ✅ ทำความสะอาด agent_address column - แปลง NaN และ None เป็น None
-    df_cleaned["agent_address"] = df_cleaned["agent_address"].where(pd.notna(df_cleaned["agent_address"]), None)
-    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('NaN', None)
-    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('None', None)
-    df_cleaned["agent_address"] = df_cleaned["agent_address"].replace('NULL', None)
-
-    # ✅ ลบ space ที่อยู่ด้านหน้าข้อความในทุกคอลัมน์
-    def clean_leading_spaces(text):
-        if pd.isna(text) or text == '':
-            return None
-        
-        text_str = str(text).strip()
-        # ลบ space ที่อยู่ด้านหน้าข้อความ
-        cleaned_text = re.sub(r'^\s+', '', text_str)
-        
-        return cleaned_text if cleaned_text != '' else None
-    
-    # ใช้ฟังก์ชันกับทุกคอลัมน์
+    # ตัด space ต้นข้อความเฉพาะ object columns (ยกเว้น agent_id)
     for col in df_cleaned.columns:
-        if df_cleaned[col].dtype == 'object':  # เฉพาะคอลัมน์ที่เป็นข้อความ
-            df_cleaned[col] = df_cleaned[col].apply(clean_leading_spaces)
+        if col == 'agent_id':
+            continue
+        if df_cleaned[col].dtype == 'object':
+            df_cleaned[col] = df_cleaned[col].apply(
+                lambda x: (re.sub(r'^\s+', '', str(x).strip()) or None) if pd.notna(x) and x != '' else None
+            )
 
     print("\n📊 Cleaning completed")
-
     return df_cleaned
-
 
 @op
 def load_to_wh(df: pd.DataFrame):
@@ -456,13 +388,10 @@ def load_to_wh(df: pd.DataFrame):
 
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
-    today_str = datetime.now().strftime('%Y-%m-%d')
-
     # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
         df_existing = pd.read_sql(
-            f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+            f"SELECT * FROM {table_name}",
             conn
         )
 
@@ -614,6 +543,7 @@ def load_to_wh(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
 
+
 @op
 def clean_null_values_op(df: pd.DataFrame) -> pd.DataFrame:
     return df.replace(['None', 'none', 'nan', 'NaN', ''], np.nan)
@@ -626,7 +556,7 @@ if __name__ == "__main__":
     df_raw = extract_agent_data()
     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_agent_data((df_raw))
+    df_clean = clean_agent_data(df_raw)
     print("✅ Cleaned columns:", df_clean.columns)
 
     df_clean = clean_null_values_op(df_clean)

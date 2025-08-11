@@ -365,7 +365,9 @@ def clean_motor_data(data_tuple):
     # ทำความสะอาดคอลัมน์ delivery_type
     if 'delivery_type' in df.columns:
         df['delivery_type'] = df['delivery_type'].replace('nor', 'normal')
-        print(f"📦 Cleaned delivery_type column - changed 'nor' to 'normal'")
+        df['delivery_type'] = df['delivery_type'].replace('ระบบเดิม', 'normal')
+        df['delivery_type'] = df['delivery_type'].replace('ปกติ', 'normal')
+        print(f"📦 Cleaned delivery_type column - changed to 'normal'")
 
     # ✅ ทำความสะอาดคอลัมน์ insurance_class (type) - เก็บแค่ค่าที่กำหนดเท่านั้น
     if 'insurance_class' in df.columns:
@@ -577,34 +579,32 @@ def load_motor_data(df: pd.DataFrame):
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
-# if __name__ == "__main__":
-#     try:
-#         print("🚀 Starting fact_insurance_motor ETL process...")
+if __name__ == "__main__":
+    try:
+        print("🚀 Starting fact_insurance_motor ETL process...")
         
-#         # Extract data with retry mechanism
-#         print("📥 Extracting data from source databases...")
-#         df_raw = extract_motor_data()
-#         print("✅ Data extraction completed")
+        # Extract data with retry mechanism
+        print("📥 Extracting data from source databases...")
+        df_raw = extract_motor_data()
+        print("✅ Data extraction completed")
 
-#         # Clean data
-#         print("🧹 Cleaning and transforming data...")
-#         df_clean = clean_motor_data((df_raw))
-#         print("✅ Data cleaning completed")
-#         print("✅ Cleaned columns:", df_clean.columns)
+        # Clean data
+        print("🧹 Cleaning and transforming data...")
+        df_clean = clean_motor_data((df_raw))
+        print("✅ Data cleaning completed")
+        print("✅ Cleaned columns:", df_clean.columns)
 
-#         # Save to Excel for inspection
-#         # output_path = "fact_insurance_motor.xlsx"
-#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#         # print(f"💾 Saved to {output_path}")
+        output_path = "fact_insurance_motor.xlsx"
+        df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        print(f"💾 Saved to {output_path}")
 
-#         # Uncomment to load to database
-#         print("📤 Loading data to target database...")
-#         load_motor_data(df_clean)
-#         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+        # print("📤 Loading data to target database...")
+        # load_motor_data(df_clean)
+        # print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
         
-#     except Exception as e:
-#         print(f"❌ ETL process failed: {str(e)}")
-#         raise
-#     finally:
-#         # Always close database connections
-#         close_engines()
+    except Exception as e:
+        print(f"❌ ETL process failed: {str(e)}")
+        raise
+    finally:
+        # Always close database connections
+        close_engines()

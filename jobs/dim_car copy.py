@@ -463,7 +463,7 @@ def force_update_quotation_num(df, table_name, pk_column):
         return
 
     print(f"🔧 Forcing quotation_num update for {len(pairs)} rows (executemany by batch)")
-    batch_size = 2000
+    batch_size = 5000
     for i in range(0, len(pairs), batch_size):
         batch = pairs[i:i+batch_size]
         try:

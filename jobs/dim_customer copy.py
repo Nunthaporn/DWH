@@ -24,16 +24,16 @@ target_engine = create_engine(
 @op
 def extract_customer_data():
     query_pay = """
-        SELECT quo_num, address, province, amphoe, district, zipcode, datestart
+        SELECT quo_num, address, province, amphoe, district, zipcode, update_at
         FROM fin_system_pay
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-08-10'
+        WHERE update_at between '2025-01-01' AND  '2025-08-09'
     """
     df_pay = pd.read_sql(query_pay, source_engine)
 
     query_plan = """
-        SELECT quo_num, idcard, title, name, lastname, birthDate, career, gender, tel, email, datestart
+        SELECT quo_num, idcard, title, name, lastname, birthDate, career, gender, tel, email, update_at
         FROM fin_system_select_plan
-        WHERE datestart >= '2025-01-01' AND datestart < '2025-08-10'
+        WHERE update_at between '2025-01-01' AND  '2025-08-09'
     """
     df_plan = pd.read_sql(query_plan, source_engine)
 
@@ -43,7 +43,7 @@ def extract_customer_data():
 
 @op
 def clean_customer_data(df: pd.DataFrame):
-    df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
+    df = df.drop(columns=['update_at_x', 'update_at_y'], errors='ignore')
 
     df['full_name'] = df.apply(
         lambda row: row['name'] if str(row['name']).strip() == str(row['lastname']).strip()

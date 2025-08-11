@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Table, MetaData, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime, timedelta
+import re
 
 # ✅ Load environment variables
 load_dotenv()
@@ -33,7 +34,7 @@ def extract_order_type_data():
     # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
 
     start_str = '2025-01-01'
-    end_str = '2025-08-06'
+    end_str = '2025-08-09'
 
     query_plan = f"""
         SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key
@@ -59,119 +60,180 @@ def extract_order_type_data():
 
 @op
 def clean_order_type_data(df: pd.DataFrame):
-    # ✅ ย้าย rename มาไว้ก่อนใช้ fill_chanel_key
+    import re
+
+    # ---------- helpers ----------
+    def _norm(s):
+        if pd.isna(s):
+            return ""
+        return str(s).strip()
+
+    def _lower(s):
+        return _norm(s).lower()
+
+    BASE_MAP = [
+        (r"\bapp\b|application|mobile|แอป", "APP"),
+        (r"\bweb\b|website|เวบ|เว็บไซต์", "WEB"),
+    ]
+
+    # รองรับ subtype ที่ต้องใช้ตามตาราง
+    SUBTYPE_SET = {"B2B", "B2C", "TELE", "THAIPOST", "THAICARE"}
+
+    # default subtype ต่อโปรดักต์ เมื่อไม่มี subtype ให้ใช้
+    DEFAULT_SUBTYPE_APP = {
+        "ประกันโควิด": "B2B",
+        "ประกันชีวิต": "B2B",
+        "ประกันเบ็ดเตล็ด": "B2B",
+        "ประกันโรคร้ายแรง": "B2B",
+        "ประกันสุขภาพกลุ่ม": "B2B",
+        "ประกันอัคคีภัยsme": "B2B",
+        "ประกันอัคคีภัยทั่วไป": "B2B",
+        "ประกันอุบัติเหตุกลุ่ม": "B2B",
+    }
+    DEFAULT_SUBTYPE_WEB = {
+        "ประกันโควิด": "B2B",
+        "ประกันชีวิต": "B2B",
+    }
+
+    def base_from_type_key(text: str) -> str | None:
+        low = _lower(text)
+        for pat, label in BASE_MAP:
+            if re.search(pat, low):
+                return label
+        return None
+
+    def normalize_special_subtype(raw: str) -> str:
+        """ แปลงรูปแบบพิเศษเช่น WEB-AFF -> AFF """
+        s = _norm(raw).upper()
+        # รูปแบบที่เจอบ่อย
+        s = s.replace("WEB-AFF", "AFF").replace("WEB AFF", "AFF")
+        return s
+
+    def extract_subtype(raw: str) -> str | None:
+        """
+        เลือก subtype จาก raw:
+        1) แปลงพิเศษ (WEB-AFF -> AFF)
+        2) ค้นหา token ที่อยู่ใน SUBTYPE_SET
+        3) ถ้าไม่พบ ให้ใช้ข้อความดิบ (ลบคำ BASE ออก) เป็น subtype
+        """
+        s = normalize_special_subtype(raw)
+        if not s:
+            return None
+
+        tokens = re.split(r"[ \-_/]+", s.upper())
+        for tok in tokens:
+            t = tok.strip()
+            if t in SUBTYPE_SET:
+                return t
+
+        # ใช้สตริงดิบเป็น subtype (ตัดคำ base ออก)
+        s_up = s.upper()
+        for _, base_label in BASE_MAP:
+            s_up = re.sub(rf"\b{re.escape(base_label)}\b", "", s_up, flags=re.IGNORECASE)
+        s_up = re.sub(r"\s+", " ", s_up).strip()
+        return s_up if s_up else None
+
+    def derive_base(row) -> str | None:
+        # ✅ ใช้ type_key เป็นหลักเท่านั้น
+        return base_from_type_key(row.get("type_key", ""))
+
+    def derive_subtype(row) -> str | None:
+        # ✅ เอาจาก chanel_key ก่อน ถ้าไม่มีค่อยใช้ app_type
+        ch_val = row.get("chanel_key", "")
+        app_val = row.get("app_type", "")
+        sub = extract_subtype(ch_val)
+        if sub:
+            return sub
+        sub = extract_subtype(app_val)
+        if sub:
+            return sub
+
+        # fallback: พบคำ vif/ตรอ ให้เป็น VIF (เข้าชุด SUBTYPE_SET ไหม? ถ้าอยากได้ก็เพิ่ม)
+        blob = " ".join([
+            _lower(ch_val), _lower(app_val),
+            _lower(row.get("type_key", "")),
+            _lower(row.get("type_insure", "")),
+            _lower(row.get("worksend", "")),
+        ])
+        if ("vif" in blob) or ("ตรอ" in blob):
+            return "VIF" if "VIF" in SUBTYPE_SET else None
+        return None
+
+    def default_subtype_by_product(base: str | None, type_insure: str | None) -> str | None:
+        if not base:
+            return None
+        name = _lower(type_insure)
+        if base == "APP":
+            # map โดยใช้คีย์เป็น lower เพื่อกันเคสสะกด
+            for k, v in DEFAULT_SUBTYPE_APP.items():
+                if _lower(k) == name:
+                    return v
+        if base == "WEB":
+            for k, v in DEFAULT_SUBTYPE_WEB.items():
+                if _lower(k) == name:
+                    return v
+        return None
+
+    def parse_channel(row):
+        base = derive_base(row)
+        subtype = derive_subtype(row)
+
+        # ถ้ายังไม่มี subtype ให้ใช้ default ต่อโปรดักต์
+        if not subtype:
+            subtype = default_subtype_by_product(base, row.get("type_insure", ""))
+
+        # ถ้ายังไม่มี base แต่ subtype == VIF -> default base = WEB (คงไว้)
+        if not base and subtype == "VIF":
+            base = "WEB"
+
+        # ประกอบผลลัพธ์ (ตามตาราง: APP/WEB + subtype เมื่อมี)
+        if base in {"APP", "WEB"} and subtype:
+            return f"{base} {subtype}"
+        if base and not subtype:
+            return base
+        if subtype and not base:
+            return subtype
+        return ""
+
+    # ---------- build key_channel ----------
+    if "worksend" not in df.columns:
+        df["worksend"] = None
+
+    df["key_channel"] = df.apply(parse_channel, axis=1)
+
+    # แก้เคสที่ได้ "TELE" เฉย ๆ ให้เป็น "APP TELE"
+    df["key_channel"] = df["key_channel"].apply(lambda x: "APP TELE" if str(x).strip().upper() == "TELE" else x)
+    df["key_channel"] = df["key_channel"].apply(lambda x: "APP B2B" if str(x).strip().upper() == "B2B" else x)
+    df["key_channel"] = df["key_channel"].apply(lambda x: "WEB B2C" if str(x).strip().upper() == "WEB AFF" else x)
+    df["key_channel"] = df["key_channel"].apply(lambda x: "WEB THAICARE" if str(x).strip().upper() == "THAICARE" else x)
+    df["key_channel"] = df["key_channel"].apply(lambda x: "WEB ADMIN-B2C" if str(x).strip().upper() == "WEB ADMIN" else x)
+
+    # ลบขีด (-) ทั้งหมดใน key_channel
+    df["key_channel"] = df["key_channel"].astype(str).str.replace("-", " ", regex=False).str.replace(r"\s+", " ", regex=True).str.strip()
+
+    # ---------- tidy & rename ----------
+    obj_cols = df.select_dtypes(include=["object"]).columns
+    df[obj_cols] = df[obj_cols].apply(
+        lambda s: s.replace(r"^\s*$", np.nan, regex=True)
+                  .replace(r"^\s*(nan|NaN)\s*$", np.nan, regex=True)
+    )
+
+    # ลบตัวช่วยหลังคำนวณแล้ว
+    df.drop(columns=["type_key", "app_type"], inplace=True, errors="ignore")
+
     df.rename(columns={
         "quo_num": "quotation_num",
         "type_insure": "type_insurance",
         "type_work": "order_type",
         "type_status": "check_type",
-        "worksend": "work_type"
+        "worksend": "work_type",
     }, inplace=True)
 
-    def fill_chanel_key(row):
-        # rule_map ใช้ order_type แล้ว
-        rule_map = {
-            ('ประกันการเดินทาง', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันการเดินทาง', 'งานใหม่', 'APP', '', None): 'APP B2B',
-            ('ประกันการเดินทาง', 'งานใหม่', 'WEB', 'B2C', ''): 'WEB-B2C',
-            ('ประกันขนส่ง', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันขนส่ง', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันขนส่ง', 'งานต่ออายุ', 'APP', '', None): 'APP TELE',
-            ('ประกันขนส่ง', 'งานใหม่', 'APP', '', None): 'APP TELE',
-            ('ประกันความรับผิดบุคคลภายนอก(PL)', 'งานโอนโค้ด', 'APP', '', ''): 'APP B2B',
-            ('ประกันความรับผิดบุคคลภายนอก(PL)', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันความเสี่ยงภัย(IAR)', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันชีวิต', 'งานต่ออายุ', 'WEB', '', ''): 'WEB B2B',
-            ('ประกันบ้าน', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันบ้าน', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันบ้าน', 'งานต่ออายุ', 'APP', '', None): 'APP TELE',
-            ('ประกันเบ็ดเตล็ด', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันเบ็ดเตล็ด', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันโรคร้ายแรง', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันโรคร้ายแรง', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันโรคร้ายแรง', 'งานใหม่', 'APP', '', None): 'APP TELE',
-            ('ประกันสุขภาพ', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันสุขภาพ', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันสุขภาพ', 'งานต่ออายุ', 'APP', '', None): 'APP TELE',
-            ('ประกันสุขภาพ', 'งานใหม่', 'APP', '', None): 'APP TELE',
-            ('ประกันสุขภาพกลุ่ม', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยSME', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยSME', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยทั่วไป', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยทั่วไป', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยบ้านอยู่อาศัย', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอัคคีภัยบ้านอยู่อาศัย', 'งานใหม่', 'APP', '', None): 'APP TELE',
-            ('ประกันอุบัติเหตุกลุ่ม', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอุบัติเหตุกลุ่มนักเรียน', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันอุบัติเหตุส่วนบุคคล', 'งานใหม่', 'APP', '', ''): 'APP B2B',
-            ('ประกันอุบัติเหตุส่วนบุคคล', 'งานต่ออายุ', 'APP', '', ''): 'APP B2B',
-            ('ประกันอุบัติเหตุส่วนบุคคล', 'งานใหม่', 'APP', '', None): 'APP TELE',
-            ('ประกันอุบัติเหตุส่วนบุคคล', 'งานใหม่', 'WEB', 'WEB-B2C', ''): 'WEB-AFF',
-            ('พรบ', 'งานใหม่', 'WEB', 'WEB', ''): 'WEB-B2B',
-        }
+    if "quotation_num" in df.columns:
+        df.drop_duplicates(subset=["quotation_num"], keep="first", inplace=True)
 
-        key = (
-            str(row['type_insurance']).strip(),
-            str(row['order_type']).strip(),
-            str(row['type_key']).strip() if pd.notnull(row['type_key']) else '',
-            str(row['app_type']).strip() if pd.notnull(row['app_type']) else '',
-            str(row['chanel_key']).strip() if pd.notnull(row['chanel_key']) else None,
-        )
-
-        if key in rule_map:
-            return rule_map[key]
-
-        type_key = row['type_key']
-        app_type = row['app_type']
-        type_insure = row['type_insurance']
-        chanel_key = row['chanel_key']
-
-        if pd.notnull(chanel_key) and str(chanel_key).strip() != "":
-            return chanel_key
-        if pd.notnull(type_key) and pd.notnull(app_type):
-            if type_key == app_type:
-                return f"{type_key} VIF" if type_insure == 'VIF' else type_key
-            if type_key in app_type:
-                base = app_type.replace(type_key, "").replace("-", "").strip()
-                return f"{type_key} {base}" if base else type_key
-            if app_type in type_key:
-                base = type_key.replace(app_type, "").replace("-", "").strip()
-                return f"{app_type} {base}" if base else app_type
-            return f"{type_key} {app_type}"
-        if pd.notnull(type_key):
-            return f"{type_key} {type_insure}" if type_insure else type_key
-        if pd.notnull(app_type):
-            return f"{app_type} {type_insure}" if type_insure else app_type
-        return ''
-
-    # ✅ apply หลัง rename แล้ว
-    df['chanel_key'] = df.apply(fill_chanel_key, axis=1)
-
-    # ✅ ปรับชื่อสุดท้าย
-    df['chanel_key'] = df['chanel_key'].replace({
-        'B2B': 'APP B2B',
-        'WEB ตรอ': 'WEB VIF',
-        'APP-ตรอ': 'APP-VIF',
-        'TELE': 'APP TELE',
-        'APP ประกันรถ': 'APP B2B',
-        'WEB ประกันรถ': 'WEB'
-    })
-
-    df.drop(columns=['type_key', 'app_type'], inplace=True)
-
-    df.rename(columns={
-        "chanel_key": "key_channel"
-    }, inplace=True)
-
-    df['key_channel'] = df['key_channel'].astype(str).str.strip().str.replace(r'\s+', '-', regex=True)
-    df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
-    df.replace("NaN", np.nan, inplace=True)
-    df.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
-    df = df.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
     df = df.where(pd.notnull(df), None)
-
-    print("\n📊 Cleaning completed")
-
+    print("📊 Cleaning completed (key_channel mapped)")
     return df
 
 @op
@@ -368,9 +430,9 @@ if __name__ == "__main__":
     df_clean = clean_order_type_data((df_row))
     # print("✅ Cleaned columns:", df_clean.columns)
 
-    output_path = "dim_order_type1.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+    # output_path = "dim_order_type.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_order_type_data(df_clean)
-#     print("🎉 completed! Data upserted to dim_order_type.")
+    load_order_type_data(df_clean)
+    print("🎉 completed! Data upserted to dim_order_type.")
