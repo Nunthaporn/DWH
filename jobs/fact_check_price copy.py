@@ -54,13 +54,9 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 
 @op
 def extract_check_price_data() -> pd.DataFrame:
-    now = datetime.now()
-
-    start_time = now.replace(minute=0, second=0, microsecond=0)
-    end_time = now.replace(minute=59, second=59, microsecond=999999)
-
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+    # ปรับช่วงเวลาได้ตามต้องการ
+    start_str = '2025-01-01'
+    end_str = '2025-08-09'
 
     query_logs = """
     SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,

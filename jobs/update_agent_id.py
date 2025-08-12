@@ -97,12 +97,12 @@ def update_agent_id(df_selected: pd.DataFrame):
         # 3) set-based UPDATE ตัวเดียว
         update_sql = text("""
             UPDATE fact_sales_quotation f
-            SET agent_id = t.agent_id,
+            SET agent_id = t.agent_id::text,
                 update_at = NOW()
             FROM tmp_agent_updates t
             WHERE f.quotation_num = t.quotation_num
-              AND f.payment_plan_id IS NULL
-              AND (f.agent_id IS NULL OR f.agent_id IS DISTINCT FROM t.agent_id)
+            AND f.payment_plan_id IS NULL
+            AND (f.agent_id IS NULL OR f.agent_id IS DISTINCT FROM t.agent_id::text)
         """)
 
         # 4) ใส่ retry เมื่อเจอ deadlock
@@ -131,7 +131,7 @@ def update_fact_sales_quotation_agent_id():
             extract_dim_agent()
         )
     )
-    
+
 # 👇 (ถ้าจะรันแบบสคริปต์เดี่ยว)
 # if __name__ == "__main__":
 #     df_quotation = extract_quotation_idcus()
