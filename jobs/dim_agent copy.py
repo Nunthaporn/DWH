@@ -95,14 +95,12 @@ def extract_agent_data():
     print(f"   - Unique cuscode in policy_register: {df_career['cuscode'].nunique()}")
     print(f"   - Career values: {df_career['career'].value_counts().head(10)}")
     
-    # ✅ ตรวจสอบ cuscode ที่ซ้ำกันใน policy_register
     duplicate_cuscode = df_career[df_career['cuscode'].duplicated(keep=False)]
     if len(duplicate_cuscode) > 0:
         print(f"   - Duplicate cuscode in policy_register: {len(duplicate_cuscode)}")
         print(f"   - Sample duplicates:")
         print(duplicate_cuscode.head(5))
     
-    # ✅ ตรวจสอบความสัมพันธ์ระหว่าง cuscode
     main_cuscode_set = set(df_main['cuscode'])
     career_cuscode_set = set(df_career['cuscode'])
     
@@ -113,7 +111,6 @@ def extract_agent_data():
     print(f"   - Cuscode only in wp_users: {len(main_cuscode_set - career_cuscode_set)}")
     print(f"   - Cuscode only in policy_register: {len(career_cuscode_set - main_cuscode_set)}")
     
-    # แสดงตัวอย่าง cuscode ที่มีเฉพาะใน wp_users
     only_in_main = main_cuscode_set - career_cuscode_set
     if len(only_in_main) > 0:
         sample_only_main = df_main[df_main['cuscode'].isin(list(only_in_main)[:5])][['cuscode', 'name']]
@@ -126,7 +123,7 @@ def extract_agent_data():
     print("📦 df_career:", df_career.shape)
     print("📦 df_merged:", df_merged.shape)
     
-    # ✅ Debug: ตรวจสอบข้อมูล career
+    # ✅ Debug career
     career_null_count = df_merged['career'].isna().sum()
     career_total_count = len(df_merged)
     print(f"🔍 Career data analysis:")
@@ -135,29 +132,22 @@ def extract_agent_data():
     print(f"   - Records without career (NaN): {career_null_count}")
     print(f"   - Percentage with career: {((career_total_count - career_null_count) / career_total_count * 100):.2f}%")
     
-    # ✅ แสดงตัวอย่างข้อมูลที่ไม่มี career
     if career_null_count > 0:
         sample_null_career = df_merged[df_merged['career'].isna()][['cuscode', 'name']].head(5)
         print(f"🔍 Sample records without career:")
         print(sample_null_career)
     
-    # ✅ แสดงตัวอย่างข้อมูลที่มี career
     career_not_null = df_merged[df_merged['career'].notna()]
     if len(career_not_null) > 0:
         sample_with_career = career_not_null[['cuscode', 'name', 'career']].head(5)
         print(f"🔍 Sample records with career:")
         print(sample_with_career)
     
-    # ✅ ทำความสะอาดข้อมูล career
+    # ✅ ทำความสะอาด career
     print(f"🔍 Cleaning career data...")
-    
-    # แปลง career เป็น string และทำความสะอาด
     df_merged['career'] = df_merged['career'].astype(str).str.strip()
-    
-    # แสดงผลลัพธ์หลังทำความสะอาด
-    career_after_clean = df_merged['career'].value_counts()
     print(f"🔍 Career values after cleaning:")
-    print(career_after_clean.head(10))
+    print(df_merged['career'].value_counts().head(10))
 
     return df_merged
 
@@ -168,13 +158,11 @@ def clean_agent_data(df: pd.DataFrame):
     df['cuscode'] = df['cuscode'].astype(str).str.strip()
     df['status'] = df['status'].astype(str).str.strip().str.lower()
 
-    # ตีความ defect จาก cuscode ที่มี -defect หรือ status == 'defect'
     is_defect_initial = (
         df['cuscode'].str.contains(r'-defect$', case=False, na=False) |
         df['status'].eq('defect')
     )
-    # ตัด -defect เก่าออกก่อน แล้วค่อยใส่กลับเมื่อเป็น defect
-    base_id = df['cuscode'].str.replace(r'-defect$', '', regex=True, case=False)
+    base_id = df['cuscode'].str.replace(r'-defect$', '', regex=True)
     df['cuscode'] = np.where(is_defect_initial, base_id + '-defect', base_id)
 
     # ---------- 1) รวม region + agent_main_region ----------
@@ -191,20 +179,16 @@ def clean_agent_data(df: pd.DataFrame):
             return a_str
         return f"{a_str} + {b_str}"
 
-    # รวมค่า fin_new_group และ fin_new_mem
     df['agent_region'] = df.apply(lambda row: combine_columns(row['fin_new_group'], row['fin_new_mem']), axis=1)
 
-    # ✅ agent_main_region = agent_region ที่ตัดตัวเลขออก
-    #    เช่น "FIN-BKK1" -> "FIN-BKK", "bkk1 + east2" -> "bkk + east"
     df['agent_main_region'] = (
         df['agent_region']
           .fillna('')
           .astype(str)
-          .str.replace(r'\d+', '', regex=True)  # ลบตัวเลขทั้งหมด
+          .str.replace(r'\d+', '', regex=True)
           .str.strip()
     )
 
-    # กรอง TEST ออก แล้วค่อย drop fin_new_* (เพื่อไม่ให้ length mask เพี้ยน)
     df = df[df['agent_region'] != 'TEST'].copy()
     df = df.drop(columns=['fin_new_group', 'fin_new_mem'])
 
@@ -231,41 +215,35 @@ def clean_agent_data(df: pd.DataFrame):
     }
     df = df.rename(columns=rename_columns)
 
-    # คำนวณ defect_status ใหม่ "หลัง" กรองแถว/รีเนมแล้ว (แก้ปัญหา length mismatch)
+    # defect_status หลัง rename
     is_defect_after = (
         df['agent_id'].str.contains(r'-defect$', case=False, na=False) |
         df['status'].astype(str).str.strip().str.lower().eq('defect')
     )
     df['defect_status'] = np.where(is_defect_after, 'defect', None)
 
-    # เสร็จแล้วค่อยลบ status
     if 'status' in df.columns:
         df = df.drop(columns=['status'])
 
     # ---------- 3) Cleaning fields ----------
-    # flip ตามกฎเดิม
     df['is_experienced_fix'] = df['is_experienced'].apply(
         lambda x: 'เคยขาย' if str(x).strip().lower() == 'ไม่เคยขาย' else 'ไม่เคยขาย'
     )
     df = df.drop(columns=['is_experienced'])
     df = df.rename(columns={'is_experienced_fix': 'is_experienced'})
 
-    # rank 1..10 เท่านั้น
     valid_rank = [str(i) for i in range(1, 11)]
     df.loc[~df['agent_rank'].isin(valid_rank), 'agent_rank'] = np.nan
 
-    # ที่อยู่
     df['agent_address_cleaned'] = df['agent_address'].apply(
         lambda addr: re.sub(r'(เลขที่|หมู่ที่|หมู่บ้าน|ซอย|ถนน)[\s\-]*', '', str(addr)).strip()
     )
     df = df.drop(columns=['agent_address'])
     df = df.rename(columns={'agent_address_cleaned': 'agent_address'})
 
-    # เบอร์โทร (เก็บเลขล้วน)
     df['mobile_number'] = df['mobile_number'].str.replace(r'[^0-9]', '', regex=True)
     df = df.replace(r'^\s*$', pd.NA, regex=True)
 
-    # dedup โดยนับ non-empty
     df_temp = df.replace(r'^\s*$', np.nan, regex=True)
     df['non_empty_count'] = df_temp.notnull().sum(axis=1)
 
@@ -285,21 +263,20 @@ def clean_agent_data(df: pd.DataFrame):
     df_cleaned["hire_date"] = df_cleaned["hire_date"].dt.strftime('%Y%m%d').where(df_cleaned["hire_date"].notnull(), None)
     df_cleaned["hire_date"] = df_cleaned["hire_date"].astype('Int64')
 
-    # date_active → datetime (ให้ SQLAlchemy map เป็น timestamp) + กัน NaT
+    # --------- date_active: ทำให้เป็น datetime จริง และอย่าปล่อยให้เป็น 'NaT' ----------
     if 'date_active' in df_cleaned.columns:
-        df_cleaned["date_active"] = pd.to_datetime(df_cleaned["date_active"], errors='coerce')
-
-        # ตัด timezone ออกถ้ามี
+        dt = pd.to_datetime(df_cleaned["date_active"], errors='coerce')
+        # ตัด timezone ถ้ามี
         try:
-            df_cleaned["date_active"] = df_cleaned["date_active"].dt.tz_localize(None)
+            dt = dt.dt.tz_localize(None)
         except Exception:
             pass
-
-        # แปลงเป็น python datetime หรือ None
-        df_cleaned["date_active"] = df_cleaned["date_active"].apply(
-            lambda x: x.to_pydatetime() if pd.notna(x) else None
-        )
-
+        # แปลงให้เป็น python datetime หรือ None
+        df_cleaned["date_active"] = [
+            (v.to_pydatetime() if isinstance(v, pd.Timestamp) and pd.notna(v) else
+             (v if isinstance(v, datetime) else None))
+            for v in dt
+        ]
 
     # อื่น ๆ
     df_cleaned["zipcode"] = df_cleaned["zipcode"].where(df_cleaned["zipcode"].str.len() == 5, np.nan)
@@ -369,9 +346,10 @@ def clean_agent_data(df: pd.DataFrame):
         return s
     df_cleaned["agent_address"] = df_cleaned["agent_address"].apply(clean_address).replace(['NaN','None','NULL'], None)
 
-    # ตัด space ต้นข้อความเฉพาะ object columns (ยกเว้น agent_id)
+    # 🔒 อย่าทำความสะอาดคอลัมน์วันที่ในลูปด้านล่าง
+    date_cols = {'date_active'}
     for col in df_cleaned.columns:
-        if col == 'agent_id':
+        if col in {'agent_id'} | date_cols:
             continue
         if df_cleaned[col].dtype == 'object':
             df_cleaned[col] = df_cleaned[col].apply(
@@ -381,19 +359,32 @@ def clean_agent_data(df: pd.DataFrame):
     print("\n📊 Cleaning completed")
     return df_cleaned
 
+
 @op
 def load_to_wh(df: pd.DataFrame):
     table_name = 'dim_agent'
     pk_column = 'agent_id'
 
+    # --- sanitize รอบสุดท้าย ป้องกัน NaT/NaN ---
+    if 'date_active' in df.columns:
+        # แปลงเป็น datetime; invalid -> NaT
+        df['date_active'] = pd.to_datetime(df['date_active'], errors='coerce')
+        # ตัด timezone ถ้ามี
+        try:
+            df['date_active'] = df['date_active'].dt.tz_localize(None)
+        except Exception:
+            pass
+        # ส่งเป็น python datetime หรือ None
+        df['date_active'] = df['date_active'].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+
+    # ทดแทน NaN/NaT ทั้งกรอบเป็น None ให้ SQLAlchemy ส่ง NULL
+    df = df.where(pd.notnull(df), None)
+    # -------------------------------------------------
+
     df = df[~df[pk_column].duplicated(keep='first')].copy()
 
-    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
     with target_engine.connect() as conn:
-        df_existing = pd.read_sql(
-            f"SELECT * FROM {table_name}",
-            conn
-        )
+        df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
     df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
 
@@ -404,7 +395,6 @@ def load_to_wh(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    # ✅ Debug: แสดงจำนวนข้อมูลในแต่ละส่วน
     print(f"🔍 Total new data: {len(df)}")
     print(f"🔍 Existing data today: {len(df_existing)}")
     print(f"🔍 New IDs to insert: {len(new_ids)}")
@@ -413,82 +403,66 @@ def load_to_wh(df: pd.DataFrame):
     print(f"🔍 Common new data: {len(df_common_new)}")
     print(f"🔍 Common old data: {len(df_common_old)}")
 
-    # ✅ ตรวจสอบว่ามีข้อมูลที่ซ้ำกันหรือไม่
     if df_common_new.empty or df_common_old.empty:
         print("ℹ️ No common data to compare, skipping update logic")
         merged = pd.DataFrame()
     else:
         merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
 
-    # ✅ ตรวจสอบว่า merged DataFrame ว่างเปล่าหรือไม่
     if merged.empty:
         print("ℹ️ No merged data, skipping comparison")
-        df_diff = pd.DataFrame()
         df_diff_renamed = pd.DataFrame()
     else:
-        # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน merged DataFrame
         print(f"🔍 Merged columns: {list(merged.columns)}")
         print(f"🔍 New data columns: {list(df.columns)}")
 
-    exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-        and f"{col}_new" in merged.columns
-        and f"{col}_old" in merged.columns
-    ]
+        exclude_columns = [pk_column, 'id_contact', 'create_at', 'update_at']
+        compare_cols = [
+            col for col in df.columns
+            if col not in exclude_columns
+            and f"{col}_new" in merged.columns
+            and f"{col}_old" in merged.columns
+        ]
+        print(f"🔍 Compare columns: {compare_cols}")
+        print(f"🔍 merged columns with _new suffix: {[col for col in merged.columns if col.endswith('_new')]}")
+        print(f"🔍 merged columns with _old suffix: {[col for col in merged.columns if col.endswith('_old')]}")
 
-    # ✅ Debug: แสดงคอลัมน์ที่จะเปรียบเทียบ
-    print(f"🔍 Compare columns: {compare_cols}")
-        
-    # ✅ Debug: แสดงคอลัมน์ที่มีอยู่ใน df และ merged
-    print(f"🔍 df columns: {list(df.columns)}")
-    print(f"🔍 merged columns with _new suffix: {[col for col in merged.columns if col.endswith('_new')]}") 
-    print(f"🔍 merged columns with _old suffix: {[col for col in merged.columns if col.endswith('_old')]}")
-
-    # ✅ ตรวจสอบว่ามีคอลัมน์ที่จะเปรียบเทียบหรือไม่
-    if not compare_cols:
-        print("⚠️ No columns to compare, skipping update")
-        df_diff_renamed = pd.DataFrame()
-    else:
-        def is_different(row):
-            for col in compare_cols:
-                val_new = row.get(f"{col}_new")
-                val_old = row.get(f"{col}_old")
-                if pd.isna(val_new) and pd.isna(val_old):
-                    continue
-                elif pd.isna(val_new) or pd.isna(val_old):
-                    return True
-                elif val_new != val_old:
-                    return True
-            return False
-
-        df_diff = merged[merged.apply(is_different, axis=1)].copy()
-            
-        # ✅ ตรวจสอบว่ามีข้อมูลที่แตกต่างหรือไม่
-        if df_diff.empty:
-            print("ℹ️ No differences found, skipping update")
+        if not compare_cols:
+            print("⚠️ No columns to compare, skipping update")
             df_diff_renamed = pd.DataFrame()
         else:
-            update_cols = [f"{col}_new" for col in compare_cols]
-            all_cols = [pk_column] + update_cols
-                
-            # ✅ ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff หรือไม่
-            missing_cols = [col for col in all_cols if col not in df_diff.columns]
-            if missing_cols:
-                print(f"⚠️ Missing columns in df_diff: {missing_cols}")
-                # ใช้เฉพาะคอลัมน์ที่มีอยู่
-                available_cols = [col for col in all_cols if col in df_diff.columns]
-                df_diff_renamed = df_diff[available_cols].copy()
-                # แปลงชื่อคอลัมน์กลับ
-                available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
-                df_diff_renamed.columns = [pk_column] + available_compare_cols
+            def is_different(row):
+                for col in compare_cols:
+                    val_new = row.get(f"{col}_new")
+                    val_old = row.get(f"{col}_old")
+                    if pd.isna(val_new) and pd.isna(val_old):
+                        continue
+                    elif pd.isna(val_new) or pd.isna(val_old):
+                        return True
+                    elif val_new != val_old:
+                        return True
+                return False
+
+            df_diff = merged[merged.apply(is_different, axis=1)].copy()
+            if df_diff.empty:
+                print("ℹ️ No differences found, skipping update")
+                df_diff_renamed = pd.DataFrame()
             else:
-                df_diff_renamed = df_diff[all_cols].copy()
-            df_diff_renamed.columns = [pk_column] + compare_cols
+                update_cols = [f"{col}_new" for col in compare_cols]
+                all_cols = [pk_column] + update_cols
+                missing_cols = [col for col in all_cols if col not in df_diff.columns]
+                if missing_cols:
+                    print(f"⚠️ Missing columns in df_diff: {missing_cols}")
+                    available_cols = [col for col in all_cols if col in df_diff.columns]
+                    df_diff_renamed = df_diff[available_cols].copy()
+                    available_compare_cols = [col.replace('_new', '') for col in available_cols if col != pk_column]
+                    df_diff_renamed.columns = [pk_column] + available_compare_cols
+                else:
+                    df_diff_renamed = df_diff[all_cols].copy()
+                    df_diff_renamed.columns = [pk_column] + compare_cols
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    print(f"🔄 Update: {len(df_diff_renamed) if 'df_diff_renamed' in locals() else 0} rows")
 
     metadata_table = Table(table_name, MetaData(), autoload_with=target_engine)
 
@@ -496,16 +470,15 @@ def load_to_wh(df: pd.DataFrame):
         for i in range(0, len(df), chunk_size):
             yield df.iloc[i:i + chunk_size]
 
-    # ✅ Insert batch (ใช้ UPSERT แทน INSERT)
+    # ✅ Upsert batch (insert ฝั่ง new)
     if not df_to_insert.empty:
-        # ✅ ลบข้อมูลซ้ำใน df_to_insert
         df_to_insert = df_to_insert[~df_to_insert[pk_column].duplicated(keep='first')].copy()
         print(f"🔍 After removing duplicates in insert data: {len(df_to_insert)}")
         
         df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna()].copy()
         dropped = len(df_to_insert) - len(df_to_insert_valid)
         if dropped > 0:
-            print(f"⚠️ Skipped {dropped} rows")
+            print(f"⚠️ Skipped {dropped} rows (missing PK)")
         if not df_to_insert_valid.empty:
             with target_engine.begin() as conn:
                 for batch_df in chunk_dataframe(df_to_insert_valid):
@@ -522,8 +495,8 @@ def load_to_wh(df: pd.DataFrame):
                     )
                     conn.execute(stmt)
 
-    # ✅ Update batch
-    if not df_diff_renamed.empty:
+    # ✅ Upsert batch (update เฉพาะต่าง)
+    if 'df_diff_renamed' in locals() and not df_diff_renamed.empty:
         with target_engine.begin() as conn:
             for batch_df in chunk_dataframe(df_diff_renamed):
                 stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
@@ -533,7 +506,6 @@ def load_to_wh(df: pd.DataFrame):
                     for c in valid_column_names
                     if c not in [pk_column, 'id_contact', 'create_at', 'update_at'] and c in batch_df.columns
                 }
-                # update_at ให้เป็นเวลาปัจจุบัน
                 update_columns['update_at'] = datetime.now()
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
@@ -546,7 +518,8 @@ def load_to_wh(df: pd.DataFrame):
 
 @op
 def clean_null_values_op(df: pd.DataFrame) -> pd.DataFrame:
-    return df.replace(['None', 'none', 'nan', 'NaN', ''], np.nan)
+    # รวม 'NaT' ด้วย ป้องกัน string หลุดรอด
+    return df.replace(['None', 'none', 'nan', 'NaN', 'NaT', ''], np.nan)
 
 @job
 def dim_agent_etl():
