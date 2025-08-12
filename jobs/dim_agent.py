@@ -88,13 +88,10 @@ def extract_agent_data():
     query_career = "SELECT cuscode, career FROM policy_register"
     df_career = pd.read_sql(query_career, source_engine)
 
-    # Debug คร่าว ๆ
     print("📦 df_main:", df_main.shape)
     print("📦 df_career:", df_career.shape)
 
     df_merged = pd.merge(df_main, df_career, on='cuscode', how='left')
-
-    # ทำความสะอาด career เบื้องต้น
     df_merged['career'] = df_merged['career'].astype(str).str.strip()
 
     return df_merged
@@ -210,7 +207,7 @@ def clean_agent_data(df: pd.DataFrame):
     df_cleaned["hire_date"] = df_cleaned["hire_date"].dt.strftime('%Y%m%d').where(df_cleaned["hire_date"].notnull(), None)
     df_cleaned["hire_date"] = df_cleaned["hire_date"].astype('Int64')
 
-    # --------- date_active: ทำให้เป็น datetime จริง และอย่าปล่อยให้เป็น 'NaT' ----------
+    # --------- date_active: ทำให้เป็น datetime จริง และไม่เหลือ 'NaT' ----------
     if 'date_active' in df_cleaned.columns:
         dt = pd.to_datetime(df_cleaned["date_active"], errors='coerce')
         try:
@@ -312,7 +309,6 @@ def load_to_wh(df: pd.DataFrame):
 
     # --- sanitize รอบสุดท้าย ป้องกัน NaT/NaN ---
     if 'date_active' in df.columns:
-        # กันเคสค่ามาเป็น string 'NaT'
         mask_nat_str = df['date_active'].astype(str).str.strip().str.upper().eq('NAT')
         if mask_nat_str.any():
             print(f"⚠️ Found 'NaT' as STRING in date_active: {mask_nat_str.sum()} rows (pre-coerce)")
@@ -397,29 +393,57 @@ def load_to_wh(df: pd.DataFrame):
         for i in range(0, len(dfx), chunk_size):
             yield dfx.iloc[i:i + chunk_size]
 
+    # ---------- helper: sanitize per-batch to dict records ----------
+    def sanitize_batch(df_batch: pd.DataFrame) -> list[dict]:
+        """ทำความสะอาด batch ให้ชัวร์ว่า date_active ไม่ใช่ 'NaT' string และเป็น datetime/None เท่านั้น"""
+        if 'date_active' in df_batch.columns:
+            mask_nat_str = df_batch['date_active'].astype(str).str.strip().str.upper().eq('NAT')
+            if mask_nat_str.any():
+                print(f"⚠️ Sanitize: found 'NaT' STRING {mask_nat_str.sum()} rows -> set None")
+                df_batch.loc[mask_nat_str, 'date_active'] = None
+
+            s = pd.to_datetime(df_batch['date_active'], errors='coerce')
+            try:
+                s = s.dt.tz_localize(None)
+            except Exception:
+                pass
+            df_batch['date_active'] = s
+
+        # แทน NaN -> None ทั้งกรอบ
+        df_batch = df_batch.where(pd.notnull(df_batch), None)
+
+        records = []
+        for rec in df_batch.to_dict(orient="records"):
+            v = rec.get("date_active", None)
+            if isinstance(v, pd.Timestamp):
+                rec["date_active"] = v.to_pydatetime() if pd.notna(v) else None
+            elif isinstance(v, datetime):
+                pass
+            elif v is None:
+                pass
+            else:
+                if isinstance(v, str) and v.strip().upper() in ("NAT", "NAN", "NULL", ""):
+                    rec["date_active"] = None
+                else:
+                    rec["date_active"] = None
+            records.append(rec)
+        return records
+    # ----------------------------------------------------------------
+
     # ✅ Upsert batch (insert ฝั่ง new)
     if not df_to_insert.empty:
         df_to_insert = df_to_insert[~df_to_insert[pk_column].duplicated(keep='first')].copy()
 
         with target_engine.begin() as conn:
             for batch_df in chunk_dataframe(df_to_insert):
-                # กัน 'NaT' รอบสุดท้ายใน batch
-                if 'date_active' in batch_df.columns:
-                    mask_nat_str = batch_df['date_active'].astype(str).str.strip().str.upper().eq('NAT')
-                    if mask_nat_str.any():
-                        print(f"⚠️ Batch insert: found 'NaT' STRING: {mask_nat_str.sum()} rows -> set None")
-                        batch_df.loc[mask_nat_str, 'date_active'] = None
+                records = sanitize_batch(batch_df.copy())
 
-                    batch_df['date_active'] = pd.to_datetime(batch_df['date_active'], errors='coerce')
-                    try:
-                        batch_df['date_active'] = batch_df['date_active'].dt.tz_localize(None)
-                    except Exception:
-                        pass
-                    batch_df['date_active'] = batch_df['date_active'].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+                # debug ชี้เคสผิดปกติ (ถ้ามี)
+                bad = [i for i, r in enumerate(records) if isinstance(r.get('date_active'), str)]
+                if bad:
+                    print(f"🧪 string date_active rows in INSERT batch: {len(bad)} -> {bad[:5]}")
 
-                batch_df = batch_df.where(pd.notnull(batch_df), None)
-
-                stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
+                stmt = pg_insert(metadata_table).values(records)
                 valid_column_names = [c.name for c in metadata_table.columns]
                 update_columns = {
                     c: stmt.excluded[c]
@@ -436,22 +460,13 @@ def load_to_wh(df: pd.DataFrame):
     if 'df_diff_renamed' in locals() and not df_diff_renamed.empty:
         with target_engine.begin() as conn:
             for batch_df in chunk_dataframe(df_diff_renamed):
-                if 'date_active' in batch_df.columns:
-                    mask_nat_str = batch_df['date_active'].astype(str).str.strip().str.upper().eq('NAT')
-                    if mask_nat_str.any():
-                        print(f"⚠️ Batch update: found 'NaT' STRING: {mask_nat_str.sum()} rows -> set None")
-                        batch_df.loc[mask_nat_str, 'date_active'] = None
+                records = sanitize_batch(batch_df.copy())
 
-                    batch_df['date_active'] = pd.to_datetime(batch_df['date_active'], errors='coerce')
-                    try:
-                        batch_df['date_active'] = batch_df['date_active'].dt.tz_localize(None)
-                    except Exception:
-                        pass
-                    batch_df['date_active'] = batch_df['date_active'].apply(lambda x: x.to_pydatetime() if pd.notna(x) else None)
+                bad = [i for i, r in enumerate(records) if isinstance(r.get('date_active'), str)]
+                if bad:
+                    print(f"🧪 string date_active rows in UPDATE batch: {len(bad)} -> {bad[:5]}")
 
-                batch_df = batch_df.where(pd.notnull(batch_df), None)
-
-                stmt = pg_insert(metadata_table).values(batch_df.to_dict(orient="records"))
+                stmt = pg_insert(metadata_table).values(records)
                 valid_column_names = [c.name for c in metadata_table.columns]
                 update_columns = {
                     c: stmt.excluded[c]
@@ -476,6 +491,7 @@ def clean_null_values_op(df: pd.DataFrame) -> pd.DataFrame:
 @job
 def dim_agent_etl():
     load_to_wh(clean_agent_data(clean_null_values_op(extract_agent_data())))
+
 
 
 # if __name__ == "__main__":
