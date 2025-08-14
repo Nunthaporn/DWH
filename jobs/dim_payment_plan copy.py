@@ -27,7 +27,7 @@ def extract_payment_data():
     query1 = f"""
         SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
         FROM fin_system_pay
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
+        WHERE update_at BETWEEN '2025-08-13' AND '2025-08-31'
 
     """
     df_pay = pd.read_sql(query1, source_engine)
@@ -64,6 +64,7 @@ def clean_payment_data(df: pd.DataFrame):
         ch == 'เข้าฟิน',
         ch == 'เข้าประกัน',
         (chm.isin(['ผ่อนบัตรเครดิต', 'ผ่อนบัตร']) & cb.isin(['creditcard', '']) & ch.eq('ผ่อนบัตร')),
+        (chm.isin(['ผ่อนบัตร']) & cb.isin(['creditcard', '']) & ch.eq('ผ่อนบัตรเครดิต')),
         (chm.eq('ตัดบัตรเครดิต') & cb.isin(['']) & ch.eq('ผ่อนบัตร')),
         (chm.eq('ผ่อนโอน') & cb.isin(['qrcode']) & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนบัตร')),
@@ -75,6 +76,7 @@ def clean_payment_data(df: pd.DataFrame):
         (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ตัดบัตรเครดิต')),
         (chm.eq('ผ่อนชำระ') & (cb.isin(['qrcode', '']) | cb.str.startswith('ธนาคาร')) & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนโอน')),
+        (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
         (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนโอน') & cb.eq('') & ch.eq('ผ่อนโอน')),
         (chm.eq('ผ่อนบัตรเครดิต') & cb.eq('ธนาคารกรุงไทย') & ch.eq('ผ่อนบัตร')),
@@ -143,7 +145,7 @@ def clean_payment_data(df: pd.DataFrame):
     df['payment_reciever'] = df['payment_reciever'].replace('เข้าฟิลลิป', 'เข้าฟินลิป')
 
     # ✅ Clean values
-    df = df[~df['quotation_num'].str.endswith('-r', na=False)]
+    # df = df[~df['quotation_num'].str.endswith('-r', na=False)]
     df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce').fillna(0).astype(int)
     df['installment_number'] = df['installment_number'].replace({0: 1})
 
@@ -154,7 +156,7 @@ def clean_payment_data(df: pd.DataFrame):
         AND type_insure IN ('ประกันรถ', 'ตรอ')
     """
     df_del = pd.read_sql(query_del, source_engine)
-    df = df[~df['quotation_num'].isin(df_del['quo_num'])]
+    # df = df[~df['quotation_num'].isin(df_del['quo_num'])]
     df = df[df['quotation_num'] != 'FQ2505-24999']
 
     print("\n📊 Cleaning completed")
@@ -299,4 +301,4 @@ if __name__ == "__main__":
     # print(f"💾 Saved to {output_path}")
 
     load_payment_data(df_clean)
-    print("🎉 completed! Data upserted to dim_payment_plan.")
+    # print("🎉 completed! Data upserted to dim_payment_plan.")

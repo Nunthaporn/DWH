@@ -62,7 +62,7 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 def extract_car_data():
     # ปรับช่วงเวลาได้ตามต้องการ
     start_str = '2025-01-01'
-    end_str = '2025-08-09'
+    end_str = '2025-08-31'
 
     try:
         with source_engine.connect() as conn:
@@ -76,11 +76,11 @@ def extract_car_data():
                 return pd.DataFrame()
 
             count_pay = conn.execute(
-                text("SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN :s AND :e"),
+                text("SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN :s AND :e"),
                 {"s": start_str, "e": end_str}
             ).scalar()
             count_plan = conn.execute(
-                text("SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN :s AND :e"),
+                text("SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN :s AND :e"),
                 {"s": start_str, "e": end_str}
             ).scalar()
             print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
@@ -90,11 +90,11 @@ def extract_car_data():
                 now = datetime.now()
                 start_str_3 = (now - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
                 count_pay_3 = conn.execute(
-                    text("SELECT COUNT(*) FROM fin_system_pay WHERE update_at BETWEEN :s AND :e"),
+                    text("SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN :s AND :e"),
                     {"s": start_str_3, "e": end_str}
                 ).scalar()
                 count_plan_3 = conn.execute(
-                    text("SELECT COUNT(*) FROM fin_system_select_plan WHERE update_at BETWEEN :s AND :e"),
+                    text("SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN :s AND :e"),
                     {"s": start_str_3, "e": end_str}
                 ).scalar()
 
@@ -111,32 +111,32 @@ def extract_car_data():
 
     if start_str and end_str:
         query_pay = f"""
-            SELECT quo_num, id_motor1, id_motor2, update_at
+            SELECT quo_num, id_motor1, id_motor2, datestart
             FROM fin_system_pay
-            WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
-            ORDER BY update_at DESC
+            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            ORDER BY datestart DESC
         """
         query_plan = f"""
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, update_at
+                   weight_car, cc_car, color_car, datestart
             FROM fin_system_select_plan
-            WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
-            ORDER BY update_at DESC
+            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
+            ORDER BY datestart DESC
         """
     else:
         query_pay = """
-            SELECT quo_num, id_motor1, id_motor2, update_at
+            SELECT quo_num, id_motor1, id_motor2, datestart
             FROM fin_system_pay
-            ORDER BY update_at DESC
+            ORDER BY datestart DESC
             LIMIT 1000
         """
         query_plan = """
             SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
                    yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, update_at
+                   weight_car, cc_car, color_car, datestart
             FROM fin_system_select_plan
-            ORDER BY update_at DESC
+            ORDER BY datestart DESC
             LIMIT 1000
         """
 
@@ -209,7 +209,7 @@ def clean_car_data(df: pd.DataFrame):
         df = df.drop_duplicates(subset=['id_motor2'], keep='first')
         print(f"📊 After removing id_motor2 duplicates: {df.shape}")
 
-    df = df.drop(columns=['update_at_x', 'update_at_y'], errors='ignore')
+    df = df.drop(columns=['datestart_x', 'datestart_y'], errors='ignore')
 
     rename_columns = {
         "quo_num": "quotation_num",
@@ -327,7 +327,6 @@ def clean_car_data(df: pd.DataFrame):
             df_cleaned[col] = df_cleaned[col].map(lambda x: re.sub(r'^[\s\-–_\.\/\+"\']+', '', str(x)) if isinstance(x, str) else x)
             df_cleaned[col] = df_cleaned[col].map(lambda x: re.sub(r'\s+', ' ', str(x)).strip() if isinstance(x, str) else x)
 
-    # ปรับชื่อ/แปล brand/series/subseries
     def remove_leading_vowels(v):
         if pd.isnull(v): return v
         v = str(v).strip()
@@ -428,7 +427,7 @@ def clean_car_data(df: pd.DataFrame):
     print(f"📊 Final records after removing car_id duplicates: {len(df_cleaned)}")
     return df_cleaned
 
-# ---------- NEW: Safe UPSERT & Force-update helpers ----------
+# ---------- UPSERT helper (no forcing) ----------
 
 def upsert_batches(table, rows, key_col, update_cols, batch_size=5000):
     """
@@ -449,43 +448,6 @@ def upsert_batches(table, rows, key_col, update_cols, batch_size=5000):
             print(f"❌ Upsert batch {i//batch_size + 1} failed: {e}")
             # ไม่ใช้ conn ต่อ ปล่อย rollback แล้วไป batch ถัดไป
 
-def force_update_quotation_num(df, table_name, pk_column):
-    """
-    บังคับอัปเดต quotation_num เฉพาะแถวที่ df มีค่า (ไม่ใช่ NaN/None)
-    ใช้ executemany เป็น batch และเปิด TX ใหม่ทุกรอบ
-    """
-    if 'quotation_num' not in df.columns:
-        print("ℹ️ Column 'quotation_num' not in DataFrame, skip forcing")
-        return
-    pairs = df[[pk_column, 'quotation_num']].dropna(subset=['quotation_num']).to_dict(orient='records')
-    if not pairs:
-        print("ℹ️ No quotation_num present in DataFrame to force-update")
-        return
-
-    print(f"🔧 Forcing quotation_num update for {len(pairs)} rows (executemany by batch)")
-    batch_size = 5000
-    for i in range(0, len(pairs), batch_size):
-        batch = pairs[i:i+batch_size]
-        try:
-            with target_engine.begin() as conn:  # NEW TX per batch
-                conn.execute(
-                    text(f"UPDATE {table_name} SET quotation_num = :q WHERE {pk_column} = :k"),
-                    [{"q": r["quotation_num"], "k": r["car_id"]} for r in batch]
-                )
-            print(f"✅ Forced quotation_num batch {i//batch_size + 1}")
-        except Exception as e:
-            print(f"⚠️ Force-update batch {i//batch_size + 1} failed: {e}")
-            # Fallback per-row with AUTOCOMMIT เพื่อกัน TX ค้าง
-            with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-                for r in batch:
-                    try:
-                        conn.execute(
-                            text(f"UPDATE {table_name} SET quotation_num = :q WHERE {pk_column} = :k"),
-                            {"q": r["quotation_num"], "k": r["car_id"]}
-                        )
-                    except Exception as ee:
-                        print(f"❌ Failed per-row PK={r['car_id']}: {ee}")
-
 @op
 def load_car_data(df: pd.DataFrame):
     table_name = 'dim_car'
@@ -499,7 +461,7 @@ def load_car_data(df: pd.DataFrame):
         print(f"⚠️ WARNING: Column '{pk_column}' not found in DataFrame! Skipping DB ops")
         return
 
-    # ✅ ตรวจสอบ/เพิ่มคอลัมน์ quotation_num
+    # ✅ ตรวจสอบ/เพิ่มคอลัมน์ quotation_num (ครั้งเดียวถ้ายังไม่มี)
     def check_and_add_column():
         with target_engine.begin() as conn:
             inspector = inspect(conn)
@@ -509,7 +471,7 @@ def load_car_data(df: pd.DataFrame):
                 conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN quotation_num VARCHAR'))
     retry_db_operation(check_and_add_column)
 
-    # ✅ เตรียมข้อมูลสำหรับ upsert (ทั้ง insert+update ทำพร้อมกัน)
+    # ✅ เตรียมข้อมูลสำหรับ upsert
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     df = df[df[pk_column].notna()].copy()
 
@@ -518,7 +480,7 @@ def load_car_data(df: pd.DataFrame):
     table = Table(table_name, metadata, autoload_with=target_engine)
 
     # ระบุคอลัมน์ที่จะอัปเดต (ยกเว้น PK และ audit fields)
-    exclude_cols = {pk_column, 'car_sk', 'create_at', 'update_at'}
+    exclude_cols = {pk_column, 'car_sk', 'create_at', 'datestart'}
     update_cols = [c for c in df.columns if c not in exclude_cols]
 
     rows_to_upsert = df.replace({np.nan: None}).to_dict(orient='records')
@@ -528,14 +490,24 @@ def load_car_data(df: pd.DataFrame):
     else:
         print("ℹ️ Nothing to upsert")
 
-    # ✅ บังคับคืนค่า quotation_num ให้แน่นอน
-    force_update_quotation_num(df, table_name, pk_column)
-
-    print("✅ Insert/Update completed (UPSERT + forced quotation restore)")
+    print("✅ Insert/Update completed (UPSERT only — no forcing)")
 
 @job
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
+
+if __name__ == "__main__":
+    df_raw = extract_car_data()
+    print("✅ Extracted data shape:", df_raw.shape)
+
+    if not df_raw.empty:
+        df_clean = clean_car_data(df_raw)
+        print("✅ Cleaned data shape:", df_clean.shape)
+        print("✅ Cleaned columns:", list(df_clean.columns))
+        load_car_data(df_clean)
+        print("🎉 completed! Data to dim_car.")
+    else:
+        print("❌ No data extracted, skipping cleaning and saving")
 
 if __name__ == "__main__":
     df_raw = extract_car_data()

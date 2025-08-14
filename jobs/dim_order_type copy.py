@@ -33,13 +33,13 @@ def extract_order_type_data():
     # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
     # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
 
-    start_str = '2025-01-01'
-    end_str = '2025-08-09'
+    start_str = '2025-08-13'
+    end_str = '2025-08-31'
 
     query_plan = f"""
         SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key
         FROM fin_system_select_plan
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+        WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
 
     """
     query_order = """
@@ -220,6 +220,8 @@ def clean_order_type_data(df: pd.DataFrame):
 
     # ลบตัวช่วยหลังคำนวณแล้ว
     df.drop(columns=["type_key", "app_type"], inplace=True, errors="ignore")
+
+    df.loc[df['order_type'] == 1, 'order_type'] = np.nan
 
     df.rename(columns={
         "quo_num": "quotation_num",

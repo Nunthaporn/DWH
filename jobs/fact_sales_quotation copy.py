@@ -62,10 +62,10 @@ def extract_sales_quotation_data():
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
         
         df_plan = pd.read_sql("""
-            SELECT quo_num, type_insure, update_at, id_government_officer, status_gpf, quo_num_old,
+            SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp, type_car, chanel_key, id_cus  
             FROM fin_system_select_plan 
-            WHERE update_at BETWEEN '2025-01-01' AND '2025-08-31'
+            WHERE datestart BETWEEN '2025-01-01' AND '2025-08-31'
                 AND id_cus NOT LIKE '%%FIN-TestApp%%'
                 AND id_cus NOT LIKE '%%FIN-TestApp3%%'
                 AND id_cus NOT LIKE '%%FIN-TestApp2%%'
@@ -81,7 +81,7 @@ def extract_sales_quotation_data():
         """, source_engine_task)
 
         df_pay = pd.read_sql("""
-            SELECT quo_num, update_at, numpay, show_price_ins, show_price_prb, show_price_total,
+            SELECT quo_num, datestart, numpay, show_price_ins, show_price_prb, show_price_total,
                    show_price_check, show_price_service, show_price_taxcar, show_price_fine,
                    show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
                    discount_mkt, discount_government, discount_government_fin,
@@ -134,8 +134,8 @@ def clean_sales_quotation_data(inputs):
         logger.info("🧹 เริ่มทำความสะอาดข้อมูล...")
 
         # ✅ กรองข้อมูลซ้ำใน df_pay
-        df_pay['update_at'] = pd.to_datetime(df_pay['update_at'], errors='coerce')
-        df_pay = df_pay.sort_values('update_at').drop_duplicates(subset='quo_num', keep='last')
+        df_pay['datestart'] = pd.to_datetime(df_pay['datestart'], errors='coerce')
+        df_pay = df_pay.sort_values('datestart').drop_duplicates(subset='quo_num', keep='last')
 
         # ✅ Merge ข้อมูลทั้งหมด
         df_merged = df_plan.merge(df_order, on='quo_num', how='left')
@@ -155,8 +155,8 @@ def clean_sales_quotation_data(inputs):
         # ✅ Rename columns อย่างชัดเจน
         col_map = {
             'quo_num': 'quotation_num',
-            'update_at': 'quotation_date',
-            'update_at_pay': 'transaction_date',
+            'datestart': 'quotation_date',
+            'datestart_pay': 'transaction_date',
             'datekey': 'order_time',
             'type_insure': 'type_insurance',
             'id_government_officer': 'rights_government',
@@ -350,7 +350,7 @@ def clean_sales_quotation_data(inputs):
 
 @op
 def load_sales_quotation_data(df: pd.DataFrame):
-    table_name = 'fact_sales_quotation'
+    table_name = 'fact_sales_quotation_temp'
     pk_column = 'quotation_num'
     
     # ✅ กรองซ้ำใน DataFrame ใหม่
@@ -379,7 +379,7 @@ def load_sales_quotation_data(df: pd.DataFrame):
     df_common_new = df[df[pk_column].isin(common_ids)].copy()
     df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
 
-    exclude_columns = [pk_column, 'create_at', 'update_at']
+    exclude_columns = [pk_column, 'create_at', 'datestart']
     compare_cols = [col for col in df.columns if col not in exclude_columns]
     
     print(f"🔍 Columns to compare for updates: {compare_cols}")
@@ -440,7 +440,7 @@ def load_sales_quotation_data(df: pd.DataFrame):
                 else:
                     record[col] = value
             record['create_at'] = current_time
-            record['update_at'] = current_time
+            record['datestart'] = current_time
             records.append(record)
         with target_engine.begin() as conn:
             conn.execute(metadata.insert(), records)
@@ -463,9 +463,9 @@ def load_sales_quotation_data(df: pd.DataFrame):
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name not in [pk_column, 'create_at', 'update_at']
+                    if c.name not in [pk_column, 'create_at', 'datestart']
                 }
-                update_columns['update_at'] = pd.Timestamp.now()
+                update_columns['datestart'] = pd.Timestamp.now()
                 print(f"🔍 Updating columns for fact_sales_quotation {record.get(pk_column)}: {list(update_columns.keys())}")
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
@@ -492,7 +492,9 @@ if __name__ == "__main__":
         df_clean.to_excel(output_path, index=False, engine='openpyxl')
         print(f"💾 Saved to {output_path}")
 
-        # logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
+        load_sales_quotation_data(df_clean)
+
+        logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
         
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
