@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, inspect, text
+from sqlalchemy import create_engine, MetaData, Table, inspect, text, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime
 
 # ✅ Load environment variables
 load_dotenv()
@@ -75,242 +76,207 @@ def extract_card_agent_data() -> pd.DataFrame:
 def clean_card_agent_data(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.lower()
 
-    # ✅ Replace string 'NaN', 'nan', 'None' with actual np.nan
+    # Normalize ค่าที่เป็นสตริงว่าง/NaN
     df.replace(['NaN', 'nan', 'None'], np.nan, inplace=True)
+    df = df.replace(['nan', 'NaN', 'null', ''], np.nan)
+    df = df.replace(r'^\s*$', np.nan, regex=True)
 
-    # ✅ Handle date columns properly
-    date_columns = [col for col in df.columns if 'date' in col.lower()]
-    for col in date_columns:
-        # convert to datetime and force errors to NaT
-        df[col] = pd.to_datetime(df[col], errors='coerce')
-        # convert NaT to None for PostgreSQL compatibility
-        df[col] = df[col].where(pd.notnull(df[col]), None)
+    # จัดการคอลัมน์วันที่
+    date_columns = [c for c in df.columns if 'date' in c]
+    for c in date_columns:
+        df[c] = pd.to_datetime(df[c], errors='coerce').where(lambda s: s.notna(), None)
 
-    # ✅ Clean up ID card columns
-    id_card_columns = ['id_card_ins', 'id_card_life']
-    for col in id_card_columns:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-            df[col] = df[col].replace(['None', 'nan', 'NaN'], None)
-            df[col] = df[col].str.replace(r'\D+', '', regex=True)  # remove non-digit
-            df[col] = df[col].replace('', None)
+    # ทำความสะอาดคอลัมน์เลขบัตร
+    for c in ['id_card_ins', 'id_card_life']:
+        if c in df.columns:
+            s = df[c].astype(str)
+            s = s.replace(['None','nan','NaN'], None)
+            s = s.str.replace(r'\D+', '', regex=True).replace('', None)
+            df[c] = s
 
-    # ✅ Convert all NaN values to None for PostgreSQL compatibility
-    df = df.where(pd.notnull(df), None)
+    # --------- จับคู่ด้วย key ที่ normalize เพื่อกัน space/case ---------
+    # agent_id ที่ตัด space รอบ ๆ (แต่ยังคงรูปเดิมไว้ใน df['agent_id'])
+    df['agent_id_stripped'] = df['agent_id'].astype(str).str.strip()
+    # ใช้ lower สำหรับการตรวจสอบเท่านั้น
+    aid_norm = df['agent_id_stripped'].str.lower()
 
-    print("\n📊 Cleaning completed")
-    return df
+    df['has_defect'] = aid_norm.str.endswith('-defect').astype(int)
+    df['base_key']  = aid_norm.str.replace(r'-defect$', '', regex=True)
+    # base_id ที่ “สวย” สำหรับสร้างชื่อผลลัพธ์ (ไม่ lower)
+    df['base_pretty'] = df['agent_id_stripped'].str.replace(r'-defect$', '', regex=True)
+
+    # คอลัมน์ที่ใช้คำนวณความสมบูรณ์
+    exclude_for_score = {'agent_id', 'agent_id_stripped', 'has_defect', 'base_key', 'base_pretty'}
+    score_cols = [c for c in df.columns if c not in exclude_for_score]
+
+    def _is_present(x):
+        if x is None: return False
+        if isinstance(x, float) and pd.isna(x): return False
+        if isinstance(x, str) and x.strip() == '': return False
+        return True
+
+    df['completeness_score'] = df[score_cols].apply(lambda s: sum(_is_present(v) for v in s.values), axis=1)
+
+    # --- เลือกข้อมูลตามกฎ ---
+    out_rows = []
+    for base, g in df.groupby('base_key', sort=False):
+        has_def = (g['has_defect'] == 1).any()
+        has_norm = (g['has_defect'] == 0).any()
+
+        g_sorted = g.sort_values(['completeness_score', 'has_defect'], ascending=[False, False])
+        chosen = g_sorted.iloc[0].copy()
+
+        if has_def and has_norm:
+            # มีทั้งคู่ → ใช้ข้อมูลที่สมบูรณ์สุด แล้ว "บังคับ" agent_id ให้ลงท้าย -defect
+            base_pretty = chosen['base_pretty']  # จาก id ที่ strip แล้ว (รักษาเคส/ฟอร์แมตเดิม)
+            chosen['agent_id'] = f"{base_pretty}-defect"
+        else:
+            # มีชนิดเดียว → ไม่ยุ่ง agent_id
+            # แต่ถ้า agent_id มี space รอบ ๆ ให้ใช้ที่ strip แล้ว
+            chosen['agent_id'] = chosen['agent_id_stripped']
+
+        out_rows.append(chosen)
+
+    dfc = pd.DataFrame(out_rows).reset_index(drop=True)
+
+    # ลบคอลัมน์ช่วย
+    dfc = dfc.drop(columns=['has_defect','completeness_score','base_key','base_pretty','agent_id_stripped'])
+
+    # กันซ้ำ agent_id อีกรอบ (เผื่อ source ข้อมูลซ้ำแถว)
+    dfc = dfc.drop_duplicates(subset=['agent_id'], keep='first')
+
+    # แปลง NaN/NaT → None
+    dfc = dfc.where(pd.notnull(dfc), None)
+
+    print("\n📊 Cleaning completed (normalize for matching only; force '-defect' ONLY if both exist)")
+    # Debug ช่วยตรวจสอบผล
+    sample = dfc[dfc['agent_id'].str.contains('113033', na=False)].head(5)
+    if not sample.empty:
+        print("🔎 sample around 113033:", sample[['agent_id','agent_name']].to_dict('records'))
+    return dfc
 
 @op
 def load_card_agent_data(df: pd.DataFrame):
-    table_name = 'dim_agent_card'
-    pk_column = 'agent_id'
+    table_name = "dim_agent_card"
+    pk_column = "agent_id"
 
-    # ✅ กรอง agent_id ซ้ำจาก DataFrame ใหม่
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
-    
-    # ✅ กรองข้อมูลที่ agent_id ไม่เป็น None
-    df = df[df[pk_column].notna()].copy()
-    
-    if df.empty:
-        print("⚠️ No valid data to process")
-        return
+    # 0) ทำความสะอาด NaN -> None
+    df = df.where(pd.notnull(df), None)
 
-    # ✅ โหลดเฉพาะ agent_id ที่มีอยู่ในข้อมูลใหม่ (ไม่โหลดทั้งหมด)
-    agent_ids = df[pk_column].tolist()
-    
-    if not agent_ids:
-        df_existing = pd.DataFrame()
-    else:
-        # สร้าง query string โดยตรงแทนการใช้ placeholders
-        agent_ids_str = ','.join([f"'{id}'" for id in agent_ids])
-        query_existing = f"""
-            SELECT * FROM {table_name} 
-            WHERE {pk_column} IN ({agent_ids_str})
-        """
+    # 1) ดึงคีย์ทั้งหมดในตาราง (ง่ายสุดและเร็วพอสำหรับหลักหมื่น/แสน)
+    with target_engine.connect() as conn:
+        df_existing = pd.read_sql(f"SELECT {pk_column} FROM {table_name}", conn)
 
-        with target_engine.connect() as conn:
-            df_existing = pd.read_sql(
-                text(query_existing), 
-                conn
-            )
+    # 2) แบ่ง new vs common
+    all_existing = set(df_existing[pk_column])
+    new_ids = set(df[pk_column]) - all_existing
+    common_ids = set(df[pk_column]) & all_existing
 
-    print(f"📊 New data: {len(df)} rows")
-    print(f"📊 Existing data found: {len(df_existing)} rows")
-
-    # ✅ กรอง agent_id ซ้ำจากข้อมูลเก่า
-    if not df_existing.empty:
-        df_existing = df_existing[~df_existing[pk_column].duplicated(keep='first')].copy()
-
-    # ✅ Identify agent_id ใหม่ (ไม่มีใน DB)
-    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
-    new_ids = set(df[pk_column]) - existing_ids
     df_to_insert = df[df[pk_column].isin(new_ids)].copy()
+    df_to_upsert = df[df[pk_column].isin(common_ids)].copy()  # สำหรับ UPDATE
 
-    # ✅ Identify agent_id ที่มีอยู่แล้ว
-    common_ids = set(df[pk_column]) & existing_ids
-    df_common_new = df[df[pk_column].isin(common_ids)].copy()
-    df_common_old = df_existing[df_existing[pk_column].isin(common_ids)].copy()
+    print(f"🆕 Insert candidates: {len(df_to_insert)}")
+    print(f"🔄 Update candidates: {len(df_to_upsert)}")
 
-    # ✅ ระบุคอลัมน์ที่ใช้เปรียบเทียบ (ยกเว้น key และ audit fields)
-    exclude_columns = [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
-    compare_cols = [
-        col for col in df.columns
-        if col not in exclude_columns
-    ]
-    
-    print(f"🔍 Columns to compare for updates: {compare_cols}")
-    print(f"🔍 Excluded columns (audit fields): {exclude_columns}")
+    # 3) โหลดเมทาดาท้า
+    metadata_tbl = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    # ✅ เปรียบเทียบข้อมูลแบบ Vectorized (เร็วกว่า apply)
-    df_to_update = pd.DataFrame()
-    if not df_common_new.empty and not df_common_old.empty:
-        # Merge ด้วย suffix (_new, _old)
-        merged = df_common_new.merge(df_common_old, on=pk_column, suffixes=('_new', '_old'))
-        
-        # ตรวจสอบว่าคอลัมน์ที่มีอยู่ใน merged DataFrame
-        available_cols = []
-        for col in compare_cols:
-            if f"{col}_new" in merged.columns and f"{col}_old" in merged.columns:
-                available_cols.append(col)
-        
-        if available_cols:
-            # สร้าง boolean mask สำหรับแถวที่มีความแตกต่าง
-            diff_mask = pd.Series(False, index=merged.index)
-            
-            for col in available_cols:
-                col_new = f"{col}_new"
-                col_old = f"{col}_old"
-                
-                # เปรียบเทียบแบบ vectorized
-                new_vals = merged[col_new]
-                old_vals = merged[col_old]
-                
-                # จัดการ NaN values
-                both_nan = (pd.isna(new_vals) & pd.isna(old_vals))
-                different = (new_vals != old_vals) & ~both_nan
-                
-                diff_mask |= different
-            
-            # กรองแถวที่มีความแตกต่าง
-            df_diff = merged[diff_mask].copy()
-            
-            if not df_diff.empty:
-                # เตรียมข้อมูลสำหรับ update
-                update_cols = [f"{col}_new" for col in available_cols]
-                all_cols = [pk_column] + update_cols
-                
-                # ตรวจสอบว่าคอลัมน์ทั้งหมดมีอยู่ใน df_diff
-                existing_cols = [col for col in all_cols if col in df_diff.columns]
-                
-                if len(existing_cols) > 1:
-                    df_to_update = df_diff[existing_cols].copy()
-                    # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
-                    new_col_names = [pk_column] + [col.replace('_new', '') for col in existing_cols if col != pk_column]
-                    df_to_update.columns = new_col_names
+    # จะอัปเดตคอลัมน์อะไรบ้าง (ยกเว้น key และ audit/uuid)
+    EXCLUDE = {pk_column, "card_ins_uuid", "create_at", "update_at"}
+    updateable_cols = [c.name for c in metadata_tbl.columns if c.name not in EXCLUDE]
 
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_to_update)} rows")
-    
-    # ✅ แสดงตัวอย่างข้อมูลที่จะ insert และ update
-    if not df_to_insert.empty:
-        print("🔍 Sample data to INSERT:")
-        sample_insert = df_to_insert.head(2)
-        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
-            if col in sample_insert.columns:
-                print(f"   {col}: {sample_insert[col].tolist()}")
-    
-    if not df_to_update.empty:
-        print("🔍 Sample data to UPDATE:")
-        sample_update = df_to_update.head(2)
-        for col in ['agent_id', 'agent_name', 'id_card_ins', 'id_card_life']:
-            if col in sample_update.columns:
-                print(f"   {col}: {sample_update[col].tolist()}")
+    # เงื่อนไข WHERE สำหรับ on_conflict_do_update → อัปเดตเฉพาะคอลัมน์ที่ "เปลี่ยนจริง"
+    # EXCLUDED.col IS DISTINCT FROM table.col
+    # หมายเหตุ: ถ้าต้องการง่ายสุด ตัด where=where_changed ทิ้งได้
+    stmt_proto = pg_insert(metadata_tbl)  # ไว้ใช้อ้าง excluded
+    where_changed = None
+    for c in updateable_cols:
+        cond = getattr(stmt_proto.excluded, c).is_distinct_from(getattr(metadata_tbl.c, c))
+        where_changed = cond if where_changed is None else (where_changed | cond)
 
-    # ✅ Load table metadata
-    metadata = Table(table_name, MetaData(), autoload_with=target_engine)
+    def chunk_dataframe(dfx: pd.DataFrame, size=1000):
+        for i in range(0, len(dfx), size):
+            yield dfx.iloc[i:i+size]
 
-    # ✅ Insert (Batch operation)
-    if not df_to_insert.empty:
-        # แปลง DataFrame เป็น records
-        records = []
-        current_time = pd.Timestamp.now()
-        for _, row in df_to_insert.iterrows():
-            record = {}
-            for col, value in row.items():
-                if pd.isna(value) or value == pd.NaT or value == '':
-                    record[col] = None
+    def to_records(dfx: pd.DataFrame) -> list[dict]:
+        # แปลงแถวเป็น dict และล้าง NaN/NaT -> None
+        out = []
+        for _, row in dfx.iterrows():
+            rec = {}
+            for col, val in row.items():
+                if pd.isna(val) or val == pd.NaT or val == "":
+                    rec[col] = None
                 else:
-                    record[col] = value
-            # ✅ ตั้งค่า audit fields สำหรับ insert
-            record['create_at'] = current_time
-            record['update_at'] = current_time
-            records.append(record)
-        
-        # Insert แบบ batch
-        with target_engine.begin() as conn:
-            conn.execute(metadata.insert(), records)
+                    rec[col] = val
+            out.append(rec)
+        return out
 
-    # ✅ Update (Batch operation)
-    if not df_to_update.empty:
-        # แปลง DataFrame เป็น records
-        records = []
-        for _, row in df_to_update.iterrows():
-            record = {}
-            for col, value in row.items():
-                if pd.isna(value) or value == pd.NaT or value == '':
-                    record[col] = None
-                else:
-                    record[col] = value
-            records.append(record)
-        
-        # Update แบบ batch - เฉพาะคอลัมน์ที่ต้องการ update
+    # 4) INSERT ก้อนใหญ่ด้วย ON CONFLICT DO UPDATE (blind upsert) → ง่ายและเร็ว
+    #    หมายเหตุ: เราตั้งค่า create_at/update_at ให้ที่ DB ฝั่ง UPDATE; ส่วน INSERT เราเติมทั้งคู่
+    if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            for record in records:
-                stmt = pg_insert(metadata).values(**record)
-                # ✅ เฉพาะคอลัมน์ที่ต้องการ update (ไม่รวม audit fields)
-                update_columns = {
-                    c.name: stmt.excluded[c.name]
-                    for c in metadata.columns
-                    if c.name not in [pk_column, 'card_ins_uuid', 'create_at', 'update_at']
-                }
-                # ✅ เพิ่ม update_at เป็นเวลาปัจจุบัน
-                update_columns['update_at'] = pd.Timestamp.now()
-                
-                # print(f"🔍 Updating columns for agent_id {record.get(pk_column)}: {list(update_columns.keys())}")
-                
+            for i, batch_df in enumerate(chunk_dataframe(df_to_insert, 1000), start=1):
+                recs = to_records(batch_df)
+                if not recs:
+                    continue
+
+                # เติม audit fields สำหรับ INSERT
+                now = datetime.now()
+                for r in recs:
+                    r.setdefault("create_at", now)
+                    r.setdefault("update_at", now)
+
+                stmt = pg_insert(metadata_tbl).values(recs)
+
+                set_map = {c: getattr(stmt.excluded, c) for c in updateable_cols}
+                # UPDATE time ให้ DB ใส่เอง (ฟาก update)
+                set_map["update_at"] = func.now()
+
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
-                    set_=update_columns
+                    set_=set_map,
+                    where=where_changed  # ตัดบรรทัดนี้ทิ้งได้ถ้าต้องการอัปเดตทับไปเลย
                 )
                 conn.execute(stmt)
+                print(f"🟢 Upsert (insert-batch) {i}: {len(recs)} rows")
+
+    # 5) UPDATE (สำหรับ common_ids) — ใช้สูตรเดียวกัน แต่ไม่ต้องเซ็ต create_at
+    if not df_to_upsert.empty:
+        with target_engine.begin() as conn:
+            for i, batch_df in enumerate(chunk_dataframe(df_to_upsert, 1000), start=1):
+                recs = to_records(batch_df)
+                if not recs:
+                    continue
+
+                # อย่าเติม create_at ตอน UPDATE
+                for r in recs:
+                    if "create_at" in r:
+                        del r["create_at"]
+
+                stmt = pg_insert(metadata_tbl).values(recs)
+                set_map = {c: getattr(stmt.excluded, c) for c in updateable_cols}
+                set_map["update_at"] = func.now()
+
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[pk_column],
+                    set_=set_map,
+                    where=where_changed
+                )
+                conn.execute(stmt)
+                print(f"🔵 Upsert (update-batch) {i}: {len(recs)} rows")
 
     print("✅ Insert/update completed.")
-    
-    # ✅ ตรวจสอบผลลัพธ์
-    print("🔍 Verification - checking audit fields...")
-    if not df_to_insert.empty or not df_to_update.empty:
-        # ดึงข้อมูลที่เพิ่ง insert/update มาเพื่อตรวจสอบ
-        all_agent_ids = []
-        if not df_to_insert.empty:
-            all_agent_ids.extend(df_to_insert[pk_column].tolist())
-        if not df_to_update.empty:
-            all_agent_ids.extend(df_to_update[pk_column].tolist())
-        
-        if all_agent_ids:
-            agent_ids_str = ','.join([f"'{id}'" for id in all_agent_ids[:5]])  # ตรวจสอบแค่ 5 รายการแรก
-            verify_query = f"""
-                SELECT {pk_column}, create_at, update_at 
-                FROM {table_name} 
-                WHERE {pk_column} IN ({agent_ids_str})
-                ORDER BY update_at DESC
-            """
-            
-            with target_engine.connect() as conn:
-                verify_df = pd.read_sql(text(verify_query), conn)
-                print("🔍 Recent records audit fields:")
-                for _, row in verify_df.iterrows():
-                    print(f"   {pk_column}: {row[pk_column]}, create_at: {row['create_at']}, update_at: {row['update_at']}")
+
+    # 6) ตรวจ audit fields ย้อนหลังนิดหน่อย
+    to_verify = list(new_ids)[:3] + list(common_ids)[:2]
+    if to_verify:
+        ids_str = ",".join(f"'{x}'" for x in to_verify)
+        q = f"SELECT {pk_column}, create_at, update_at FROM {table_name} WHERE {pk_column} IN ({ids_str}) ORDER BY update_at DESC"
+        with target_engine.connect() as conn:
+            vf = pd.read_sql(text(q), conn)
+            print("🔍 Recent records audit fields:")
+            for _, row in vf.iterrows():
+                print(f"   {pk_column}: {row[pk_column]}, create_at: {row['create_at']}, update_at: {row['update_at']}")
 
 @job
 def dim_card_agent_etl():

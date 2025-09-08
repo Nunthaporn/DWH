@@ -10,7 +10,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from datetime import datetime, timedelta
 
-
 # ✅ Load .env
 load_dotenv()
 
@@ -48,78 +47,122 @@ target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
+# -------------------------
+# 🔧 Utilities
+# -------------------------
+
+def normalize_null_like_series(col: pd.Series) -> pd.Series:
+    """แปลงค่า null-like ('', 'NULL', 'None', 'NaN', 'N/A', '-', 'ไม่มี', 'ไม่ระบุ') เป็น pd.NA แบบ case-insensitive"""
+    if col.dtype == object or pd.api.types.is_string_dtype(col):
+        s = col.astype(str)
+        mask = s.str.strip().str.lower().isin({
+            '', 'null', 'none', 'nan', 'na', 'n/a', '-', 'ไม่มี', 'ไม่ระบุ'
+        })
+        return col.mask(mask, pd.NA)
+    return col
+
+def purge_na_tokens(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    เคลียร์ค่า null-like ทุกแบบสำหรับ export/โหลดเข้า DB:
+    - สตริง '<NA>', 'NA', 'N/A', 'NULL', 'None', 'NaN', '' -> None (case-insensitive, trim)
+    - pd.NA/NaN -> None
+    """
+    token_set = {'<na>', 'na', 'n/a', 'null', 'none', 'nan', ''}
+    for col in df.columns:
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            s = df[col].astype(str).str.strip()
+            df[col] = df[col].where(~s.str.lower().isin(token_set), None)
+    df = df.astype(object).where(pd.notnull(df), None)
+    return df
+
 def remove_commas_from_numeric(value):
-    """ลบลูกน้ำออกจากค่าตัวเลข"""
+    """ลบลูกน้ำออกจากค่าตัวเลข (ต่อ cell)"""
     if pd.isna(value) or value is None:
         return value
-    
-    # แปลงเป็น string ก่อน
-    value_str = str(value).strip()
-    
-    # ลบลูกน้ำออก
-    value_str = value_str.replace(',', '')
-    
-    # ลบช่องว่าง
-    value_str = value_str.strip()
-    
-    # ตรวจสอบว่าเป็นตัวเลขหรือไม่
+    value_str = str(value).strip().replace(',', '').strip()
     if value_str == '' or value_str.lower() in ['nan', 'none', 'null']:
         return None
-    
-    # ตรวจสอบว่าเป็นตัวเลขหรือไม่ (รวมทศนิยม)
     if re.match(r'^-?\d*\.?\d+$', value_str):
         return value_str
-    
     return value
 
+def is_numeric_like_series(s: pd.Series) -> pd.Series:
+    """
+    คืน mask ว่า cell ดูเป็นตัวเลขหรือไม่ (หลังลบ comma และ trim)
+    """
+    s_str = s.astype(str).str.replace(',', '', regex=False).str.strip()
+    return s_str.str.match(r'^-?\d+(\.\d+)?$', na=False)
+
+def clean_numeric_commas_for_series(col: pd.Series) -> pd.Series:
+    """
+    ลบ comma และแปลงเป็นตัวเลขเฉพาะตำแหน่งที่เป็น numeric-like
+    ตำแหน่งอื่นคงค่าเดิม (ข้อความ)
+    """
+    s = col.astype(str).str.replace(',', '', regex=False).str.strip()
+    mask = s.str.match(r'^-?\d+(\.\d+)?$', na=False)
+    out = col.copy()
+    out[mask] = pd.to_numeric(s[mask], errors='coerce')
+    # ทำให้สตริงว่าง/คำว่า null-like เป็น NA
+    out = normalize_null_like_series(out)
+    return out
+
+def auto_clean_numeric_like_columns(df: pd.DataFrame, exclude: set | None = None, threshold: float = 0.8, min_numeric_rows: int = 5) -> pd.DataFrame:
+    """
+    ตรวจจับคอลัมน์ข้อความที่ 'ส่วนใหญ่' เป็นตัวเลข แล้วลบ comma/แปลงเป็นตัวเลขเฉพาะ cell ที่ใช่
+    - threshold: สัดส่วน (ในแถวที่ไม่ว่าง) ที่เป็นตัวเลข เช่น 0.8 = 80%
+    - min_numeric_rows: จำนวนแถวขั้นต่ำที่เป็นตัวเลขเพื่อป้องกัน false positive
+    """
+    exclude = exclude or set()
+    for col in df.columns:
+        if col in exclude:
+            continue
+        if not (df[col].dtype == object or pd.api.types.is_string_dtype(df[col])):
+            continue
+
+        s = df[col].astype(str).str.strip()
+        # ข้ามคอลัมน์ที่มีตัวอักษรไทยบ่อย (ไม่น่าใช่ตัวเลข)
+        thai_frac = s.str.contains(r'[ก-๙]', regex=True, na=False).mean()
+        if thai_frac > 0.2:
+            continue
+
+        # ประเมินเฉพาะแถวที่ไม่ว่าง/ไม่ใช่ null-like
+        non_null_mask = ~s.str.strip().str.lower().isin({'', 'null', 'none', 'nan', 'na', 'n/a', '-', 'ไม่มี', 'ไม่ระบุ'})
+        if non_null_mask.sum() == 0:
+            continue
+
+        numeric_like_mask = is_numeric_like_series(s[non_null_mask])
+        numeric_like_ratio = numeric_like_mask.mean()
+        numeric_like_count = numeric_like_mask.sum()
+
+        if numeric_like_ratio >= threshold and numeric_like_count >= min_numeric_rows:
+            df[col] = clean_numeric_commas_for_series(df[col])
+    return df
+
 def clean_insurance_company(company):
-    """ทำความสะอาดชื่อบริษัทประกัน - ลบตัวเลขและภาษาอังกฤษออกจากทุกตำแหน่ง เก็บแค่ภาษาไทย"""
+    """ทำความสะอาดชื่อบริษัทประกัน: เก็บเฉพาะอักษรไทย, ตัดตัวเลข/อังกฤษ/สัญลักษณ์, กัน pattern แปลก"""
     if pd.isna(company) or company is None:
         return None
-    
     company_str = str(company).strip()
-    
-    # กรองข้อมูลที่ไม่ถูกต้อง - ลบข้อมูลที่มีสัญลักษณ์พิเศษหรือ SQL injection
+
     invalid_patterns = [
-        r'[<>"\'\`\\]',  # SQL injection characters
-        r'\.\./',  # path traversal
-        r'[\(\)\{\}\[\]]+',  # brackets
-        r'[!@#$%^&*+=|]+',  # special characters
-        r'XOR',  # SQL injection
-        r'if\(',  # SQL injection
-        r'now\(\)',  # SQL injection
-        r'\$\{',  # template injection
-        r'\?\?\?\?',  # multiple question marks
-        r'[0-9]+[XO][0-9]+',  # XSS patterns
+        r'[<>"\'\`\\]', r'\.\./', r'[\(\)\{\}\[\]]+', r'[!@#$%^&*+=|]+',
+        r'XOR', r'if\(', r'now\(\)', r'\$\{', r'\?\?\?\?', r'[0-9]+[XO][0-9]+',
     ]
-    
     for pattern in invalid_patterns:
         if re.search(pattern, company_str, re.IGNORECASE):
             return None
-    
-    # ตรวจสอบความยาว
+
     if len(company_str) < 2 or len(company_str) > 100:
         return None
-    
-    # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่ (ต้องมีอย่างน้อย 1 ตัว)
     if not re.search(r'[ก-๙]', company_str):
         return None
-    
-    # ลบตัวเลขและภาษาอังกฤษออกจากทุกตำแหน่ง
-    # ใช้ regex เพื่อลบตัวเลข, ตัวอักษรภาษาอังกฤษ, และช่องว่างที่ติดกัน
+
     cleaned_company = re.sub(r'[0-9a-zA-Z\s]+', ' ', company_str)
-    
-    # ลบช่องว่างที่เหลือและช่องว่างที่ติดกัน
     cleaned_company = re.sub(r'\s+', ' ', cleaned_company).strip()
-    
-    # ตรวจสอบว่าหลังจากลบแล้วยังมีความยาวที่เหมาะสมหรือไม่
     if len(cleaned_company) < 2:
         return None
-    
-    # ตรวจสอบว่าหลังจากลบแล้วยังมีตัวอักษรไทยหรือไม่
     if not re.search(r'[ก-๙]', cleaned_company):
         return None
-    
     return cleaned_company
 
 def execute_query_with_retry(engine, query, max_retries=3, delay=5):
@@ -136,8 +179,7 @@ def execute_query_with_retry(engine, query, max_retries=3, delay=5):
                 if attempt < max_retries - 1:
                     print(f"⏳ Waiting {delay} seconds before retry...")
                     time.sleep(delay)
-                    delay *= 2  # Exponential backoff
-                    # Dispose and recreate engine to force new connections
+                    delay *= 2
                     engine.dispose()
                 else:
                     print(f"❌ All retry attempts failed")
@@ -158,39 +200,47 @@ def close_engines():
     except Exception as e:
         print(f"⚠️ Warning: Error closing connections: {str(e)}")
 
+def parse_amount(value):
+    """แปลงจำนวนเงินทนสตริง: 'ฟรี', '0 บาท', '1,234', 'ระบบเดิม', None -> ตัวเลขหรือ NaN"""
+    if pd.isna(value):
+        return np.nan
+    s = str(value).strip().lower()
+    if s in {"", "ฟรี", "free", "ยกเว้น", "ไม่มี", "ไม่คิด", "0", "0 บาท"}:
+        return 0
+    s = re.sub(r"[^0-9\.\-]", "", s)
+    if s in {"", "-", "."}:
+        return np.nan
+    try:
+        return float(s)
+    except:
+        return np.nan
+
+# -------------------------
+# 🧲 Extract
+# -------------------------
+
 @op
 def extract_motor_data():
-    now = datetime.now()
-
-    start_time = now.replace(minute=0, second=0, microsecond=0)
-    end_time = now.replace(minute=59, second=59, microsecond=999999)
-
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
-
     plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}' 
-        AND type_insure = 'ประกันรถ'
+        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-31' 
+          AND type_insure = 'ประกันรถ'
     """
     df_plan = execute_query_with_retry(source_engine, plan_query)
 
-    # Query 2: Extract order data with retry mechanism
     order_query = """
         SELECT quo_num, responsibility1, responsibility2, responsibility3, responsibility4,
                damage1, damage2, damage3, damage4, protect1, protect2, protect3, protect4,
                IF(sendtype = 'ที่อยู่ใหม่', provincenew, province) AS delivery_province,
-               show_ems_price, show_ems_type
+               show_ems_price, show_ems_type, sendtype
         FROM fin_order
     """
     df_order = execute_query_with_retry(task_engine, order_query)
 
-    # Query 3: Extract payment data with retry mechanism
     pay_query = """
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
     """
     df_pay = execute_query_with_retry(source_engine, pay_query)
 
@@ -198,7 +248,6 @@ def extract_motor_data():
     print("📦 df_order:", df_order.shape)
     print("📦 df_pay:", df_pay.shape)
 
-    # Close source connections after extraction
     try:
         source_engine.dispose()
         task_engine.dispose()
@@ -208,25 +257,16 @@ def extract_motor_data():
 
     return df_plan, df_order, df_pay
 
+# -------------------------
+# 🧼 Clean / Transform
+# -------------------------
+
 @op
 def clean_motor_data(data_tuple):
     df_plan, df_order, df_pay = data_tuple
 
     df = df_plan.merge(df_order, on="quo_num", how="left")
     df = df.merge(df_pay, on="quo_num", how="left")
-
-    def combine_columns(a, b):
-        a_str = str(a).strip() if pd.notna(a) else ''
-        b_str = str(b).strip() if pd.notna(b) else ''
-        if a_str == '' and b_str == '':
-            return ''
-        elif a_str == b_str:
-            return a_str
-        elif a_str == '':
-            return b_str
-        elif b_str == '':
-            return a_str
-        return f"{a_str} {b_str}"
 
     df = df.rename(columns={
         "quo_num": "quotation_num",
@@ -250,7 +290,7 @@ def clean_motor_data(data_tuple):
         "show_ems_type": "delivery_type",
         "date_warranty": "date_warranty",
         "date_exp": "date_expired",
-        "type":"insurance_class"
+        "type": "insurance_class"
     })
 
     df = df.replace(r'^\s*$', pd.NA, regex=True)
@@ -261,235 +301,134 @@ def clean_motor_data(data_tuple):
 
     df.columns = df.columns.str.lower()
     df["income_comp_ins"] = df["income_comp_ins"].apply(lambda x: True if x == 1 else False if x == 0 else None)
-    # ทำความสะอาดคอลัมน์ ins_company
+
+    # ✅ company fields
     if 'ins_company' in df.columns:
-        before_count = df['ins_company'].notna().sum()
-        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
-        invalid_companies = df[df['ins_company'].notna()]['ins_company'].unique()
+        before = df['ins_company'].notna().sum()
         df['ins_company'] = df['ins_company'].apply(clean_insurance_company)
-        after_count = df['ins_company'].notna().sum()
-        filtered_count = before_count - after_count
-        print(f"🧹 Cleaned ins_company column - filtered {filtered_count} invalid records")
-        if filtered_count > 0:
-            print(f"   Examples of invalid companies: {list(invalid_companies[:5])}")
-    
-    # แปลง datetime และจัดการกับ NaT values
+        df['ins_company'] = normalize_null_like_series(df['ins_company'])
+        after = df['ins_company'].notna().sum()
+        print(f"🧹 Cleaned ins_company - filtered {before - after} invalid")
+
+    if 'act_ins_company' in df.columns:
+        before = df['act_ins_company'].notna().sum()
+        df['act_ins_company'] = df['act_ins_company'].apply(clean_insurance_company)
+        df['act_ins_company'] = normalize_null_like_series(df['act_ins_company'])
+        after = df['act_ins_company'].notna().sum()
+        print(f"🧹 Cleaned act_ins_company - filtered {before - after} invalid")
+
+    # ✅ dates
     df["date_warranty"] = pd.to_datetime(df["date_warranty"], errors="coerce")
     df["date_expired"] = pd.to_datetime(df["date_expired"], errors="coerce")
-    
-    # แปลง NaT เป็น None เพื่อให้ PostgreSQL เข้าใจ
     df["date_warranty"] = df["date_warranty"].replace({pd.NaT: None})
     df["date_expired"] = df["date_expired"].replace({pd.NaT: None})
+    df['date_warranty'] = pd.to_datetime(df['date_warranty'], errors='coerce').dt.strftime('%Y%m%d').astype('Int64')
+    df['date_expired'] = pd.to_datetime(df['date_expired'], errors='coerce').dt.strftime('%Y%m%d').astype('Int64')
 
-    df['date_warranty'] = pd.to_datetime(df['date_warranty'], errors='coerce')
-    df['date_warranty'] = df['date_warranty'].dt.strftime('%Y%m%d').astype('Int64')
-    df['date_expired'] = pd.to_datetime(df['date_expired'], errors='coerce')
-    df['date_expired'] = df['date_expired'].dt.strftime('%Y%m%d').astype('Int64')
-    
-    df['ems_amount'] = df['ems_amount'].fillna(0).astype(int)
-    
-    # ทำความสะอาดข้อมูลจังหวัด - เก็บแค่จังหวัดเท่านั้น
+    # ✅ province
     def clean_province(province):
         if pd.isna(province) or str(province).strip() == '':
             return None
-        
         province_str = str(province).strip()
-        
-        # ลบคำที่ไม่ใช่ชื่อจังหวัด
-        remove_words = ['จังหวัด', 'อำเภอ', 'ตำบล', 'เขต', 'เมือง', 'กิโลเมตร', 'กม.', 'ถนน', 'ซอย', 'หมู่', 'บ้าน']
-        for word in remove_words:
-            province_str = province_str.replace(word, '').strip()
-        
-        # แก้ไขการสะกดผิดที่พบบ่อย
+        for w in ['จังหวัด', 'อำเภอ', 'ตำบล', 'เขต', 'เมือง', 'กิโลเมตร', 'กม.', 'ถนน', 'ซอย', 'หมู่', 'บ้าน']:
+            province_str = province_str.replace(w, '').strip()
         corrections = {
-            'กรุงเทพ': 'กรุงเทพมหานคร',
-            'กรุงเทพฯ': 'กรุงเทพมหานคร',
-            'กทม': 'กรุงเทพมหานคร',
-            'กทม.': 'กรุงเทพมหานคร',
-            'เชียงใหม่': 'เชียงใหม่',
-            'ชลบุรี': 'ชลบุรี',
-            'นนทบุรี': 'นนทบุรี',
-            'ปทุมธานี': 'ปทุมธานี',
-            'สมุทรปราการ': 'สมุทรปราการ',
-            'สมุทรสาคร': 'สมุทรสาคร',
-            'นครปฐม': 'นครปฐม',
-            'นครราชสีมา': 'นครราชสีมา',
-            'ขอนแก่น': 'ขอนแก่น',
-            'อุบลราชธานี': 'อุบลราชธานี',
-            'สุราษฎร์ธานี': 'สุราษฎร์ธานี',
-            'สงขลา': 'สงขลา',
-            'ภูเก็ต': 'ภูเก็ต',
-            'พัทยา': 'ชลบุรี',
-            'ศรีราชา': 'ชลบุรี',
-            'บางนา': 'สมุทรปราการ',
-            'บางพลี': 'สมุทรปราการ',
-            'พระประแดง': 'สมุทรปราการ',
-            'บางบ่อ': 'สมุทรปราการ',
-            'บางเสาธง': 'สมุทรปราการ'
+            'กรุงเทพ': 'กรุงเทพมหานคร','กรุงเทพฯ': 'กรุงเทพมหานคร','กทม': 'กรุงเทพมหานคร','กทม.': 'กรุงเทพมหานคร',
+            'พัทยา': 'ชลบุรี','ศรีราชา': 'ชลบุรี',
+            'บางนา': 'สมุทรปราการ','บางพลี': 'สมุทรปราการ','พระประแดง': 'สมุทรปราการ','บางบ่อ': 'สมุทรปราการ','บางเสาธง': 'สมุทรปราการ'
         }
-        
-        # ตรวจสอบการแก้ไข
         for wrong, correct in corrections.items():
             if wrong in province_str:
                 return correct
-        
-        # ถ้าไม่เจอในรายการจังหวัดที่รู้จัก ให้เป็น None
-        known_provinces = [
-            'กรุงเทพมหานคร', 'เชียงใหม่', 'ชลบุรี', 'นนทบุรี', 'ปทุมธานี', 
-            'สมุทรปราการ', 'สมุทรสาคร', 'นครปฐม', 'นครราชสีมา', 'ขอนแก่น',
-            'อุบลราชธานี', 'สุราษฎร์ธานี', 'สงขลา', 'ภูเก็ต', 'เชียงราย',
-            'ลำปาง', 'ลำพูน', 'แพร่', 'น่าน', 'พะเยา', 'แม่ฮ่องสอน',
-            'ตาก', 'สุโขทัย', 'พิษณุโลก', 'เพชรบูรณ์', 'พิจิตร',
-            'กำแพงเพชร', 'อุทัยธานี', 'นครสวรรค์', 'ลพบุรี', 'สิงห์บุรี',
-            'ชัยนาท', 'สระบุรี', 'พระนครศรีอยุธยา', 'อ่างทอง', 'สุพรรณบุรี',
-            'นครนายก', 'สระแก้ว', 'จันทบุรี', 'ตราด', 'ฉะเชิงเทรา',
-            'ปราจีนบุรี', 'นครนายก', 'สระแก้ว', 'จันทบุรี', 'ตราด',
-            'ฉะเชิงเทรา', 'ปราจีนบุรี', 'นครนายก', 'สระแก้ว', 'จันทบุรี',
-            'ตราด', 'ฉะเชิงเทรา', 'ปราจีนบุรี', 'นครนายก', 'สระแก้ว',
-            'จันทบุรี', 'ตราด', 'ฉะเชิงเทรา', 'ปราจีนบุรี', 'นครนายก',
-            'สระแก้ว', 'จันทบุรี', 'ตราด', 'ฉะเชิงเทรา', 'ปราจีนบุรี'
+        known = [
+            'กรุงเทพมหานคร','เชียงใหม่','ชลบุรี','นนทบุรี','ปทุมธานี','สมุทรปราการ','สมุทรสาคร','นครปฐม','นครราชสีมา',
+            'ขอนแก่น','อุบลราชธานี','สุราษฎร์ธานี','สงขลา','ภูเก็ต','เชียงราย','ลำปาง','ลำพูน','แพร่','น่าน','พะเยา',
+            'แม่ฮ่องสอน','ตาก','สุโขทัย','พิษณุโลก','เพชรบูรณ์','พิจิตร','กำแพงเพชร','อุทัยธานี','นครสวรรค์','ลพบุรี',
+            'สิงห์บุรี','ชัยนาท','สระบุรี','พระนครศรีอยุธยา','อ่างทอง','สุพรรณบุรี','นครนายก','สระแก้ว','จันทบุรี','ตราด',
+            'ฉะเชิงเทรา','ปราจีนบุรี'
         ]
-        
-        # ตรวจสอบว่าคือจังหวัดที่รู้จักหรือไม่
-        for known in known_provinces:
-            if known in province_str or province_str in known:
-                return known
-        
+        for k in known:
+            if k in province_str or province_str in k:
+                return k
         return None
-    
-    # ทำความสะอาดคอลัมน์ delivery_province
+
     if 'delivery_province' in df.columns:
         df['delivery_province'] = df['delivery_province'].apply(clean_province)
-        print(f"🧹 Cleaned delivery_province column - kept only provinces")
-    
-    # ทำความสะอาดคอลัมน์ delivery_type
+        print("🧹 Cleaned delivery_province")
+
+    # ✅ delivery_type
     if 'delivery_type' in df.columns:
-        df['delivery_type'] = df['delivery_type'].replace('nor', 'normal')
-        df['delivery_type'] = df['delivery_type'].replace('ระบบเดิม', 'normal')
-        df['delivery_type'] = df['delivery_type'].replace('ปกติ', 'normal')
-        print(f"📦 Cleaned delivery_type column - changed to 'normal'")
+        df['delivery_type'] = df['delivery_type'].replace({'nor': 'normal', 'ระบบเดิม': 'normal', 'ปกติ': 'normal'})
 
-    # ✅ ทำความสะอาดคอลัมน์ insurance_class (type) - เก็บแค่ค่าที่กำหนดเท่านั้น
+    # ✅ insurance_class
     if 'insurance_class' in df.columns:
-        valid_classes = ['1', '1+', '2', '2+', '3', '3+', 'พรบ']
-        before_count = df['insurance_class'].notna().sum()
-        
-        # แปลงเป็น string และทำความสะอาด
+        valid = ['1', '1+', '2', '2+', '3', '3+', 'พรบ']
+        before = df['insurance_class'].notna().sum()
         df['insurance_class'] = df['insurance_class'].astype(str).str.strip()
-        
-        # เก็บแค่ค่าที่ถูกต้องเท่านั้น
-        df['insurance_class'] = df['insurance_class'].apply(
-            lambda x: x if x in valid_classes else None
-        )
-        
-        after_count = df['insurance_class'].notna().sum()
-        filtered_count = before_count - after_count
-        print(f"🧹 Cleaned insurance_class column - filtered {filtered_count} invalid records")
-        print(f"   Valid classes: {valid_classes}")
-        
-        # แสดงสถิติค่าที่ถูกต้อง
-        valid_counts = df['insurance_class'].value_counts()
-        print(f"   Valid class distribution:")
-        for class_name, count in valid_counts.items():
-            print(f"     {class_name}: {count}")
+        df['insurance_class'] = df['insurance_class'].apply(lambda x: x if x in valid else None)
+        print(f"🧹 Cleaned insurance_class - filtered {before - df['insurance_class'].notna().sum()} invalid")
 
-    # ✅ ทำความสะอาดคอลัมน์ repair_type - เก็บแค่ภาษาไทยเท่านั้น
+    # ✅ repair_type
     if 'repair_type' in df.columns:
-        def clean_repair_type(repair_type):
-            """ทำความสะอาด repair_type - เก็บแค่ภาษาไทยเท่านั้น"""
-            if pd.isna(repair_type) or repair_type is None:
+        def clean_repair_type(val):
+            if pd.isna(val) or val is None:
                 return None
-            
-            repair_str = str(repair_type).strip()
-            
-            # เก็บแค่ตัวอักษรภาษาไทยเท่านั้น
-            thai_only = re.sub(r'[^ก-๙]', '', repair_str)
-            
-            # ตรวจสอบว่ามีตัวอักษรไทยหรือไม่
+            s = str(val).strip()
+            thai_only = re.sub(r'[^ก-๙]', '', s)
             if len(thai_only) < 2:
                 return None
-            
-            # แก้ไขชื่อที่ผิดให้ถูกต้อง
-            if thai_only in ['อู่', 'ซ่อมอู้', 'ซ่อมอู๋']:
+            if thai_only in ['อู่','ซ่อมอู้','ซ่อมอู๋']:
                 return 'ซ่อมอู่'
-            elif thai_only in ['ซ่องห้าง', 'ซ่อมศูนย์']:
+            elif thai_only in ['ซ่องห้าง','ซ่อมศูนย์']:
                 return 'ซ่อมห้าง'
-            
             return thai_only
-        
-        before_count = df['repair_type'].notna().sum()
-        # เก็บตัวอย่างข้อมูลที่ไม่ถูกต้องก่อนกรอง
-        invalid_repairs = df[df['repair_type'].notna()]['repair_type'].unique()
+        before = df['repair_type'].notna().sum()
         df['repair_type'] = df['repair_type'].apply(clean_repair_type)
-        after_count = df['repair_type'].notna().sum()
-        filtered_count = before_count - after_count
-        print(f"🧹 Cleaned repair_type column - filtered {filtered_count} invalid records")
-        if filtered_count > 0:
-            print(f"   Examples of invalid repair types: {list(invalid_repairs[:5])}")
-        
-        # แสดงสถิติข้อมูลที่ถูกต้อง
-        valid_repairs = df['repair_type'].value_counts().head(10)
-        print(f"   Top 10 valid repair types:")
-        for repair_type, count in valid_repairs.items():
-            print(f"     {repair_type}: {count}")
+        print(f"🧹 Cleaned repair_type - filtered {before - df['repair_type'].notna().sum()} invalid")
 
-    # ✅ ลบลูกน้ำออกจากคอลัมน์ตัวเลขก่อนแปลงเป็นตัวเลข
+    # ✅ numeric columns (known list - ชั้นที่ 1)
     numeric_columns = [
-        "sum_insured", "human_coverage_person", "human_coverage_atime", "property_coverage",
-        "deductible", "vehicle_damage", "deductible_amount", "vehicle_theft_fire",
-        "vehicle_flood_damage", "personal_accident_driver", "personal_accident_passengers",
-        "medical_coverage", "driver_coverage", "ems_amount"
+        "sum_insured","human_coverage_person","human_coverage_atime","property_coverage",
+        "deductible","vehicle_damage","deductible_amount","vehicle_theft_fire",
+        "vehicle_flood_damage","personal_accident_driver","personal_accident_passengers",
+        "medical_coverage","driver_coverage"
     ]
-
-    print("🧹 Removing commas from numeric columns...")
+    print("🧹 Removing commas from known numeric columns...")
     for col in numeric_columns:
         if col in df.columns:
-            # ลบลูกน้ำออกจากข้อมูลก่อน
             df[col] = df[col].apply(remove_commas_from_numeric)
-            
-            # แปลงเป็นตัวเลขและจัดการกับ NaN values
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            # ใช้ float64 แทน Int64 เพื่อหลีกเลี่ยงปัญหา casting
-            df[col] = df[col].astype("float64")
-    
-    # ✅ แก้ไขค่า human_coverage_atime จาก 100,000,000 เป็น 10,000,000
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+
+    # ✅ ems_amount (พิเศษ)
+    if 'ems_amount' in df.columns:
+        df['ems_amount'] = df['ems_amount'].apply(parse_amount)
+        df['ems_amount'] = pd.to_numeric(df['ems_amount'], errors='coerce').fillna(0).round().astype('Int64')
+        print(f"📦 Cleaned ems_amount - non-null count: {df['ems_amount'].notna().sum()}")
+
+    # ✅ fix outliers
     if 'human_coverage_atime' in df.columns:
         df['human_coverage_atime'] = df['human_coverage_atime'].replace(100000000, 10000000)
-        print(f"🔧 Fixed human_coverage_atime: changed 100,000,000 to 10,000,000")
-    
-    # ✅ แก้ไขค่า vehicle_damage และ vehicle_theft_fire จาก 190000050 เป็น 1,900,000
     if 'vehicle_damage' in df.columns:
         df['vehicle_damage'] = df['vehicle_damage'].replace(190000050, 1900000)
-        print(f"🔧 Fixed vehicle_damage: changed 190,000,050 to 1,900,000")
-    
     if 'vehicle_theft_fire' in df.columns:
         df['vehicle_theft_fire'] = df['vehicle_theft_fire'].replace(190000050, 1900000)
-        print(f"🔧 Fixed vehicle_theft_fire: changed 190,000,050 to 1,900,000")
-    
-    # ✅ แก้ไขค่า sum_insured จาก 190000050 เป็น 1900000 และ 250000093 เป็น 2500000
     if 'sum_insured' in df.columns:
-        df['sum_insured'] = df['sum_insured'].replace(190000050, 1900000)
-        df['sum_insured'] = df['sum_insured'].replace(250000093, 2500000)
-        print(f"🔧 Fixed sum_insured: corrected abnormal values")
-    
-    df = df.where(pd.notnull(df), None)
+        df['sum_insured'] = df['sum_insured'].replace({190000050: 1900000, 250000093: 2500000})
 
-    # แสดงสถิติข้อมูลที่ถูกต้อง
-    if 'ins_company' in df.columns:
-        valid_companies = df['ins_company'].value_counts().head(10)
-        print(f"\n📊 Top 10 valid insurance companies:")
-        for company, count in valid_companies.items():
-            print(f"   {company}: {count}")
-    
-    if 'insurance_class' in df.columns:
-        valid_classes = df['insurance_class'].value_counts().head(10)
-        print(f"\n📊 Top 10 valid insurance classes:")
-        for class_name, count in valid_classes.items():
-            print(f"   {class_name}: {count}")
+    # ✅ ตรวจจับคอลัมน์ตัวเลขอัตโนมัติ (เฉพาะคอลัมน์ที่ส่วนใหญ่เป็นตัวเลขจริง) แล้วค่อยลบ comma/แปลง
+    df = auto_clean_numeric_like_columns(
+        df,
+        exclude={'quotation_num', 'ins_company', 'act_ins_company', 'delivery_type', 'delivery_province', 'insurance_class', 'repair_type'},
+        threshold=0.8,
+        min_numeric_rows=5
+    )
+
+    # ✅ ready for DB/export
+    df = df.convert_dtypes()
+    df = purge_na_tokens(df)
 
     print("\n📊 Cleaning completed")
 
-    # Close any remaining connections
     try:
         source_engine.dispose()
         task_engine.dispose()
@@ -499,24 +438,25 @@ def clean_motor_data(data_tuple):
 
     return df
 
+# -------------------------
+# 🚚 Load
+# -------------------------
+
 @op
 def load_motor_data(df: pd.DataFrame):
-    table_name = "fact_insurance_motor"
+    table_name = "fact_insurance_motor_temp"
     pk_column = "quotation_num"
 
     df = df[df[pk_column].notna()].copy()
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
-
-    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
     today_str = datetime.now().strftime('%Y-%m-%d')
 
-    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL
-    existing_query = f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'"
+    existing_query = f"SELECT {pk_column} FROM {table_name} WHERE update_at >= '{today_str}'"
     df_existing = execute_query_with_retry(target_engine, existing_query)
+    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
 
-    existing_ids = set(df_existing[pk_column])
     new_rows = df[~df[pk_column].isin(existing_ids)].copy()
     update_rows = df[df[pk_column].isin(existing_ids)].copy()
 
@@ -538,15 +478,14 @@ def load_motor_data(df: pd.DataFrame):
         try:
             with target_engine.begin() as conn:
                 for i, record in enumerate(update_rows.to_dict(orient="records")):
-                    if i % 100 == 0:  # Progress indicator every 100 records
+                    if i % 100 == 0:
                         print(f"   Progress: {i}/{len(update_rows)} records processed")
-                    
                     stmt = pg_insert(table).values(**record)
                     update_dict = {
                         c.name: stmt.excluded[c.name]
-                        for c in table.columns if c.name not in [pk_column, 'create_at', 'update_at']
+                        for c in table.columns
+                        if c.name not in [pk_column, 'create_at', 'update_at']
                     }
-                    # update_at ให้เป็นเวลาปัจจุบัน
                     update_dict['update_at'] = datetime.now()
                     stmt = stmt.on_conflict_do_update(
                         index_elements=[pk_column],
@@ -560,14 +499,12 @@ def load_motor_data(df: pd.DataFrame):
 
     print("✅ Insert/update completed.")
 
-    # Close target engine connection after load
     try:
         target_engine.dispose()
         print("🔒 Target database connection closed")
     except Exception as e:
         print(f"⚠️ Warning: Error closing target connection: {str(e)}")
 
-    # Close any remaining connections
     try:
         source_engine.dispose()
         task_engine.dispose()
@@ -575,36 +512,42 @@ def load_motor_data(df: pd.DataFrame):
     except Exception as e:
         print(f"⚠️ Warning: Error closing all connections: {str(e)}")
 
+# -------------------------
+# 🧱 Dagster Job
+# -------------------------
+
 @job
 def fact_insurance_motor_etl():
     load_motor_data(clean_motor_data(extract_motor_data()))
 
+# -------------------------
+# ▶️ Main (standalone run)
+# -------------------------
+
 if __name__ == "__main__":
     try:
         print("🚀 Starting fact_insurance_motor ETL process...")
-        
-        # Extract data with retry mechanism
         print("📥 Extracting data from source databases...")
-        df_raw = extract_motor_data()
+        data_tuple = extract_motor_data()
         print("✅ Data extraction completed")
 
-        # Clean data
         print("🧹 Cleaning and transforming data...")
-        df_clean = clean_motor_data((df_raw))
+        df_clean = clean_motor_data(data_tuple)
         print("✅ Data cleaning completed")
         print("✅ Cleaned columns:", df_clean.columns)
 
-        output_path = "fact_insurance_motor.xlsx"
-        df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        print(f"💾 Saved to {output_path}")
+        # output_path = "fact_insurance_motor.xlsx"
+        # df_export = purge_na_tokens(df_clean.copy())
+        # df_export.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-        # print("📤 Loading data to target database...")
-        # load_motor_data(df_clean)
-        # print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
-        
+        # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
+        print("📤 Loading data to target database...")
+        load_motor_data(df_clean)
+        print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+
     except Exception as e:
         print(f"❌ ETL process failed: {str(e)}")
         raise
     finally:
-        # Always close database connections
         close_engines()

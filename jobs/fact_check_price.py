@@ -52,29 +52,43 @@ def retry_db_operation(operation, max_retries=3, delay=2):
             time.sleep(delay)
             delay *= 2
 
+# === Helpers: ทำความสะอาดตัวเลขเงิน (เอาลูกน้ำ/สัญลักษณ์) ===
+THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+
+def normalize_money(sr: pd.Series) -> pd.Series:
+    """
+    แปลงค่าจำนวนเงินให้เป็นตัวเลขล้วน (รองรับเลขไทย, มีลูกน้ำ, ช่วงค่า, สัญลักษณ์อื่นๆ)
+    เช่น "370,000" -> 370000.0, "300,000-400,000" -> 300000.0
+    คืนค่าเป็น pandas Float64 (nullable)
+    """
+    s = sr.astype(str).str.strip().str.translate(THAI_DIGITS)
+    # เหลือเฉพาะตัวเลข จุด ลบ และคอมม่า (ชั่วคราว)
+    s = s.str.replace(r"[^\d\.\-,]", "", regex=True)
+    # ตัดคอมม่าออก
+    s = s.str.replace(",", "", regex=False)
+    # ดึงเลขตัวแรก (กรณีเป็นช่วง "300000-400000")
+    s = s.str.extract(r"(-?\d+(?:\.\d+)?)", expand=False)
+    return pd.to_numeric(s, errors="coerce").astype("Float64")
+
 @op
 def extract_check_price_data() -> pd.DataFrame:
-    now = datetime.now()
-
-    start_time = now.replace(minute=0, second=0, microsecond=0)
-    end_time = now.replace(minute=59, second=59, microsecond=999999)
-
-    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+    # ปรับช่วงเวลาได้ตามต้องการ
+    # start_str = '2025-08-09'
+    # end_str = '2025-08-31'
 
     query_logs = """
     SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
            assured_insurance_capital1, camera, addon, quo_num, create_at,
            results, selected, carprovince
     FROM fin_customer_logs_B2B
-    WHERE create_at BETWEEN '{start_str}' AND '{end_str}'
+    WHERE create_at BETWEEN '2025-05-01' AND '2025-08-31'
     """
     query_checkprice = """
     SELECT id_cus, datekey, brand, model, submodel, yearcar, idcar, nocar,
            type_ins, company, tunprakan, deduct, status, type_driver,
            type_camera, type_addon, status_send
     FROM fin_checkprice
-    WHERE datekey BETWEEN '{start_str}' AND '{end_str}'
+    WHERE datekey BETWEEN '2025-05-01' AND '2025-08-31'
     """
     df_logs = pd.read_sql(query_logs, source_engine)
     df_check = pd.read_sql(query_checkprice, source_engine)
@@ -86,10 +100,14 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw['logs'][0].copy()
     df1 = raw['check'][0].copy()
 
+    # --- parse "results" เป็น 4 บริษัท ---
     def extract_company_names(x):
         if pd.isnull(x):
             return [None, None, None, None]
-        data = json.loads(x)
+        try:
+            data = json.loads(x)
+        except Exception:
+            return [None, None, None, None]
         names = []
         if isinstance(data, list):
             for d in data:
@@ -107,12 +125,17 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     company_names_df.columns = ['company_name1', 'company_name2', 'company_name3', 'company_name4']
     df = pd.concat([df.drop(columns=['results']), company_names_df], axis=1)
 
+    # --- parse "selected" เป็นบริษัทที่เลือก ---
     def extract_selected_name(x):
         if pd.isnull(x):
             return None
-        data = json.loads(x)
+        try:
+            data = json.loads(x)
+        except Exception:
+            return None
         if isinstance(data, list) and len(data) > 0:
-            return data[0].get('company_name')
+            item0 = data[0]
+            return item0.get('company_name') if isinstance(item0, dict) else None
         elif isinstance(data, dict):
             return data.get('company_name')
         else:
@@ -121,6 +144,7 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     df['selecteds'] = df['selected'].apply(extract_selected_name)
     df.drop(columns=['selected'], inplace=True)
 
+    # --- map ค่า camera/addon ---
     df['camera'] = df['camera'].map({
         'yes': 'มีกล้องหน้ารถ',
         'no': 'ไม่มีกล้องหน้ารถ'
@@ -129,6 +153,7 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
         'ไม่มี': 'ไม่มีการต่อเติม'
     })
 
+    # --- rename คอลัมน์ให้ตรงเป้าหมาย ---
     df.rename(columns={
         'cuscode': 'id_cus',
         'series': 'model',
@@ -143,14 +168,16 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
         'carprovince': 'province_car'
     }, inplace=True)
 
+    # --- type_insurance จาก type + repair_type ---
     df['type_insurance'] = 'ชั้น' + df['type'].astype(str) + df['repair_type'].astype(str)
     df.drop(columns=['type', 'repair_type'], inplace=True)
     df['input_type'] = 'auto'
 
+    # --- แยกชื่อบริษัทจาก fin_checkprice.company ---
     def split_company_names(x):
         if pd.isnull(x):
             return [None, None, None, None]
-        names = [name.strip() for name in x.split('/')]
+        names = [name.strip() for name in str(x).split('/')]
         while len(names) < 4:
             names.append(None)
         return names[:4]
@@ -159,6 +186,7 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     company_names_df.columns = ['company_name1', 'company_name2', 'company_name3', 'company_name4']
     df1 = pd.concat([df1.drop(columns=['company']), company_names_df], axis=1)
 
+    # --- หาเลขทะเบียนและจังหวัดจาก idcar ---
     province_list = [
         "กรุงเทพมหานคร", "กระบี่", "กาญจนบุรี", "กาฬสินธุ์", "กำแพงเพชร", "ขอนแก่น", "จันทบุรี", "ฉะเชิงเทรา",
         "ชลบุรี", "ชัยนาท", "ชัยภูมิ", "ชุมพร", "เชียงใหม่", "เชียงราย", "ตรัง", "ตราด", "ตาก", "นครนายก",
@@ -173,9 +201,9 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     ]
 
     def extract_clean_plate(value):
-        if pd.isnull(value) or value.strip() == "":
+        if pd.isnull(value) or str(value).strip() == "":
             return None
-        text = value.strip()
+        text = str(value).strip()
         for prov in province_list:
             if prov in text:
                 text = text.replace(prov, "").strip()
@@ -197,10 +225,10 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
         return None
 
     def extract_province(value):
-        if pd.isnull(value) or value.strip() == "":
+        if pd.isnull(value) or str(value).strip() == "":
             return None
         for prov in province_list:
-            if prov in value:
+            if prov in str(value):
                 return prov
         return None
 
@@ -218,46 +246,51 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     }, inplace=True)
     df1['input_type'] = 'manual'
 
+    # --- รวมสองแหล่ง ---
     df_combined = pd.concat([df, df1], ignore_index=True, sort=False)
-    
-    # แก้ไข deprecated methods - ใช้วิธีใหม่แทน
-    # แทนที่ empty strings ด้วย NaN
+
+    # --- ทำความสะอาดสตริงว่างให้เป็น NaN/None ---
     for col in df_combined.columns:
         if df_combined[col].dtype == 'object':
             df_combined[col] = df_combined[col].replace(r'^\s*$', np.nan, regex=True)
-    
     df_combined = df_combined.where(pd.notnull(df_combined), None)
-    
-    # แก้ไข applymap เป็น apply
+
+    # --- ตัดช่องว่างหัวท้ายของสตริง ---
     for col in df_combined.columns:
         if df_combined[col].dtype == 'object':
             df_combined[col] = df_combined[col].apply(lambda x: x.lstrip() if isinstance(x, str) else x)
-    
+
+    # --- ตัด test users ---
     df_combined = df_combined[~df_combined['id_cus'].isin([
         'FIN-TestApp', 'FIN-TestApp2', 'FIN-TestApp3',
         'FIN-TestApp6', 'FIN-TestApp-2025', 'FNGtest', '????♡☆umata☆??'
     ])]
 
-    # ✅ แปลงวันที่แบบ vectorized
+    # --- แปลงเงิน: เอาลูกน้ำ/สัญลักษณ์ออกแล้วเป็นตัวเลข ---
+    for c in ["sum_insured", "deductible"]:
+        if c in df_combined.columns:
+            df_combined[c] = normalize_money(df_combined[c])
+
+    # --- แปลงวันที่แบบ vectorized เป็น YYYYMMDD (Int64) ---
     date_columns = ['transaction_date']
     for col in date_columns:
         if col in df_combined.columns:
-            # แปลงเป็น datetime ก่อน แล้วแปลงเป็น integer format YYYYMMDD
             df_combined[col] = pd.to_datetime(df_combined[col], errors='coerce')
             df_combined[col] = df_combined[col].dt.strftime('%Y%m%d').astype('Int64')
 
-    # แปลง data types ให้ตรงกัน
+    # --- types อื่น ๆ ---
     df_combined['yearcar'] = pd.to_numeric(df_combined['yearcar'], errors='coerce').astype('Int64')
-    df_combined['sum_insured'] = pd.to_numeric(df_combined['sum_insured'], errors='coerce').astype('Int64')
-    df_combined['deductible'] = pd.to_numeric(df_combined['deductible'], errors='coerce').astype('Int64')
     df_combined['id_cus'] = df_combined['id_cus'].astype(str)
+
+    # แปลง NaN -> None อีกครั้งเพื่อความชัวร์ก่อนคืนค่า
+    df_combined = df_combined.replace({np.nan: None})
 
     return df_combined
 
 @op
 def load_check_price_data(df: pd.DataFrame):
     try:
-        table_name = 'fact_check_price'
+        table_name = 'fact_check_price_temp'
         # ใช้ transaction_date เป็นตัวเทียบแทน composite key
         compare_column = 'transaction_date'
 
@@ -268,12 +301,12 @@ def load_check_price_data(df: pd.DataFrame):
         print(f"  {compare_column}: {df[compare_column].dtype}")
 
         # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        # today_str = datetime.now().strftime('%Y-%m-%d')
 
         # ✅ Load เฉพาะข้อมูลที่อัปเดตวันนี้จาก PostgreSQL
         with target_engine.connect() as conn:
             df_existing = pd.read_sql(
-                f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
+                f"SELECT * FROM {table_name}",
                 conn
             )
 
@@ -404,16 +437,20 @@ def load_check_price_data(df: pd.DataFrame):
 def fact_check_price_etl():
     load_check_price_data(clean_check_price_data(extract_check_price_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_check_price_data()
-#     # print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_check_price_data()
+    # print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_check_price_data(df_raw)
-# #     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_check_price_data(df_raw)
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "fact_check_price.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_check_price.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_check_price_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_check_price.")
+    output_path = "fact_check_price1.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
+
+    load_check_price_data(df_clean)
+    print("🎉 completed! Data upserted to fact_check_price.")

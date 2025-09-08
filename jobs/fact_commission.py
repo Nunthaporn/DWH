@@ -72,24 +72,30 @@ target_engine = create_engine(
 
 @op
 def extract_commission_data():
-    # now = datetime.now()
+    now = datetime.now()
 
-    # start_time = now.replace(minute=0, second=0, microsecond=0)
-    # end_time = now.replace(minute=59, second=59, microsecond=999999)
+    start_time = now.replace(minute=0, second=0, microsecond=0)
+    end_time = now.replace(minute=59, second=59, microsecond=999999)
 
-    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
+    start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
 
     df_select_plan = pd.read_sql("""
         SELECT quo_num,id_cus,no_car,current_campaign 
         FROM fin_system_select_plan 
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
+        WHERE update_at BETWEEN '{start_str}' AND '{end_str}'
+            AND id_cus NOT LIKE '%%FIN-TestApp%%'
+            AND id_cus NOT LIKE '%%FIN-TestApp3%%'
+            AND id_cus NOT LIKE '%%FIN-TestApp2%%'
+            AND id_cus NOT LIKE '%%FIN-TestApp-2025%%'
+            AND id_cus NOT LIKE '%%FIN-Tester1%%'
+            AND id_cus NOT LIKE '%%FIN-Tester2%%'
+            AND id_cus NOT LIKE '%%FINTEST-01%%'
     """, source_engine)
 
     df_fin_order = pd.read_sql("""
         SELECT quo_num,numpay,order_number
         FROM fin_order 
-        WHERE datekey BETWEEN '2025-01-01' AND '2025-08-06'
     """, task_engine)
 
     df_system_pay = pd.read_sql("""
@@ -97,12 +103,15 @@ def extract_commission_data():
                show_price_com_count,show_com_addon,condition_install,
                percent_install,chanel_main
         FROM fin_system_pay 
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-06'
     """, source_engine)
 
     df_com_rank = pd.read_sql("""
-        SELECT quo_num,com_invite,com_rank
-        FROM fin_com_rank 
+        SELECT 
+            quo_num,
+            SUM(com_invite) AS com_invite,
+            SUM(com_rank) AS com_rank
+        FROM fin_com_rank
+        GROUP BY quo_num;
     """, source_engine)
 
     df_fin_finance = pd.read_sql("""
@@ -250,7 +259,7 @@ def clean_commission_data(data_tuple):
     }
     df = df.rename(columns=rename_columns)
     df = df.drop(columns=[
-        'numpay', 'current_campaign', 'status_vip', 'percent_install',
+        'numpay', 'status_vip', 'percent_install',
         'chanel_main', 'no_car', 'condition_install', 'money_one',
         'money_ten', 'order_number'
     ], errors='ignore')
@@ -321,7 +330,7 @@ def load_commission_data(df: pd.DataFrame):
     from sqlalchemy.exc import OperationalError
     import time
 
-    table_name = 'fact_commission'
+    table_name = 'fact_commission_temp'
     pk_column = 'quotation_num'
     MAX_RETRIES = 3
     RETRY_DELAY = 2  # seconds
@@ -505,9 +514,9 @@ if __name__ == "__main__":
     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "fact_commission.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+    output_path = "fact_commission.xlsx"
+    df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    print(f"💾 Saved to {output_path}")
 
-    load_commission_data(df_clean)
+    # load_commission_data(df_clean)
     print("🎉 completed! Data upserted to fact_commission.")

@@ -51,12 +51,12 @@ def extract_agent_data():
             user_registered,
             status, fin_new_group, fin_new_mem,
             type_agent, typebuy, user_email, name_store, address, city, district,
-            province, province_cur, area_cur, postcode, tel, date_active
+            province, province_cur, area_cur, postcode, tel, date_active, 'display_name',headteam
         FROM wp_users
         WHERE
             (cuscode = 'WEB-T2R')  -- ✅ whitelist
             OR (
-              user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'Admin-VIF', 'adminmag_fin', 'FNG00-00001')
+              user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'adminmag_fin', 'FNG00-00001')
               AND name NOT LIKE '%%ทดสอบ%%'
               AND name NOT LIKE '%%tes%%'
               AND name NOT LIKE '%%test%%'
@@ -69,6 +69,7 @@ def extract_agent_data():
               AND cuscode NOT LIKE '%%FIN-TestApp%%'
               AND cuscode NOT LIKE '%%FIN-Tester1%%'
               AND cuscode NOT LIKE '%%FIN-Tester2%%'
+              AND display_name NOT LIKE '%%ทดสอบ%%'
             )
     """)
     df_main = pd.read_sql(query_main, source_engine)
@@ -81,14 +82,10 @@ def extract_agent_data():
     print("📦 df_career:", df_career.shape)
 
     df = pd.merge(df_main, df_career, on="cuscode", how="left")
+    print("🔎 After merge: rows =", len(df))
+
     if "career" in df.columns:
         df["career"] = df["career"].astype(str).str.strip()
-
-    # DEBUG
-    print("🔎 after extract: WEB-T2R rows =",
-          (df["cuscode"].astype(str).str.upper() == "WEB-T2R").sum())
-    print("RAW COUNT:", len(df))
-    print("RAW UNIQUE cuscode:", df["cuscode"].nunique())
 
     return df
 
@@ -121,26 +118,21 @@ def clean_agent_data(df: pd.DataFrame):
         return a or b
 
     df["agent_region"] = df.apply(lambda r: _join(r["fin_new_group"], r["fin_new_mem"]), axis=1)
+    df = df[~df["agent_region"].str.contains("TEST", case=False, na=False)]
 
     # ------- filter TEST EXACT only (both group & mem == TEST) with whitelist -------
-    whitelist = {"WEB-T2R", "WEB-T2R-DEFECT"}
+    whitelist = {"WEB-T2R", "WEB-T2R-DEFECT", "Admin-VIF"}  # เพิ่ม Admin-VIF
     cus_up = df["cuscode"].str.upper()
     g = df["fin_new_group"].astype(str).str.strip().str.upper()
     m = df["fin_new_mem"].astype(str).str.strip().str.upper()
     mask_test_exact = g.eq("TEST") & m.eq("TEST")
     mask_keep = cus_up.isin(whitelist)
-
-    print("🔎 before TEST filter: rows =", len(df))
-    print("🔎 before TEST filter: WEB-T2R rows =", (cus_up == "WEB-T2R").sum())
-    before = len(df)
     df = df[~(mask_test_exact & ~mask_keep)].copy()
-    print("AFTER TEST FILTER: rows =", len(df), "| dropped:", before - len(df))
-    print("🔎 after TEST filter: WEB-T2R rows =", (df["cuscode"].str.upper() == "WEB-T2R").sum())
 
-    # ------- agent_main_region -------
     df["agent_main_region"] = (
         df["agent_region"].fillna("").astype(str).str.replace(r"\d+", "", regex=True).str.strip()
     )
+    df = df.drop(columns=["fin_new_group", "fin_new_mem", "display_name"], errors="ignore")
 
     # ------- rename columns -------
     rename_map = {
@@ -164,6 +156,18 @@ def clean_agent_data(df: pd.DataFrame):
         "agent_region": "agent_region",
     }
     df.rename(columns=rename_map, inplace=True)
+
+    # ✅ ลบ space ด้านหน้าในทุกคอลัมน์ข้อความ
+    def clean_leading_spaces(text):
+        if pd.isna(text) or text == '':
+            return None
+        text_str = str(text).strip()
+        cleaned_text = re.sub(r'^\s+', '', text_str)
+        return cleaned_text if cleaned_text != '' else None
+
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].apply(clean_leading_spaces)
 
     # ------- finalize defect_status & drop old status -------
     if "status" in df.columns:
@@ -195,6 +199,18 @@ def clean_agent_data(df: pd.DataFrame):
             if pd.notna(addr) else None
         )
 
+    # ✅ ทำความสะอาด agent_address (สระ/อักขระพิเศษ)
+    def clean_address(address):
+        if pd.isna(address) or address == '':
+            return None
+        address_str = str(address).strip()
+        cleaned_address = re.sub(r'^[\u0E30-\u0E3A\u0E47-\u0E4E]+', '', address_str)
+        cleaned_address = re.sub(r'[-:.,]', '', cleaned_address)
+        cleaned_address = re.sub(r'\s+', ' ', cleaned_address).strip()
+        return cleaned_address
+
+    df["agent_address"] = df["agent_address"].apply(clean_address)
+
     # phone digits only
     if "mobile_number" in df.columns:
         df["mobile_number"] = df["mobile_number"].astype(str).str.replace(r"[^0-9]", "", regex=True)
@@ -211,16 +227,29 @@ def clean_agent_data(df: pd.DataFrame):
     if "agent_email" in df.columns:
         df["agent_email"] = df["agent_email"].apply(clean_email)
 
-    # name clean
+    test_names = [
+        'ADVISORY TEST', 'ADVISORY TESTER', 'Sawitri Test K', 'Tes ระบบ', 'test', 'Test', 'Test Fin', 'Test Northeast',
+        'test t', 'test test', 'Test Test', 'test text', 'test tt', 'Test สมัครลูกทีม ฟิลลิป', 'testdddddd ddddddd',
+        'testsdt tstset', 'TestSMS Test', 'TestTester', 'Testสุพจน์ วงค์แก้ว', 'ทดสอบวันที่', 'ทดสอบ สมัคร', 'ทดสอบเอกศิษฏ์',
+        'ทดสอบระบบฟิน', 'ทดสอบ ทดสอบ', 'ทดสอบสมัคร', 'ทดสอบเลขบัญชี', 'ทดสอบระบบ', 'ทดสอบแม็ค', 'ทดสอบ PDPA',
+        'ทดสอบระบบ แอปพลิเคชั่น', 'ทดสอบ ลูกค้าไม่หมดอายุ', 'ทดสอบ ลูกค้าไม่หมดอายุผ่อน', 'ทดสอบ ลูกค้าหมดอายุ',
+        'ทดสอบ สมาชิกใหม่', 'ทดสอบ บัตรปชช', 'ทดสอบ หฤษฎ์', 'ทดสอบ ทดสอบ', 'ทดสอบ BCOHM', 'ทดสอบ แบบทดสอบ',
+        'ทดสอบ เชิญ', 'ทดสอบแชร์', 'ทดสอบระบบ นามสกุลดี', 'ทดสอบจากไอที ไม่ต้องติดต่อกลับ', 'ทดสอบสมัครแบบแชร์',
+        'นายศิวกร รุ่งเรืองทดสอบระบบ', 'เอกศิษฏ์ เจริญธันยบูรณ์ ทดสอบระบบ', 'ทดสอบ ระบบ', 'ทดสอบ สอบทด', 'แม็คทดสอบ',
+        'ทดสอบสมัคร ทดสอบ', 'jamesit ทดสอบ', 'ทดสอบจริงจัง ทดสอบจริงจัง', 'ทดสอบ FinCare ทดสอบ', 'ทดสอบ นายหน้ามีผู้แนะนำ',
+        'ทดสอบ นายหน้าเก่ามีผู้แนะนำ', 'ทดสอบระบบ ทดสอบระบบ', 'ทดสอบระบบ จริงจริงนะ', 'ทดสอบ ระบบอีกครั้ง',
+        'ทดสอบจริงจัง ทดสอบจริงจัง', 'ทดสอบ ทดสอบappsale', 'ทดสอบ ทดสอบสมัคร', 'ทดสอบ ทดสอบ', 'ปัญญา เกรียงไกร เทสระบบ',
+        'ปัญญา เกรียงไกร (เทสระบบ)', 'เทสๆ'
+    ]
+
     def clean_agent_name(name):
         if pd.isna(name) or name == "":
-            return None
+            return name
         s = str(name).strip()
-        if s.startswith(("ิ", "ี", "ึ", "ื", "ุ", "ู", "่", "้", "๊", "๋")):
-            s = re.sub(r"^[ิีึืุู่้๊๋]+", "", s)
-        s = re.sub(r"[^\u0E00-\u0E7F\u0020\u0041-\u005A\u0061-\u007A]", "", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        return None if len(s) < 2 else s
+        s = re.sub(r'^[ิีึืุู่๊๋่้๊๋,._ _;???.]+', '', s)
+        if any(test_name in s for test_name in test_names):
+            return None
+        return s
 
     if "agent_name" in df.columns:
         df["agent_name"] = df["agent_name"].apply(clean_agent_name)
@@ -273,11 +302,22 @@ def clean_agent_data(df: pd.DataFrame):
             for v in dt
         ]
 
-    # final sanity
     df = df.replace(["None", "none", "nan", "NaN", "NaT", ""], np.nan)
 
+    # ===== ✅ NEW: keep only -defect row when both exist =====
+    # สร้าง base_id (ตัด -defect ที่ท้าย) และ flag แถวที่เป็น defect
+    df["base_id"] = df["agent_id"].str.replace(r"-defect$", "", regex=True)
+    df["is_defect"] = df["agent_id"].str.contains(r"-defect$", case=False, na=False) | df["defect_status"].eq("defect")
+
+    # จัดเรียงให้ non-defect มาก่อน defect แล้ว drop duplicates โดยเก็บตัวท้าย (defect) ไว้
+    df = (
+        df.sort_values(["base_id", "is_defect"])
+          .drop_duplicates(subset=["base_id"], keep="last")
+          .drop(columns=["base_id", "is_defect"])
+    )
+    # ================================================
+
     print("✅ cleaned rows:", len(df))
-    print("🔎 cleaned: WEB-T2R rows =", (df["agent_id"].astype(str).str.upper() == "WEB-T2R").sum())
     return df
 
 # ============ LOAD ============
@@ -452,10 +492,9 @@ if __name__ == "__main__":
 
     df_clean = clean_null_values_op(df_clean)
 
-    # ตรวจในไฟล์ได้ง่าย ๆ
-    df_clean.to_excel("dim_agent.xlsx", index=False)
-    print("💾 Saved to dim_agent.xlsx")
+    # df_clean.to_excel("dim_agent1.xlsx", index=False)
+    # print("💾 Saved to dim_agent.xlsx")
 
-    # load_to_wh(df_clean)
-    # backfill_date_active(df_clean)
+    load_to_wh(df_clean)
+    backfill_date_active(df_clean)
     print("🎉 completed!")
