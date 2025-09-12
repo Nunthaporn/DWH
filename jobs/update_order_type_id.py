@@ -274,7 +274,7 @@ def attach_order_type_id(df_keys: pd.DataFrame, dim_order: pd.DataFrame) -> pd.D
     return df
 
 @op
-def filter_to_missing_fsq(df_to_update: pd.DataFrame, fsq_missing: pd.DataFrame) -> pd.DataFrame:
+def filter_to_missing_fsq1(df_to_update: pd.DataFrame, fsq_missing: pd.DataFrame) -> pd.DataFrame:
     df = pd.merge(df_to_update, fsq_missing, on='quotation_num', how='right')
     # check & save diagnostics (optional)
     if 'order_type_id' in df.columns:
@@ -360,7 +360,7 @@ def update_order_type_id(df_updates: pd.DataFrame) -> None:
 @job
 def update_fact_sales_quotation_order_type_id():
     update_order_type_id(
-        filter_to_missing_fsq(
+        filter_to_missing_fsq1(
             attach_order_type_id(
                 build_key_channel(
                     extract_select_plan(),
@@ -379,6 +379,6 @@ if __name__ == "__main__":
     fsq = extract_fsq_missing_order_type()
     keys = build_key_channel(p, o)
     joined = attach_order_type_id(keys, dim)
-    updates = filter_to_missing_fsq(joined, fsq)
+    updates = filter_to_missing_fsq1(joined, fsq)
     update_order_type_id(updates)
     print("🎉 completed! order_type_id updated.")
