@@ -4,7 +4,7 @@ import numpy as np
 import re
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, MetaData, Table
+from sqlalchemy import create_engine, text, MetaData, Table, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime
 
@@ -51,7 +51,8 @@ def extract_agent_data():
             user_registered,
             status, fin_new_group, fin_new_mem,
             type_agent, typebuy, user_email, name_store, address, city, district,
-            province, province_cur, area_cur, postcode, tel, date_active, 'display_name',headteam
+            province, province_cur, area_cur, postcode, tel, date_active, 'display_name',
+            headteam, status_vip
         FROM wp_users
         WHERE
             (cuscode = 'WEB-T2R')  -- ✅ whitelist
@@ -129,9 +130,23 @@ def clean_agent_data(df: pd.DataFrame):
     mask_keep = cus_up.isin(whitelist)
     df = df[~(mask_test_exact & ~mask_keep)].copy()
 
-    df["agent_main_region"] = (
-        df["agent_region"].fillna("").astype(str).str.replace(r"\d+", "", regex=True).str.strip()
-    )
+    def clean_region(region_str: str) -> str:
+        if not isinstance(region_str, str):
+            return ""
+        # แยกด้วย '+'
+        parts = [p.strip() for p in region_str.split('+')]
+        # ลบตัวเลขท้ายออก
+        cleaned = [re.sub(r"\d+$", "", p).strip() for p in parts]
+        # เก็บ unique ตามลำดับที่เจอ
+        unique = []
+        for c in cleaned:
+            if c not in unique:
+                unique.append(c)
+        # รวมกลับด้วย " + "
+        return " + ".join(unique)
+
+    df["agent_main_region"] = df["agent_region"].apply(clean_region)
+
     df = df.drop(columns=["fin_new_group", "fin_new_mem", "display_name"], errors="ignore")
 
     # ------- rename columns -------
@@ -355,7 +370,7 @@ def load_to_wh(df: pd.DataFrame):
             recs.append(rec)
         return recs
 
-    # upsert NEW
+    # ---------- UPSERT NEW (insert เท่านั้นจริง ๆ จะไม่ conflict อยู่แล้ว) ----------
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
             for batch_df in chunk_dataframe(df_to_insert):
@@ -364,16 +379,30 @@ def load_to_wh(df: pd.DataFrame):
                     continue
                 stmt = pg_insert(metadata_table).values(records)
                 cols = [c.name for c in metadata_table.columns]
-                update_columns = {c: stmt.excluded[c]
-                                  for c in cols
-                                  if c not in [pk_column, "date_active"]}
+
+                # ไม่อัปเดต pk และ date_active ในรอบนี้
+                updatable_cols = [c for c in cols if c not in [pk_column, "date_active"]]
+
+                update_columns = {c: stmt.excluded[c] for c in updatable_cols}
+
+                # ให้ update_at = NOW() เมื่อเกิดการ UPDATE จาก conflict (กรณีมี row อยู่แล้ว)
+                if "update_at" in cols:
+                    update_columns["update_at"] = func.now()
+
+                # เงื่อนไข: อัปเดตก็ต่อเมื่อมีคอลัมน์ไหน "เปลี่ยนจริง"
+                # excluded.col IS DISTINCT FROM table.col (null-safe compare)
+                change_exprs = [
+                    stmt.excluded[c].is_distinct_from(getattr(metadata_table.c, c))
+                    for c in updatable_cols if c not in ["create_at", "update_at"]
+                ]
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
-                    set_=update_columns
+                    set_=update_columns,
+                    where=or_(*change_exprs) if change_exprs else None
                 )
                 conn.execute(stmt)
 
-    # upsert UPDATE (blind set new -> existing)
+    # ---------- UPSERT UPDATE (เฉพาะ id ที่มีอยู่: เปลี่ยนแปลงจริงเท่านั้นจึง update + touch update_at) ----------
     if not df_common_new.empty:
         with target_engine.begin() as conn:
             for batch_df in chunk_dataframe(df_common_new):
@@ -382,19 +411,37 @@ def load_to_wh(df: pd.DataFrame):
                     continue
                 stmt = pg_insert(metadata_table).values(records)
                 cols = [c.name for c in metadata_table.columns]
-                update_columns = {c: stmt.excluded[c]
-                                  for c in cols
-                                  if c not in [pk_column, "id_contact", "create_at", "update_at", "date_active"]}
-                update_columns["update_at"] = datetime.now()
+
+                # กันคอลัมน์ที่ไม่อยากให้ override ตรง ๆ
+                updatable_cols = [
+                    c for c in cols
+                    if c not in [pk_column, "id_contact", "create_at", "update_at", "date_active"]
+                ]
+
+                update_columns = {c: stmt.excluded[c] for c in updatable_cols}
+
+                # ให้ update_at = NOW() เฉพาะเมื่อเกิดการ UPDATE (ซึ่งมี where ตรวจความเปลี่ยนแปลง)
+                if "update_at" in cols:
+                    update_columns["update_at"] = func.now()
+
+                # เงื่อนไขอัปเดตเฉพาะเมื่อมีค่าต่างจากเดิมจริง ๆ
+                change_exprs = [
+                    stmt.excluded[c].is_distinct_from(getattr(metadata_table.c, c))
+                    for c in updatable_cols
+                ]
+
                 stmt = stmt.on_conflict_do_update(
                     index_elements=[pk_column],
-                    set_=update_columns
+                    set_=update_columns,
+                    where=or_(*change_exprs) if change_exprs else None
                 )
                 conn.execute(stmt)
 
     print("✅ Insert/update completed (date_active skipped in this step).")
 
+
 # ============ BACKFILL ============
+
 @op
 def backfill_date_active(df: pd.DataFrame):
     table_name = "dim_agent"
@@ -461,14 +508,24 @@ def backfill_date_active(df: pd.DataFrame):
 
             stmt = pg_insert(metadata_table).values(records)
             cols = [c.name for c in metadata_table.columns]
+
             set_map = {"date_active": stmt.excluded["date_active"]}
             if "update_at" in cols:
-                set_map["update_at"] = datetime.now()
-            stmt = stmt.on_conflict_do_update(index_elements=[pk], set_=set_map)
+                # touch update_at เฉพาะตอนที่ date_active เปลี่ยนจริง
+                set_map["update_at"] = func.now()
+
+            # อัปเดตก็ต่อเมื่อ date_active เปลี่ยนจริงเท่านั้น
+            where_change = stmt.excluded["date_active"].is_distinct_from(metadata_table.c.date_active)
+
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[pk],
+                set_=set_map,
+                where=where_change
+            )
             conn.execute(stmt)
             total += len(records)
 
-    print(f"✅ Backfilled date_active for {total} agents")
+    print(f"✅ Backfilled date_active for {total} agents (update_at touched only when changed)")
 
 # ============ WRAPPER ============
 @op
@@ -492,9 +549,11 @@ if __name__ == "__main__":
 
     df_clean = clean_null_values_op(df_clean)
 
-    # df_clean.to_excel("dim_agent1.xlsx", index=False)
-    # print("💾 Saved to dim_agent.xlsx")
+    df_clean.to_excel("dim_agent1.xlsx", index=False)
+    print("💾 Saved to dim_agent.xlsx")
 
-    load_to_wh(df_clean)
-    backfill_date_active(df_clean)
+    # load_to_wh(df_clean)
+    # backfill_date_active(df_clean)
     print("🎉 completed!")
+
+

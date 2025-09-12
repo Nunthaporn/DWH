@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text, inspect, MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from datetime import datetime, timedelta
+from sqlalchemy import or_, func
 
 # ✅ Load .env
 load_dotenv()
@@ -62,7 +63,7 @@ def retry_db_operation(operation, max_retries=3, delay=2):
 def extract_car_data():
     # ปรับช่วงเวลาได้ตามต้องการ
     start_str = '2025-01-01'
-    end_str = '2025-08-31'
+    end_str = '2025-09-08'
 
     # try:
     #     with source_engine.connect() as conn:
@@ -426,25 +427,45 @@ def clean_car_data(df: pd.DataFrame):
     return df_cleaned
 
 # ---------- UPSERT helper (no forcing) ----------
-
 def upsert_batches(table, rows, key_col, update_cols, batch_size=10000):
     """
-    UPSERT แบบ batch เปิด transaction ใหม่ต่อ batch
-    ถ้า batch ใด fail จะ rollback เฉพาะ batch นั้นแล้วไปต่อ
+    UPSERT แบบมีเงื่อนไข: จะ UPDATE เฉพาะแถวที่ค่าจริง ๆ เปลี่ยน
+    - ไม่เขียนทับด้วย NULL (ใช้ COALESCE)
+    - update_at = now() จะเซ็ตเฉพาะเมื่อมีการเปลี่ยนแปลงจริง
     """
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i+batch_size]
         try:
-            with target_engine.begin() as conn:  # NEW TX for each batch
-                stmt = pg_insert(table).values(batch).on_conflict_do_update(
+            with target_engine.begin() as conn:
+                ins = pg_insert(table).values(batch)
+                excluded = ins.excluded  # EXCLUDED.<col>
+
+                # map ค่าที่จะอัปเดต: ไม่ทับด้วย NULL
+                set_map = {
+                    c: func.coalesce(getattr(excluded, c), getattr(table.c, c))
+                    for c in update_cols
+                }
+
+                # อัปเดต update_at เฉพาะเมื่อมีการเปลี่ยนแปลงจริง (ถ้ามีคอลัมน์นี้)
+                if 'update_at' in table.c:
+                    set_map['update_at'] = func.now()
+
+                # เงื่อนไข UPDATE เฉพาะเมื่อ "ค่าหลัง COALESCE" แตกต่างจากค่าปัจจุบัน
+                change_conditions = [
+                    func.coalesce(getattr(excluded, c), getattr(table.c, c)).is_distinct_from(getattr(table.c, c))
+                    for c in update_cols
+                ]
+
+                stmt = ins.on_conflict_do_update(
                     index_elements=[table.c[key_col]],
-                    set_={c: getattr(pg_insert(table).excluded, c) for c in update_cols}
+                    set_=set_map,
+                    where=or_(*change_conditions)  # << สำคัญ: ไม่ต่าง = ไม่ UPDATE
                 )
                 conn.execute(stmt)
+
             print(f"✅ Upserted batch {i//batch_size + 1}/{(len(rows)+batch_size-1)//batch_size} ({len(batch)} rows)")
         except Exception as e:
             print(f"❌ Upsert batch {i//batch_size + 1} failed: {e}")
-            # ไม่ใช้ conn ต่อ ปล่อย rollback แล้วไป batch ถัดไป
 
 @op
 def load_car_data(df: pd.DataFrame):
@@ -467,8 +488,7 @@ def load_car_data(df: pd.DataFrame):
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
-    # ระบุคอลัมน์ที่จะอัปเดต (ยกเว้น PK และ audit fields)
-    exclude_cols = {pk_column, 'car_id', 'create_at', 'datestart'}
+    exclude_cols = {pk_column, 'car_id', 'create_at', 'datestart', 'update_at'}
     update_cols = [c for c in df.columns if c not in exclude_cols]
 
     rows_to_upsert = df.replace({np.nan: None}).to_dict(orient='records')

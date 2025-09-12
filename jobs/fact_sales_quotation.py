@@ -145,7 +145,7 @@ def extract_sales_quotation_data():
         sql_plan = f"""
             SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp, type_car, chanel_key, id_cus, name, lastname, company, fin_new_group,
-                   isGovernmentOfficer, is_special_campaign
+                   isGovernmentOfficer, is_special_campaign, planType, current_campaign
             FROM fin_system_select_plan
             {where_plan}
         """
@@ -154,26 +154,49 @@ def extract_sales_quotation_data():
         # ✅ ORDER: เลือกแถวล่าสุดต่อใบเสนอราคา ด้วย ROW_NUMBER()
         sql_order = f"""
             WITH latest_order AS (
-                SELECT 
-                    o.quo_num, o.order_number, o.chanel, o.datekey,
-                    o.status AS status_fo,
-                    o.beaprakan AS show_price_ins,
-                    o.prb       AS show_price_prb,
-                    o.totalprice AS show_price_total,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY o.quo_num
-                        ORDER BY o.datekey DESC, o.order_number DESC
-                    ) AS rn
-                FROM fin_order o
-                INNER JOIN (
-                    SELECT quo_num FROM fininsurance.fin_system_select_plan
-                    {where_plan}
-                ) p ON p.quo_num = o.quo_num
+            SELECT 
+                o.quo_num,
+                o.order_number,
+                o.chanel,
+                o.datekey,
+                o.status AS status_fo,
+                o.beaprakan   AS show_price_ins,
+                o.prb         AS show_price_prb,
+                o.totalprice  AS show_price_total,
+                o.newinsurance AS newinsurance,
+
+                CASE
+                WHEN COALESCE(TRIM(o.status_paybill), '') = 'จ่ายปกติ'
+                THEN 'เติมเงิน'
+                ELSE 'ไม่เติมเงิน'
+                END AS is_paybill,
+
+                CASE
+                WHEN o.viriyha LIKE '%ดวงเจริญ%'
+                    AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง')
+                THEN 'ส่งผ่าน'
+                ELSE 'ไม่ส่งผ่าน'
+                END AS is_duangcharoen,
+
+                CONCAT(IFNULL(o.title,''),' ',IFNULL(o.firstname,''),' ',IFNULL(o.lastname,'')) AS customer_name,
+                o.tel,
+
+                ROW_NUMBER() OVER (
+                PARTITION BY o.quo_num
+                ORDER BY o.datekey DESC, o.order_number DESC
+                ) AS rn
+            FROM fin_order o
+            INNER JOIN (
+                SELECT quo_num
+                FROM fininsurance.fin_system_select_plan
+                {where_plan}
+            ) p ON p.quo_num = o.quo_num
             )
-            SELECT quo_num, order_number, chanel, datekey, status_fo,
-                   show_price_ins, show_price_prb, show_price_total
+            SELECT
+            quo_num,order_number,chanel,datekey,status_fo,show_price_ins,show_price_prb,
+            show_price_total,is_paybill,is_duangcharoen,customer_name, tel, newinsurance 
             FROM latest_order
-            WHERE rn = 1
+            WHERE rn = 1;
         """
         df_order = read_sql_stream_with_retry(sql_order, source_engine_task, chunksize=200_000)
 
@@ -181,8 +204,8 @@ def extract_sales_quotation_data():
             SELECT quo_num, datestart, numpay, show_price_ins, show_price_prb, show_price_total,
                    show_price_check, show_price_service, show_price_taxcar, show_price_fine,
                    show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
-                   discount_mkt, discount_government, discount_government_fin,
-                   discount_government_ins, coupon_addon, status AS status_fsp, status_detail
+                   discount_mkt, discount_government, discount_government_fin, discount_government_ins, 
+                    coupon_addon, status AS status_fsp, status_detail, id_cus as id_cus_pay, clickbank
             FROM fin_system_pay
         """, source_engine, chunksize=200_000)
 
@@ -222,8 +245,31 @@ def extract_sales_quotation_data():
               AND cuscode NOT LIKE '%%FIN-Tester2%%'
         """, source_engine, chunksize=100_000)
 
-        logger.info(f"📦 Shapes: plan={df_plan.shape}, order={df_order.shape}, pay={df_pay.shape}, risk={df_risk.shape}, pa={df_pa.shape}, health={df_health.shape}, wp={df_wp.shape}")
-        return df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp
+        # 🆕 NEW: ดึงรายชื่อ cuscode จาก fin_dna_log
+        df_dna = read_sql_stream_with_retry("""
+            SELECT cuscode
+            FROM fininsurance.fin_dna_log
+            WHERE cuscode IS NOT NULL AND cuscode <> ''
+        """, source_engine, chunksize=100_000)
+
+        df_flag = read_sql_stream_with_retry("""
+            SELECT 
+                quo_num,
+                CASE 
+                    WHEN status_big_agent = '1' THEN 'Big Agent'
+                    ELSE NULL
+                END AS big_agent
+            FROM fininsurance.fin_quo_num_flag
+            WHERE status_big_agent
+        """, source_engine, chunksize=100_000)
+
+        logger.info(
+            f"📦 Shapes: plan={df_plan.shape}, order={df_order.shape}, pay={df_pay.shape}, "
+            f"risk={df_risk.shape}, pa={df_pa.shape}, health={df_health.shape}, wp={df_wp.shape}, dna={df_dna.shape}, flag={df_flag.shape}"
+        )
+
+        # 🆕 NEW: ส่ง df_dna ออกไปด้วย
+        return df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag
 
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
@@ -232,16 +278,149 @@ def extract_sales_quotation_data():
 @op
 def clean_sales_quotation_data(inputs):
     try:
-        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp = inputs
+        # 🆕 NEW: รับ df_dna เพิ่มมา
+        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = inputs
         logger.info("🧹 เริ่มทำความสะอาดข้อมูล...")
 
-        # ========= merge =========
+        # ========= merge เดิม =========
         df_merged = df_plan.merge(df_order, on='quo_num', how='left')
         df_merged = df_merged.merge(df_pay, on='quo_num', how='left', suffixes=('', '_pay'))
         df_merged = df_merged.merge(df_risk, on='quo_num', how='left', suffixes=('', '_risk'))
         df_merged = df_merged.merge(df_pa, on='quo_num', how='left', suffixes=('', '_pa'))
         df_merged = df_merged.merge(df_health, on='quo_num', how='left', suffixes=('', '_health'))
         df_merged = df_merged.merge(df_wp, on='id_cus', how='left')
+        df_merged = df_merged.merge(df_flag, on='quo_num', how='left')
+
+        # 🆕 NEW: merge กับ DNA (id_cus จากฝั่งงาน เทียบกับ cuscode ใน dna_log)
+        df_merged = df_merged.merge(
+            df_dna, left_on='id_cus', right_on='cuscode', how='left'
+        )
+
+        # 🆕 NEW: คำนวณ dna_fin ตาม COALESCE(CASE WHEN dna.cuscode IS NOT NULL THEN 'ตัวแทน DNA' END,'ตัวแทนทั่วไป')
+        df_merged['dna_fin'] = np.where(
+            df_merged['cuscode'].notna(), 'ตัวแทน DNA', 'ตัวแทนทั่วไป'
+        )
+
+        df_merged['customer_name'] = df_merged['customer_name'].replace(
+            to_replace=r'.*- สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด$',
+            value='สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด',
+            regex=True
+        )
+
+        # ===== DEBUG + ROBUST NORMALIZATION FOR goverment_type_text =====
+
+        # 0) ยืนยันคอลัมน์สำคัญมีอยู่จริง
+        required_cols = [
+            'isGovernmentOfficer', 'status_gpf', 'is_special_campaign',
+            'current_campaign', 'newinsurance'
+        ]
+        for col in required_cols:
+            if col not in df_merged.columns:
+                logger.warning(f"⚠️ missing column: {col}")
+
+        # ใช้ id_cus จาก pay ก่อน (sp.id_cus) ถ้าไม่มี fallback เป็นของ plan
+        if 'id_cus_pay' in df_merged.columns:
+            idcus_series = df_merged['id_cus_pay']
+        else:
+            idcus_series = df_merged.get('id_cus')
+            logger.warning("⚠️ id_cus_pay not found; falling back to id_cus from plan")
+
+        # 1) ฟังก์ชัน normalize ที่ทนทาน
+        def to_str(s):
+            return s.astype(str).str.strip()
+
+        def norm_lower(s):
+            return to_str(s).str.lower()
+
+        # true-ish: รองรับหลายรูปแบบ + ตัวเลขทุกค่าที่ > 0 จะถือเป็น True
+        def to_bool(s: pd.Series) -> pd.Series:
+            s_str = norm_lower(s)
+            truthy = {'1','y','yes','true','t','ใช่','true-ish','ok'}
+            falsy  = {'0','n','no','false','f','ไม่','none','null','na',''}
+            # ลองตีความตัวเลข > 0 เป็น True
+            as_num = pd.to_numeric(s_str, errors='coerce')
+            num_truth = as_num.fillna(0) > 0
+            cat_truth = s_str.isin(truthy)
+            cat_false = s_str.isin(falsy)
+            # True ถ้าเป็น truthy หรือเป็นตัวเลข > 0
+            # False ถ้าเป็น falsy ชัดเจน
+            # ที่เหลือใช้ num_truth เป็นหลัก
+            out = num_truth | cat_truth
+            out = out & (~cat_false)
+            return out.fillna(False)
+
+        # 2) เตรียมซีรีส์
+        is_go_raw = df_merged.get('isGovernmentOfficer', '')
+        gpf_raw   = df_merged.get('status_gpf', '')
+        is_sp_raw = df_merged.get('is_special_campaign', '')
+        camp_raw  = df_merged.get('current_campaign', '')
+        newin_raw = df_merged.get('newinsurance', '')
+        idcus_raw = idcus_series if idcus_series is not None else pd.Series('', index=df_merged.index)
+
+        is_go_f = to_bool(is_go_raw)
+        is_sp_f = to_bool(is_sp_raw)
+
+        gpf_l   = norm_lower(gpf_raw)
+        # นับว่าเป็น "yes" ถ้าเข้ากลุ่มเหล่านี้ (เพิ่มคำไทย/รูปแบบอื่น ๆ ที่พบ)
+        gpf_yes = gpf_l.isin({'yes','y','true','t','1','ใช่','gpf','กบข'})
+        # (กันเคสอื่น ๆ ที่เป็นบวกด้วย)
+        gpf_yes = gpf_yes | (pd.to_numeric(gpf_l, errors='coerce').fillna(0) > 0)
+
+        camp_l  = norm_lower(camp_raw)
+        newin_s = to_str(newin_raw)
+        idcus_s = to_str(idcus_raw)
+
+        # ธนชาตประกันภัย: ใช้ contains แบบหยวน (กันเว้นวรรค/ตัวสะกด)
+        # ถ้าในระบบมีสะกดอื่น ๆ เพิ่มเติม เช่น "ธนชาต ประกันภัย", "ธนชาต-ประกันภัย" ให้เติม pattern ตรงนี้ได้
+        is_tnc = newin_s.str.contains('ธนชาต', na=False)
+
+        is_lady = camp_l.eq('lady')
+        is_fng  = idcus_s.str.startswith('FNG', na=False)
+
+        # 3) สร้าง mask ตามกติกา
+        m1 = is_go_f & gpf_yes & (~is_sp_f)        # 'กบข'
+        m2 = is_go_f & (~gpf_yes) & (~is_sp_f)     # 'กบข(ฟิน)'
+        m3 = is_sp_f & is_tnc & is_fng             # 'customize_tnc'
+        m4 = is_tnc & is_lady                      # 'lady'
+        m5 = is_sp_f                                # 'สู้สุดใจ'
+
+        # 4) สร้างคอลัมน์ผลลัพธ์
+        df_merged['goverment_type_text'] = ''
+        df_merged.loc[m1, 'goverment_type_text'] = 'กบข'
+        df_merged.loc[m2, 'goverment_type_text'] = 'กบข(ฟิน)'
+        df_merged.loc[m3, 'goverment_type_text'] = 'customize_tnc'
+        df_merged.loc[m4, 'goverment_type_text'] = 'lady'
+        df_merged.loc[m5 & (df_merged['goverment_type_text'] == ''), 'goverment_type_text'] = 'สู้สุดใจ'
+
+        # 5) DEBUG: เช็คจำนวนที่เข้าเงื่อนไข + ตัวอย่างแถว
+        print("m1 กบข", m1.sum(), "rows")
+        print("m2 กบข(ฟิน)", m2.sum(), "rows")
+        print("m3 customize_tnc", m3.sum(), "rows")
+        print("m4 lady", m4.sum(), "rows")
+        print("m5 สู้สุดใจ", m5.sum(), "rows")
+
+        # ถ้าเงื่อนไขไหนยัง 0 ให้พิมพ์ distribution ของค่าที่เกี่ยว
+        if m1.sum() == 0 or m2.sum() == 0 or m5.sum() == 0:
+            print("📊 isGovernmentOfficer (top):")
+            print(to_str(is_go_raw).value_counts(dropna=False).head(10))
+            print("📊 status_gpf (top):")
+            print(to_str(gpf_raw).value_counts(dropna=False).head(10))
+            print("📊 is_special_campaign (top):")
+            print(to_str(is_sp_raw).value_counts(dropna=False).head(10))
+
+        if m3.sum() == 0 or m4.sum() == 0:
+            print("📊 newinsurance (top):")
+            print(newin_s.value_counts(dropna=False).head(10))
+            print("📊 current_campaign (top):")
+            print(to_str(camp_raw).value_counts(dropna=False).head(10))
+            if 'id_cus_pay' in df_merged.columns:
+                print("📊 id_cus_pay prefix (top):")
+                print(df_merged['id_cus_pay'].astype(str).str[:3].value_counts(dropna=False).head(10))
+
+        # แสดงตัวอย่าง 5 แถวที่ "เกือบ" เข้า (ช่วยไล่ดูค่าจริง)
+        near_tnc = df_merged[newin_s.str.contains('ธนชาต', na=False)].head(5)
+        print("🔎 sample rows with newinsurance contains 'ธนชาต':\n", near_tnc[['quo_num','newinsurance','current_campaign','is_special_campaign','id_cus','id_cus_pay']].head(5))
+
 
         # ===== (2) ล้างคอมม่า/ช่องว่างก่อนแปลงตัวเลข (เฉพาะคอลัมน์เงิน) =====
         money_cols = [
@@ -279,6 +458,15 @@ def clean_sales_quotation_data(inputs):
                 df_merged[base_col] = pd.to_numeric(df_merged[pay_col], errors='coerce')
                 df_merged.drop(columns=[pay_col], inplace=True)
 
+        if 'tel' in df_merged.columns:
+            df_merged['tel'] = (
+                df_merged['tel']
+                .astype(str)              # แปลงเป็น string
+                .str.strip()              # ตัด space หน้า-หลัง
+                .str.replace(r'\D+', '', regex=True)  # ลบทุกตัวที่ไม่ใช่ตัวเลข
+                .replace({'': None})      # ถ้าไม่มีตัวเลขเลย -> None
+            )
+
         # ทำความสะอาดทั่วไป
         df_merged = df_merged.replace(['nan', 'NaN', 'null', ''], np.nan)
         df_merged = df_merged.replace(r'^\s*$', np.nan, regex=True)
@@ -313,9 +501,16 @@ def clean_sales_quotation_data(inputs):
             "discount_government_ins": "ins_goverment_discount",
             "coupon_addon": "discount_addon",
             "chanel": "contact_channel",
-            "isGovernmentOfficer": "is_government_officer"
+            "isGovernmentOfficer": "is_government_officer",
+            "planType": "plan_type"
         }
         df_merged.rename(columns=column_mapping, inplace=True)
+
+        df_merged['local_broker'] = np.where(
+            df_merged['chanel_key'].astype(str).str.strip().eq('WEB-LOCAL'),
+            'Local Broker',
+            ''
+        )
 
         # ===== (4) กันพลาดกรณี merge แล้วมีหลายบรรทัด (ควรเหลือน้อยจาก SQL แล้ว) =====
         # จัดลำดับให้บรรทัดที่ "ตัวเลขครบ" และ "order_time ล่าสุด" มาก่อน จากนั้นค่อย drop_duplicates
@@ -377,7 +572,8 @@ def clean_sales_quotation_data(inputs):
 
         cols_to_drop = [
             'id_cus','type_car','chanel_key','special_package','special_package_health','type',
-            'display_permission', 'name', 'lastname', 'company', 'type_insurance', 'fin_new_group'
+            'display_permission', 'name', 'lastname', 'company', 'type_insurance', 'fin_new_group', 
+            'current_campaign', 'newinsurance','cuscode', 'id_cus_pay'
         ]
         df_merged.drop(columns=[c for c in cols_to_drop if c in df_merged.columns], inplace=True)
 
@@ -550,15 +746,15 @@ def fact_sales_quotation_etl():
 if __name__ == "__main__":
     try:
         logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
-        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp = extract_sales_quotation_data()
+        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
 
-        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp))
+        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
 
-        # output_path = "fact_sales_quotation.xlsx"
-        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        # print(f"💾 Saved to {output_path}")
+        output_path = "fact_sales_quotation.xlsx"
+        df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        print(f"💾 Saved to {output_path}")
 
-        load_sales_quotation_data(df_clean)
+        # load_sales_quotation_data(df_clean)
         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")

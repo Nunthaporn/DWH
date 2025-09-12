@@ -7,10 +7,11 @@ import time
 import gc
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, inspect, text
+from sqlalchemy import create_engine, MetaData, Table, inspect, text, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.sql.elements import TextClause
 from typing import Union, List
+from sqlalchemy import or_, func
 
 # ✅ Load env
 load_dotenv()
@@ -113,7 +114,7 @@ def extract_installment_data():
             df_plan = pd.read_sql("""
                 SELECT quo_num
                 FROM fin_system_select_plan
-                WHERE datestart BETWEEN '2025-01-01' AND '2025-08-31'
+                WHERE datestart BETWEEN '2025-01-01' AND '2025-09-08'
             """, fresh_source_1)
         except Exception as e:
             print(f"❌ Error loading plan data: {e}")
@@ -654,6 +655,97 @@ def clean_records_for_db(records: list) -> list:
     
     return cleaned_records
 
+def create_fresh_target_engine():
+    """สร้าง fresh target engine สำหรับ PostgreSQL"""
+    target_url = (
+        f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:"
+        f"{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:"
+        f"{os.getenv('DB_PORT_test')}/fininsurance"
+    )
+    try:
+        return create_engine(
+            target_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            echo=False,
+            connect_args={
+                "connect_timeout": 30,
+                "application_name": "fact_installment_payments_etl",
+                "options": "-c statement_timeout=300000 -c idle_in_transaction_session_timeout=300000"
+            }
+        )
+    except Exception as e:
+        print(f"❌ Error creating fresh target engine: {e}")
+        return None
+
+
+def chunker(df: pd.DataFrame, size: int = 5000):
+    for i in range(0, len(df), size):
+        yield df.iloc[i:i+size]
+
+
+def clean_records_for_db(records: list[dict]) -> list[dict]:
+    """แปลง NaN/NaT และ numpy scalar ให้เป็นชนิด Python + None ที่ DB รับได้"""
+    def to_native(v):
+        if v is None:
+            return None
+        if isinstance(v, float) and (np.isnan(v) if isinstance(v, float) else False):
+            return None
+        if pd.isna(v):
+            return None
+        # numpy scalar → python
+        if isinstance(v, (np.integer, )):
+            return int(v)
+        if isinstance(v, (np.floating, )):
+            return float(v)
+        if isinstance(v, (np.bool_, )):
+            return bool(v)
+        return v
+
+    out = []
+    for r in records:
+        out.append({k: to_native(v) for k, v in r.items()})
+    return out
+
+
+def build_conditional_upsert(table, pk_cols: list[str], update_allow_cols: list[str], records: list[dict]):
+    """
+    UPSERT:
+      - INSERT แถวใหม่
+      - UPDATE เฉพาะเมื่อค่า 'ต่างจริง ๆ' (NULL-safe) ด้วย IS DISTINCT FROM
+      - ไม่ทับด้วย NULL: COALESCE(EXCLUDED.col, table.col)
+      - update_at = now() เฉพาะตอน UPDATE จริง (เพราะมี WHERE)
+    """
+    stmt = pg_insert(table).values(records)
+    excluded = stmt.excluded
+
+    # อัปเดตด้วยค่าใหม่ถ้าไม่ใช่ NULL มิฉะนั้นคงค่าเดิม
+    set_map = {
+        col: func.coalesce(getattr(excluded, col), getattr(table.c, col))
+        for col in update_allow_cols
+    }
+    if 'update_at' in table.c:
+        set_map['update_at'] = func.now()
+
+    # อัปเดตเฉพาะเมื่อ "ค่าหลัง COALESCE" ต่างจากค่าปัจจุบัน (NULL-safe)
+    change_conds = [
+        func.coalesce(getattr(excluded, col), getattr(table.c, col))\
+            .is_distinct_from(getattr(table.c, col))
+        for col in update_allow_cols
+    ]
+    where_clause = or_(*change_conds) if change_conds else text("FALSE")
+
+    return stmt.on_conflict_do_update(
+        index_elements=pk_cols,  # หรือใช้ constraint="fact_installment_payments_unique" ถ้าต้องระบุชื่อคอนสเตรนต์
+        set_=set_map,
+        where=where_clause
+    )
+
+# ----------------------- Main OP -----------------------
+
 @op
 def load_installment_data(df: pd.DataFrame):
     table_name = 'fact_installment_payments'
@@ -662,548 +754,114 @@ def load_installment_data(df: pd.DataFrame):
     # ✅ ตรวจสอบข้อมูลก่อนการโหลด
     print(f"🔍 Before loading - DataFrame shape: {df.shape}")
     print(f"🔍 Before loading - Columns: {list(df.columns)}")
-    
-    # ✅ ตรวจสอบ NaN values ก่อนการโหลด
+
+    # ✅ ตรวจสอบ NaN values ก่อนการโหลด (log สั้น ๆ)
     print("\n🔍 NaN check before loading:")
     for col in df.columns:
         nan_count = df[col].isna().sum()
         if nan_count > 0:
             print(f"  - {col}: {nan_count} NaN values")
-    
-    # ✅ ทำความสะอาดข้อมูลก่อนโหลด - แปลง NaN เป็น None
+
+    # ✅ ทำความสะอาดข้อมูลพื้นฐาน
     print("\n🧹 Final data cleaning before loading...")
     df_clean = df.copy()
+
+    # แปลง object 'nan'/'null'/'none'/'undefined' → None
     for col in df_clean.columns:
-        if df_clean[col].dtype in ['float64', 'int64']:
-            # แปลง NaN เป็น None สำหรับ numeric columns
-            nan_count = df_clean[col].isna().sum()
-            if nan_count > 0:
-                print(f"  🔄 Converting {nan_count} NaN values to None in {col}")
-                df_clean[col] = df_clean[col].where(pd.notna(df_clean[col]), None)
-        elif df_clean[col].dtype == 'object':
-            # แปลง string 'nan', 'null' เป็น None
-            df_clean[col] = df_clean[col].astype(str)
-            nan_mask = df_clean[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-            nan_count = nan_mask.sum()
-            if nan_count > 0:
-                print(f"  🔄 Converting {nan_count} string NaN values to None in {col}")
-                df_clean.loc[nan_mask, col] = None
-    
-    # ✅ ตรวจสอบข้อมูลหลังการทำความสะอาด
-    print("\n🔍 NaN check after cleaning:")
-    for col in df_clean.columns:
-        nan_count = df_clean[col].isna().sum()
-        if nan_count > 0:
-            print(f"  - {col}: {nan_count} NaN values")
-    
-    # ใช้ df_clean แทน df ต่อไป
-    df = df_clean
-    
-    # ✅ กรองซ้ำจาก DataFrame ใหม่
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
-    print(f"🔍 After removing duplicates: {len(df)} rows")
+        if df_clean[col].dtype == 'object':
+            s = df_clean[col].astype(str)
+            mask = s.str.lower().isin(['nan', 'null', 'none', 'undefined'])
+            if mask.any():
+                print(f"  🔄 Converting {mask.sum()} string NaN-like values to None in {col}")
+                df_clean.loc[mask, col] = None
 
-    # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
-    today_str = datetime.now().strftime('%Y-%m-%d')
-
-    # ✅ สร้าง fresh target engine สำหรับการโหลดข้อมูล
-    target_url = f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
-    
-    def create_fresh_target_engine():
-        """สร้าง fresh target engine สำหรับ PostgreSQL"""
-        try:
-            fresh_target = create_engine(
-                target_url,
-                pool_size=5,
-                max_overflow=10,
-                pool_timeout=30,
-                pool_recycle=1800,
-                pool_pre_ping=True,
-                echo=False,
-                connect_args={
-                    "connect_timeout": 30,
-                    "application_name": "fact_installment_payments_etl",
-                    "options": "-c statement_timeout=300000 -c idle_in_transaction_session_timeout=300000"
-                }
-            )
-            return fresh_target
-        except Exception as e:
-            print(f"❌ Error creating fresh target engine: {e}")
-            return None
-
-    # ✅ Load เฉพาะข้อมูลวันนี้จาก PostgreSQL - เพิ่มการจัดการ connection
-    df_existing = pd.DataFrame()
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        fresh_target = create_fresh_target_engine()
-        if not fresh_target:
-            print("⚠️ Failed to create fresh target engine. Proceeding without existing data comparison.")
-            df_existing = pd.DataFrame()
-            break
-            
-        try:
-            print(f"🔄 Attempting to load existing data (attempt {retry_count + 1}/{max_retries})...")
-            
-            # สร้าง connection ใหม่ทุกครั้ง
-            with fresh_target.connect() as conn:
-                # ตั้งค่า timeout และ connection parameters
-                conn.execute(text("SET statement_timeout = 300000"))  # 5 minutes
-                conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))  # 5 minutes
-                
-                df_existing = pd.read_sql(
-                    f"SELECT * FROM {table_name} WHERE update_at >= '{today_str}'",
-                    conn
-                )
-            
-            print(f"📊 Existing data loaded successfully: {len(df_existing)} rows")
-            fresh_target.dispose()
-            break
-            
-        except Exception as e:
-            retry_count += 1
-            print(f"❌ Error loading existing data (attempt {retry_count}/{max_retries}): {e}")
-            
-            # ปิด fresh engine ทันทีเมื่อเกิด error
-            try:
-                fresh_target.dispose()
-                print("✅ Fresh target engine disposed successfully after error")
-            except Exception as dispose_error:
-                print(f"⚠️ Error disposing fresh target engine: {dispose_error}")
-                
-                # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
-                try:
-                    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-                    for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
-                        if var_name in locals():
-                            engine = locals()[var_name]
-                            if engine is not None:
-                                try:
-                                    engine.dispose()
-                                    print(f"✅ {var_name} engine disposed successfully in exception handler")
-                                except Exception as dispose_error2:
-                                    print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
-                except Exception as cleanup_error:
-                    print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
-            
-            if retry_count >= max_retries:
-                print("⚠️ Max retries reached. Proceeding without existing data comparison.")
-                df_existing = pd.DataFrame()
-                break
-            
-            # รอสักครู่ก่อนลองใหม่
-            time.sleep(2 ** retry_count)  # Exponential backoff
-
-    # ✅ ตรวจสอบว่าคอลัมน์ primary key มีอยู่ใน DataFrame หรือไม่
-    if df.empty:
-        print("⚠️ DataFrame is empty. No data to process.")
-        return
-    
-    missing_pk_cols = [col for col in pk_column if col not in df.columns]
-    if missing_pk_cols:
-        print(f"❌ Missing primary key columns in DataFrame: {missing_pk_cols}")
-        print(f"Available columns: {list(df.columns)}")
-        return
-    
-    # ✅ ตรวจสอบว่าข้อมูลในคอลัมน์ primary key มีค่า None หรือ NaN หรือไม่
+    # กรองแถวที่คีย์ผสมว่าง
+    # แปลงชนิดให้เทียบง่าย และคัดทิ้งคีย์ที่เป็น NaN/None
     for col in pk_column:
-        null_count = df[col].isna().sum()
-        if null_count > 0:
-            print(f"⚠️ Column {col} has {null_count} null values. These will be excluded from processing.")
-    
-    # ✅ กรองข้อมูลที่มีค่า None หรือ NaN ในคอลัมน์ primary key
-    df_clean = df[df[pk_column].notna().all(axis=1)].copy()
-    if len(df_clean) < len(df):
-        print(f"⚠️ Filtered out {len(df) - len(df_clean)} rows with null primary key values.")
-        df = df_clean
-    
-    # ✅ ตรวจสอบว่า DataFrame ว่างเปล่าหลังจากกรองข้อมูลหรือไม่
-    if df.empty:
+        if col not in df_clean.columns:
+            print(f"❌ Missing primary key column in DataFrame: {col}")
+            print(f"Available columns: {list(df_clean.columns)}")
+            return
+
+    df_clean = df_clean[df_clean[pk_column].notna().all(axis=1)].copy()
+    if df_clean.empty:
         print("⚠️ DataFrame is empty after filtering null primary key values. No data to process.")
         return
-    
-    missing_pk_cols_existing = [col for col in pk_column if col not in df_existing.columns]
-    if missing_pk_cols_existing:
-        print(f"❌ Missing primary key columns in existing DataFrame: {missing_pk_cols_existing}")
-        print(f"Available columns: {list(df_existing.columns)}")
-        # สร้าง empty composite key สำหรับ existing data
-        df_existing['composite_key'] = ''
-        print("📊 Created empty composite key for existing DataFrame due to missing primary key columns")
-    elif df_existing.empty:
-        print("⚠️ Existing DataFrame is empty. Creating empty composite key.")
-        df_existing['composite_key'] = ''
-        print("📊 Created empty composite key for empty existing DataFrame")
-    else:
-        # ✅ ตรวจสอบว่าข้อมูลในคอลัมน์ primary key ของ existing data มีค่า None หรือ NaN หรือไม่
-        for col in pk_column:
-            if col in df_existing.columns:
-                null_count = df_existing[col].isna().sum()
-                if null_count > 0:
-                    print(f"⚠️ Existing data column {col} has {null_count} null values.")
-        
-        # ✅ กรองข้อมูลที่มีค่า None หรือ NaN ในคอลัมน์ primary key ของ existing data
-        df_existing_clean = df_existing[df_existing[pk_column].notna().all(axis=1)].copy()
-        if len(df_existing_clean) < len(df_existing):
-            print(f"⚠️ Filtered out {len(df_existing) - len(df_existing_clean)} rows with null primary key values from existing data.")
-            df_existing = df_existing_clean
-        
-        # ✅ ตรวจสอบว่า existing DataFrame ว่างเปล่าหลังจากกรองข้อมูลหรือไม่
-        if df_existing.empty:
-            print("⚠️ Existing DataFrame is empty after filtering null primary key values.")
-            df_existing['composite_key'] = ''
-            print("📊 Created empty composite key for existing DataFrame after filtering")
-        else:
-            # ✅ แปลง dtype ให้ตรงกันระหว่าง df และ df_existing
-            for col in pk_column:
-                if col in df.columns and col in df_existing.columns:
-                    # แปลงเป็น string เพื่อเปรียบเทียบ
-                    df[col] = df[col].astype(str)
-                    df_existing[col] = df_existing[col].astype(str)
 
-            # ✅ สร้าง composite key สำหรับเปรียบเทียบ - แปลงเป็น string ก่อนและจัดการ None/NaN
-            # ตรวจสอบว่า composite_key ยังไม่มีใน df หรือไม่
-            if 'composite_key' not in df.columns:
-                df['composite_key'] = df[pk_column[0]].fillna('').astype(str) + '|' + df[pk_column[1]].fillna('').astype(str)
-                print(f"📊 Created composite key for main DataFrame in existing data section: {len(df)} records")
-            
-            # ตรวจสอบว่า composite_key ยังไม่มีใน df_existing หรือไม่
-            if 'composite_key' not in df_existing.columns:
-                df_existing['composite_key'] = df_existing[pk_column[0]].fillna('').astype(str) + '|' + df_existing[pk_column[1]].fillna('').astype(str)
-                print(f"📊 Created composite key for existing DataFrame: {len(df_existing)} records")
-            else:
-                print(f"📊 Composite key already exists in existing DataFrame: {len(df_existing)} records")
+    # กันซ้ำภายในชุดข้อมูลเอง (ตามคีย์ผสม)
+    before = len(df_clean)
+    df_clean = df_clean.drop_duplicates(subset=pk_column, keep='last').copy()
+    print(f"🔍 After removing duplicate composite keys in batch: {before} -> {len(df_clean)} rows")
 
-    # ✅ สร้าง composite key สำหรับ df หลักเสมอ (ไม่ว่าจะมี existing data หรือไม่)
-    if 'composite_key' not in df.columns:
-        # แปลง dtype ให้ตรงกันก่อนสร้าง composite key
-        for col in pk_column:
-            if col in df.columns:
-                df[col] = df[col].astype(str)
-        
-        # สร้าง composite key สำหรับ df หลัก
-        df['composite_key'] = df[pk_column[0]].fillna('').astype(str) + '|' + df[pk_column[1]].fillna('').astype(str)
-        print(f"📊 Created composite key for main DataFrame: {len(df)} records")
-    else:
-        print(f"📊 Composite key already exists in main DataFrame: {len(df)} records")
-    
-    # ✅ ตรวจสอบว่า composite_key สร้างได้ถูกต้องหรือไม่
-    if 'composite_key' not in df.columns:
-        print("❌ Failed to create composite_key for main DataFrame. Exiting.")
-        return
-
-    # ✅ หาข้อมูลใหม่ที่ยังไม่มีในฐานข้อมูล
-    existing_keys = set(df_existing['composite_key']) if not df_existing.empty else set()
-    df_to_insert = df[~df['composite_key'].isin(existing_keys)].copy()
-    
-    # ✅ ตรวจสอบว่า composite key สร้างได้ถูกต้องหรือไม่
-    print(f"📊 Data summary:")
-    print(f"  - Total records: {len(df)}")
-    print(f"  - Existing records: {len(df_existing)}")
-    print(f"  - New records to insert: {len(df_to_insert)}")
-    print(f"  - Records to update: {len(df) - len(df_to_insert)}")
-
-    # ✅ หาข้อมูลที่มีอยู่แล้ว และเปรียบเทียบว่าเปลี่ยนแปลงหรือไม่
-    common_keys = set(df['composite_key']) & existing_keys if existing_keys else set()
-    df_common_new = df[df['composite_key'].isin(common_keys)].copy() if common_keys else pd.DataFrame()
-    df_common_old = df_existing[df_existing['composite_key'].isin(common_keys)].copy() if common_keys and not df_existing.empty else pd.DataFrame()
-
-    # ตรวจสอบว่ามีข้อมูลที่ซ้ำกันหรือไม่
-    if not df_common_new.empty and not df_common_old.empty:
-        try:
-            # ตั้ง index ด้วย composite_key
-            df_common_new.set_index('composite_key', inplace=True)
-            df_common_old.set_index('composite_key', inplace=True)
-
-            # เปรียบเทียบข้อมูล (ไม่รวม pk columns และ composite_key)
-            compare_cols = [col for col in df_common_new.columns if col not in pk_column + ['composite_key']]
-            # ตรวจสอบว่าคอลัมน์ที่ต้องการเปรียบเทียบมีอยู่ในทั้งสอง DataFrame หรือไม่
-            available_cols = [col for col in compare_cols if col in df_common_old.columns]
-            
-            if available_cols:
-                df_common_new_compare = df_common_new[available_cols]
-                df_common_old_compare = df_common_old[available_cols]
-
-                # หาแถวที่มีการเปลี่ยนแปลง
-                df_diff_mask = ~(df_common_new_compare.eq(df_common_old_compare, axis=1).all(axis=1))
-                df_diff = df_common_new[df_diff_mask].reset_index()
-            else:
-                df_diff = pd.DataFrame()
-        except Exception as e:
-            print(f"⚠️ Error during data comparison: {e}")
-            df_diff = pd.DataFrame()
-    else:
-        df_diff = pd.DataFrame()
-
-    print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff)} rows")
-    
-    # ✅ ตรวจสอบว่ามีข้อมูลที่จะ insert หรือ update หรือไม่
-    if df_to_insert.empty and df_diff.empty:
-        print("⚠️ No new data to insert or update. Exiting.")
-        return
-    
-    # ✅ ตรวจสอบว่า composite_key มีอยู่ใน DataFrame ทั้งหมดที่จำเป็น
-    if 'composite_key' not in df.columns:
-        print("❌ composite_key not found in main DataFrame. This should not happen.")
-        return
-    
-    # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_existing หรือไม่
-    if 'composite_key' not in df_existing.columns:
-        print("❌ composite_key not found in existing DataFrame. This should not happen.")
-        return
-
-    # ✅ สร้าง fresh target engine สำหรับ metadata และ operations
+    # ✅ เตรียมโหลด
     fresh_target_ops = create_fresh_target_engine()
     if not fresh_target_ops:
-        print("❌ Failed to create fresh target engine for operations. Exiting.")
-        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิด
-        engines_to_check = []
-        
-        # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-        for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update']:
-            if var_name in locals():
-                engine = locals()[var_name]
-                if engine is not None:
-                    engines_to_check.append((var_name, engine))
-        
-        for engine_name, engine in engines_to_check:
-            try:
-                engine.dispose()
-                print(f"✅ {engine_name} engine disposed successfully")
-            except Exception as dispose_error:
-                print(f"⚠️ {engine_name} engine disposal failed: {dispose_error}")
-        
-        # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
-        try:
-            # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-            for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
-                if var_name in locals():
-                    engine = locals()[var_name]
-                    if engine is not None:
-                        try:
-                            engine.dispose()
-                            print(f"✅ {var_name} engine disposed successfully in exception handler")
-                        except Exception as dispose_error:
-                            print(f"⚠️ {var_name} engine disposal failed in exception handler: {dispose_error}")
-        except Exception as cleanup_error:
-            print(f"⚠️ Error during exception handler engine cleanup: {cleanup_error}")
-        
+        print("❌ Failed to create fresh target engine. Exiting.")
         return
-    
-    # ✅ Load table metadata
-    metadata = Table(table_name, MetaData(), autoload_with=fresh_target_ops)
 
-    # ✅ Insert - ใช้ Batch UPSERT เพื่อความเร็ว
-    if not df_to_insert.empty:
-        print(f"📤 Starting insert process for {len(df_to_insert)} records...")
-        # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_to_insert หรือไม่
-        if 'composite_key' in df_to_insert.columns:
-            df_to_insert = df_to_insert.drop(columns=['composite_key'])
-        else:
-            print("⚠️ composite_key not found in df_to_insert. Proceeding without dropping.")
-        
-        # ✅ ทำความสะอาดข้อมูลก่อน insert - แปลง NaN เป็น None
-        for col in df_to_insert.columns:
-            if df_to_insert[col].dtype in ['float64', 'int64']:
-                df_to_insert[col] = df_to_insert[col].where(pd.notna(df_to_insert[col]), None)
-            elif df_to_insert[col].dtype == 'object':
-                df_to_insert[col] = df_to_insert[col].astype(str)
-                nan_mask = df_to_insert[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-                df_to_insert.loc[nan_mask, col] = None
-        
-        df_to_insert_valid = df_to_insert[df_to_insert[pk_column].notna().all(axis=1)].copy()
-        dropped = len(df_to_insert) - len(df_to_insert_valid)
-        if dropped > 0:
-            print(f"⚠️ Skipped {dropped} rows with null primary keys")
-        
-        if not df_to_insert_valid.empty:
-            print(f"📤 Processing {len(df_to_insert_valid)} valid records for insertion...")
-            
-            # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
-            batch_size = 5000
-            total_batches = (len(df_to_insert_valid) + batch_size - 1) // batch_size
-            
-            # ✅ ใช้ connection แยกสำหรับแต่ละ batch
-            for i in range(0, len(df_to_insert_valid), batch_size):
-                batch_df = df_to_insert_valid.iloc[i:i+batch_size]
-                batch_num = (i // batch_size) + 1
-                print(f"  📦 Processing batch {batch_num}/{total_batches} ({len(batch_df)} records)")
-                
-                # ใช้ executemany สำหรับ batch insert
-                records = batch_df.to_dict(orient='records')
-                
-                # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
-                records = clean_records_for_db(records)
-                
-                # ✅ สร้าง fresh engine สำหรับแต่ละ batch
-                fresh_target_batch = create_fresh_target_engine()
-                if not fresh_target_batch:
-                    print(f"    ❌ Failed to create fresh target engine for batch {batch_num}. Skipping this batch.")
-                    continue
-                
-                # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
-                max_retries = 3
-                retry_count = 0
-                
-                while retry_count < max_retries:
-                    try:
-                        with fresh_target_batch.begin() as conn:
-                            # ตั้งค่า timeout
-                            conn.execute(text("SET statement_timeout = 300000"))  # 5 minutes
-                            conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))  # 5 minutes
-                            
-                            stmt = pg_insert(metadata).values(records)
-                            update_columns = {
-                                c.name: stmt.excluded[c.name]
-                                for c in metadata.columns
-                                if c.name not in pk_column
-                            }
-                            # update_at ให้เป็นเวลาปัจจุบัน
-                            update_columns['update_at'] = datetime.now()
+    table = Table(table_name, MetaData(), autoload_with=fresh_target_ops)
 
-                            stmt = stmt.on_conflict_do_update(
-                                index_elements=pk_column,
-                                set_=update_columns
-                            )
-                            conn.execute(stmt)
-                        
-                        print(f"    ✅ Batch {batch_num} inserted successfully")
-                        fresh_target_batch.dispose()
-                        break
-                        
-                    except Exception as e:
-                        retry_count += 1
-                        print(f"    ❌ Error inserting batch {batch_num} (attempt {retry_count}/{max_retries}): {e}")
-                        
-                        if retry_count >= max_retries:
-                            print(f"    ⚠️ Max retries reached for batch {batch_num}. Skipping this batch.")
-                            try:
-                                fresh_target_batch.dispose()
-                                print(f"    ✅ Fresh target batch engine disposed successfully after max retries")
-                            except Exception as dispose_error:
-                                print(f"    ⚠️ Error disposing fresh target engine for batch {batch_num}: {dispose_error}")
-                                
-                                # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
-                                try:
-                                    # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-                                    for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
-                                        if var_name in locals():
-                                            engine = locals()[var_name]
-                                            if engine is not None:
-                                                try:
-                                                    engine.dispose()
-                                                    print(f"    ✅ {var_name} engine disposed successfully in exception handler")
-                                                except Exception as dispose_error2:
-                                                    print(f"    ⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
-                                except Exception as cleanup_error:
-                                    print(f"    ⚠️ Error during exception handler engine cleanup: {cleanup_error}")
-                            break
-                        
-                        # รอสักครู่ก่อนลองใหม่
-                        time.sleep(2 ** retry_count)  # Exponential backoff
+    # คอลัมน์ที่อนุญาตให้อัปเดต (ยกเว้น PK และ audit)
+    update_cols = [
+        c.name for c in table.columns
+        if c.name not in pk_column + ['create_at', 'update_at']
+    ]
 
-    # ✅ Update - ใช้ Batch UPSERT เพื่อความเร็ว
-    if not df_diff.empty:
-        print(f"📝 Starting update process for {len(df_diff)} records...")
-        # ✅ ตรวจสอบว่า composite_key มีอยู่ใน df_diff หรือไม่
-        if 'composite_key' in df_diff.columns:
-            df_diff = df_diff.drop(columns=['composite_key'])
-        else:
-            print("⚠️ composite_key not found in df_diff. Proceeding without dropping.")
-        
-        # ✅ ทำความสะอาดข้อมูลก่อน update - แปลง NaN เป็น None
-        for col in df_diff.columns:
-            if df_diff[col].dtype in ['float64', 'int64']:
-                df_diff[col] = df_diff[col].where(pd.notna(df_diff[col]), None)
-            elif df_diff[col].dtype == 'object':
-                df_diff[col] = df_diff[col].astype(str)
-                nan_mask = df_diff[col].str.lower().isin(['nan', 'null', 'none', 'undefined'])
-                df_diff.loc[nan_mask, col] = None
-        
-        print(f"📝 Updating {len(df_diff)} existing records...")
-        
-        # ใช้ batch size เล็กลงเพื่อลดปัญหา connection
-        batch_size = 1000
-        total_batches = (len(df_diff) + batch_size - 1) // batch_size
-        
-        # ✅ ใช้ connection แยกสำหรับแต่ละ batch
-        for i in range(0, len(df_diff), batch_size):
-            batch_df = df_diff.iloc[i:i+batch_size]
-            batch_num = (i // batch_size) + 1
-            print(f"  📦 Processing update batch {batch_num}/{total_batches} ({len(batch_df)} records)")
-            
-            # ใช้ executemany สำหรับ batch update
-            records = batch_df.to_dict(orient='records')
-            
-            # ✅ ทำความสะอาด records ก่อนส่งไปยังฐานข้อมูล
-            records = clean_records_for_db(records)
-            
-            # ✅ สร้าง fresh engine สำหรับแต่ละ update batch
-            fresh_target_update = create_fresh_target_engine()
-            if not fresh_target_update:
-                print(f"    ❌ Failed to create fresh target engine for update batch {batch_num}. Skipping this batch.")
-                continue
-            
-            # ✅ ใช้ connection แยกสำหรับแต่ละ batch พร้อม retry logic
+    print("📤 Loading with conditional UPSERT (insert new, update only when changed)...")
+
+    total = len(df_clean)
+    done = 0
+    batch_size = 5000
+
+    try:
+        for batch in chunker(df_clean, batch_size):
+            # ทำความสะอาดให้ DB-friendly
+            records = clean_records_for_db(batch.to_dict(orient='records'))
+
+            # เติม create_at ตอน INSERT (ถ้าตารางไม่มี default)
+            # หมายเหตุ: func.now() เป็น SQL expression ใช้ได้กับ executemany
+            if 'create_at' in table.c:
+                for r in records:
+                    if 'create_at' not in r or r['create_at'] in (None, ''):
+                        r['create_at'] = func.now()
+
+            # สร้าง statement UPSERT แบบมี WHERE เฉพาะบรรทัดที่ “ต่างจริง”
+            stmt = build_conditional_upsert(
+                table=table,
+                pk_cols=pk_column,
+                update_allow_cols=update_cols,
+                records=records
+            )
+
+            # ยิงเป็นทรานแซกชันเดียวของ batch
             max_retries = 3
-            retry_count = 0
-            
-            while retry_count < max_retries:
+            attempt = 0
+            while attempt < max_retries:
+                attempt += 1
                 try:
-                    with fresh_target_update.begin() as conn:
-                        # ตั้งค่า timeout
-                        conn.execute("SET statement_timeout = 300000")  # 5 minutes
-                        conn.execute("SET idle_in_transaction_session_timeout = 300000")  # 5 minutes
-                        
-                        stmt = pg_insert(metadata).values(records)
-                        update_columns = {
-                            c.name: stmt.excluded[c.name]
-                            for c in metadata.columns
-                            if c.name not in pk_column
-                        }
-                        stmt = stmt.on_conflict_do_update(
-                            index_elements=pk_column,
-                            set_=update_columns
-                        )
+                    with fresh_target_ops.begin() as conn:
+                        conn.execute(text("SET statement_timeout = 300000"))
+                        conn.execute(text("SET idle_in_transaction_session_timeout = 300000"))
                         conn.execute(stmt)
-                    
-                    print(f"    ✅ Update batch {batch_num} completed successfully")
-                    fresh_target_update.dispose()
                     break
-                    
                 except Exception as e:
-                    retry_count += 1
-                    print(f"    ❌ Error updating batch {batch_num} (attempt {retry_count}/{max_retries}): {e}")
-                    
-                    if retry_count >= max_retries:
-                        print(f"    ⚠️ Max retries reached for update batch {batch_num}. Skipping this batch.")
-                        try:
-                            fresh_target_update.dispose()
-                            print(f"    ✅ Fresh target update engine disposed successfully after max retries")
-                        except Exception as dispose_error:
-                            print(f"    ⚠️ Error disposing fresh target engine for update batch {batch_num}: {dispose_error}")
-                            
-                            # ✅ ตรวจสอบและปิด engines ที่อาจยังไม่ได้ปิดในส่วน exception handler
-                            try:
-                                # ตรวจสอบ engines ที่อาจมีอยู่ใน local scope
-                                for var_name in ['fresh_target', 'fresh_target_batch', 'fresh_target_update', 'fresh_target_ops']:
-                                    if var_name in locals():
-                                        engine = locals()[var_name]
-                                        if engine is not None:
-                                            try:
-                                                engine.dispose()
-                                                print(f"    ✅ {var_name} engine disposed successfully in exception handler")
-                                            except Exception as dispose_error2:
-                                                print(f"    ⚠️ {var_name} engine disposal failed in exception handler: {dispose_error2}")
-                            except Exception as cleanup_error:
-                                print(f"    ⚠️ Error during exception handler engine cleanup: {cleanup_error}")
-                        break
-                    
-                    # รอสักครู่ก่อนลองใหม่
-                    time.sleep(2 ** retry_count)  # Exponential backoff
+                    print(f"    ❌ Error upserting batch (attempt {attempt}/{max_retries}): {e}")
+                    if attempt >= max_retries:
+                        print("    ⚠️ Max retries reached for this batch. Skipping.")
+                    else:
+                        time.sleep(2 ** attempt)
 
-    print("✅ Insert/update completed.")
+            done += len(batch)
+            print(f"   ✅ upserted {done}/{total}")
+
+        print("✅ Insert/Update completed (conditional upsert)")
+
+    finally:
+        try:
+            fresh_target_ops.dispose()
+            print("✅ Fresh target engine disposed successfully")
+        except Exception as e:
+            print(f"⚠️ Error disposing fresh target engine: {e}")
     
     # ✅ ปิด fresh target engine หลังจากเสร็จสิ้น
     try:
@@ -1254,9 +912,9 @@ if __name__ == "__main__":
 
     df_clean = clean_installment_data((df_raw))
 
-    # output_path = "fact_installment_payments.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+    output_path = "fact_installment_payments.csv"
+    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    print(f"💾 Saved to {output_path}")
 
-    load_installment_data(df_clean)
+    # load_installment_data(df_clean)
     print("🎉 completed! Data upserted to fact_installment_payments.")

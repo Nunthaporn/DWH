@@ -100,7 +100,7 @@ def extract_commission_data():
     """, task_engine)
 
     df_system_pay = pd.read_sql("""
-        SELECT quo_num,show_com_prb,show_com_ins,discom,
+        SELECT quo_num,show_com_total,show_com_prb,show_com_ins,discom,
                show_price_com_count,show_com_addon,condition_install,
                chanel_main, condi_com
         FROM fin_system_pay 
@@ -110,8 +110,7 @@ def extract_commission_data():
         SELECT 
             quo_num,
             SUM(com_invite) AS com_invite,
-            SUM(com_rank) AS com_rank,
-            SUM(com_total) AS total_commission
+            SUM(com_rank) AS com_rank
         FROM fin_com_rank
         GROUP BY quo_num;
     """, source_engine)
@@ -163,7 +162,7 @@ def clean_commission_data(data_tuple):
     
     # 🔍 Check for comma values in numeric columns
     numeric_cols_to_check = ["numpay", "money_one", "money_ten", "discom", "show_com_ins", 
-                            "total_commission", "show_com_prb", "show_com_ins", "show_price_com_count", 
+                            "show_com_total", "show_com_prb", "show_com_ins", "show_price_com_count", 
                             "show_com_addon", "com_invite", "com_rank"]
     
     print("\n🔍 Checking for comma values in numeric columns:")
@@ -246,6 +245,7 @@ def clean_commission_data(data_tuple):
 
     rename_columns = {
         "quo_num": "quotation_num",
+        "show_com_total": "total_commission",
         "show_com_prb": "prb_commission",
         "show_com_ins": "ins_commission",
         "discom": "after_tax_commission",

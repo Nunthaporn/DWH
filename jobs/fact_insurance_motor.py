@@ -5,7 +5,7 @@ import os
 import re
 import time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table
+from sqlalchemy import create_engine, MetaData, Table,func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from datetime import datetime, timedelta
@@ -224,7 +224,7 @@ def extract_motor_data():
     plan_query = """
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-08-31' 
+        WHERE update_at BETWEEN '2025-01-01' AND '2025-09-08' 
           AND type_insure = 'ประกันรถ'
     """
     df_plan = execute_query_with_retry(source_engine, plan_query)
@@ -441,76 +441,88 @@ def clean_motor_data(data_tuple):
 # -------------------------
 # 🚚 Load
 # -------------------------
+def chunker(df, size=5000):
+    for i in range(0, len(df), size):
+        yield df.iloc[i:i+size]
 
 @op
 def load_motor_data(df: pd.DataFrame):
-    table_name = "fact_insurance_motor_temp"
+    table_name = "fact_insurance_motor"
     pk_column = "quotation_num"
 
+    # เอาเฉพาะแถวที่มี PK
     df = df[df[pk_column].notna()].copy()
+    # กันซ้ำในชุดข้อมูลขาเข้าเองก่อน (ถ้าไม่มีคอลัมน์เวลา ใช้ keep='last')
+    df = df.drop_duplicates(subset=[pk_column], keep='last')
+
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
-    today_str = datetime.now().strftime('%Y-%m-%d')
+    # ระบุคอลัมน์ที่อนุญาตให้อัปเดต (ยกเว้น PK และ audit columns)
+    cols_to_update = [
+        c.name for c in table.columns
+        if c.name not in [pk_column, 'create_at', 'update_at']
+    ]
 
-    existing_query = f"SELECT {pk_column} FROM {table_name} WHERE update_at >= '{today_str}'"
-    df_existing = execute_query_with_retry(target_engine, existing_query)
-    existing_ids = set(df_existing[pk_column]) if not df_existing.empty else set()
+    # ฟังก์ชันสร้าง UPSERT แบบอัปเดตเฉพาะเมื่อข้อมูล "ต่างจริง" (NULL-safe)
+    def build_upsert_stmt(batch_records):
+        insert_stmt = pg_insert(table).values(batch_records)
 
-    new_rows = df[~df[pk_column].isin(existing_ids)].copy()
-    update_rows = df[df[pk_column].isin(existing_ids)].copy()
+        # มีอย่างน้อย 1 คอลัมน์ที่ค่า != ของเดิม (NULL-safe ด้วย IS DISTINCT FROM)
+        diff_conds = [
+            table.c[col].is_distinct_from(insert_stmt.excluded[col])
+            for col in cols_to_update
+        ]
+        where_any_diff = or_(*diff_conds)
 
-    print(f"🆕 Insert: {len(new_rows)} rows")
-    print(f"🔄 Update: {len(update_rows)} rows")
+        # อัปเดตค่าจาก excluded เฉพาะคอลัมน์ที่อนุญาต
+        set_mapping = {col: insert_stmt.excluded[col] for col in cols_to_update}
+        # เปลี่ยน update_at เฉพาะตอนเกิด UPDATE จริง (เพราะมี WHERE)
+        set_mapping['update_at'] = func.now()
 
-    if not new_rows.empty:
-        print(f"🔄 Inserting {len(new_rows)} new records...")
-        try:
-            with target_engine.begin() as conn:
-                conn.execute(table.insert(), new_rows.to_dict(orient="records"))
-            print(f"✅ Insert completed successfully")
-        except Exception as e:
-            print(f"❌ Insert failed: {str(e)}")
-            raise
+        # ถ้าต้องการอ้างอิงชื่อ unique constraint แทน index_elements ให้ใช้:
+        # constraint="fact_insurance_motor_unique"
+        return insert_stmt.on_conflict_do_update(
+            index_elements=[pk_column],
+            set_=set_mapping,
+            where=where_any_diff
+        )
 
-    if not update_rows.empty:
-        print(f"🔄 Updating {len(update_rows)} existing records...")
-        try:
-            with target_engine.begin() as conn:
-                for i, record in enumerate(update_rows.to_dict(orient="records")):
-                    if i % 100 == 0:
-                        print(f"   Progress: {i}/{len(update_rows)} records processed")
-                    stmt = pg_insert(table).values(**record)
-                    update_dict = {
-                        c.name: stmt.excluded[c.name]
-                        for c in table.columns
-                        if c.name not in [pk_column, 'create_at', 'update_at']
-                    }
-                    update_dict['update_at'] = datetime.now()
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=[pk_column],
-                        set_=update_dict
-                    )
-                    conn.execute(stmt)
-            print(f"✅ Update completed successfully")
-        except Exception as e:
-            print(f"❌ Update failed: {str(e)}")
-            raise
-
-    print("✅ Insert/update completed.")
+    print("📤 Loading data to target database with conditional UPSERT...")
 
     try:
-        target_engine.dispose()
-        print("🔒 Target database connection closed")
-    except Exception as e:
-        print(f"⚠️ Warning: Error closing target connection: {str(e)}")
+        with target_engine.begin() as conn:
+            total = len(df)
+            done = 0
+            for batch in chunker(df, size=5000):
+                records = batch.to_dict(orient="records")
 
-    try:
-        source_engine.dispose()
-        task_engine.dispose()
-        print("🔒 All database connections closed")
-    except Exception as e:
-        print(f"⚠️ Warning: Error closing all connections: {str(e)}")
+                # ถ้าตารางไม่มี default ของ create_at ใน DB ให้เติมเองตอน INSERT
+                if 'create_at' in table.c.keys():
+                    for r in records:
+                        if 'create_at' not in r or r['create_at'] in (None, ''):
+                            r['create_at'] = func.now()
+
+                stmt = build_upsert_stmt(records)
+                conn.execute(stmt)
+
+                done += len(batch)
+                print(f"   ✅ upserted {done}/{total}")
+
+        print("✅ UPSERT completed (insert new, update only when data changed)")
+    finally:
+        try:
+            target_engine.dispose()
+            print("🔒 Target database connection closed")
+        except Exception as e:
+            print(f"⚠️ Warning: Error closing target connection: {str(e)}")
+
+        try:
+            source_engine.dispose()
+            task_engine.dispose()
+            print("🔒 All database connections closed")
+        except Exception as e:
+            print(f"⚠️ Warning: Error closing all connections: {str(e)}")
 
 # -------------------------
 # 🧱 Dagster Job
