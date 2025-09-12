@@ -376,8 +376,7 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
 def load_check_price_data(df: pd.DataFrame):
     try:
         table_name = 'fact_check_price'
-        # ชุดคีย์ที่ “บ่งชี้ 1 แถว” ในตารางจริง (ต้องมี UNIQUE INDEX/CONSTRAINT ใน DB)
-        conflict_cols = ['id_cus', 'car_code', 'transaction_date', 'input_type']
+        conflict_cols = ['check_price_id']
 
         # เตรียมตาราง
         tbl = Table(table_name, MetaData(), autoload_with=target_engine)
@@ -388,7 +387,7 @@ def load_check_price_data(df: pd.DataFrame):
 
         updatable_cols = [
             c.name for c in tbl.columns
-            if c.name not in conflict_cols + ['check_price_id', 'create_at', 'update_at']
+            if c.name not in conflict_cols + ['create_at', 'update_at']
         ]
 
         if not records:
