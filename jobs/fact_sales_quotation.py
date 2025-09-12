@@ -18,6 +18,26 @@ logger = logging.getLogger(__name__)
 # ✅ Load environment variables
 load_dotenv()
 
+# ===== TIMEZONE helper (Asia/Bangkok) =====
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
+
+def today_range_th():
+    """คืนค่า (start_dt, end_dt) เป็น naive datetime ของช่วง 'วันนี้' ตาม Asia/Bangkok"""
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + datetime.timedelta(days=1)
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback UTC+7
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + datetime.timedelta(days=1)
+    return start, end
+
 # ===== TUNE ENGINES (เพิ่ม pre_ping + server-side cursor) =====
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
@@ -89,8 +109,13 @@ def extract_sales_quotation_data():
     try:
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
 
+        # ⏱️ ช่วงเวลา "วันนี้" ตามเวลาไทย
+        start_dt, end_dt = today_range_th()
+        logger.info(f"⏱️ Window (TH): {start_dt} → {end_dt}")
+
+        # เงื่อนไขกรอง plan — เปลี่ยนมาใช้พารามิเตอร์วันแทน hardcode
         where_plan = """
-            WHERE datestart BETWEEN '2025-01-01' AND '2025-09-07'
+            WHERE datestart >= :start_dt AND datestart < :end_dt
               AND id_cus NOT LIKE '%%FIN-TestApp%%'
               AND id_cus NOT LIKE '%%FIN-TestApp3%%'
               AND id_cus NOT LIKE '%%FIN-TestApp2%%'
@@ -142,6 +167,7 @@ def extract_sales_quotation_data():
               AND lastname NOT LIKE '%%test%%'
               AND COALESCE(company, '') NOT LIKE '%%Testing%%'
         """
+
         sql_plan = f"""
             SELECT quo_num, type_insure, datestart, id_government_officer, status_gpf, quo_num_old,
                    status AS status_fssp, type_car, chanel_key, id_cus, name, lastname, company, fin_new_group,
@@ -149,9 +175,9 @@ def extract_sales_quotation_data():
             FROM fin_system_select_plan
             {where_plan}
         """
-        df_plan = read_sql_stream_with_retry(sql_plan, source_engine)
+        df_plan = read_sql_stream_with_retry(sql_plan, source_engine, params={"start_dt": start_dt, "end_dt": end_dt})
 
-        # ✅ ORDER: เลือกแถวล่าสุดต่อใบเสนอราคา ด้วย ROW_NUMBER()
+        # ✅ ORDER: เลือกแถวล่าสุดต่อใบเสนอราคา ด้วย ROW_NUMBER() — ใช้ซับคิวรีที่อ้าง where_plan เหมือนกัน
         sql_order = f"""
             WITH latest_order AS (
             SELECT 
@@ -198,7 +224,7 @@ def extract_sales_quotation_data():
             FROM latest_order
             WHERE rn = 1;
         """
-        df_order = read_sql_stream_with_retry(sql_order, source_engine_task, chunksize=200_000)
+        df_order = read_sql_stream_with_retry(sql_order, source_engine_task, params={"start_dt": start_dt, "end_dt": end_dt}, chunksize=200_000)
 
         df_pay = read_sql_stream_with_retry("""
             SELECT quo_num, datestart, numpay, show_price_ins, show_price_prb, show_price_total,
@@ -268,7 +294,6 @@ def extract_sales_quotation_data():
             f"risk={df_risk.shape}, pa={df_pa.shape}, health={df_health.shape}, wp={df_wp.shape}, dna={df_dna.shape}, flag={df_flag.shape}"
         )
 
-        # 🆕 NEW: ส่ง df_dna ออกไปด้วย
         return df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag
 
     except Exception as e:
@@ -743,21 +768,21 @@ def fact_sales_quotation_etl():
     df_clean = clean_sales_quotation_data(data)
     load_sales_quotation_data(df_clean)
 
-if __name__ == "__main__":
-    try:
-        logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
-        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
+# if __name__ == "__main__":
+#     try:
+#         logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
+#         df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
 
-        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
+#         df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
 
-        # output_path = "fact_sales_quotation.xlsx"
-        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        # print(f"💾 Saved to {output_path}")
+#         # output_path = "fact_sales_quotation.xlsx"
+#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#         # print(f"💾 Saved to {output_path}")
 
-        load_sales_quotation_data(df_clean)
-        logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
-    except Exception as e:
-        logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+#         load_sales_quotation_data(df_clean)
+#         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
+#     except Exception as e:
+#         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         raise

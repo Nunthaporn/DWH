@@ -1,4 +1,4 @@
-from dagster import op, job
+from dagster import op, job, schedule
 import pandas as pd
 import numpy as np
 import os
@@ -9,48 +9,51 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy import or_, func
 
+# ---- timezone helper ----
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except Exception:
+    ZoneInfo = None
+
+def _today_range_th():
+    """Return naive datetimes [start, end) for 'today' in Asia/Bangkok."""
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback: UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
 def clean_nan_values(df):
     """
     Comprehensive function to clean NaN values and remove commas from DataFrame
     """
-    # Define all possible NaN representations
     nan_strs = ['nan', 'NaN', 'None', 'null', '', 'NULL', 'NAN', 'Nan', 'none', 'NONE']
-    
-    # Remove commas from all string columns first
+
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].astype(str).str.replace(',', '', regex=False)
-    
-    # Replace all NaN strings with None
+
     df = df.replace(nan_strs, None)
-    
-    # Replace infinite values with None
     df = df.replace([np.inf, -np.inf], None)
-    
-    # Convert all remaining NaN to None
     df = df.where(pd.notnull(df), None)
-    
-    # Additional check for float columns
+
     for col in df.columns:
         if df[col].dtype in ['float64', 'float32']:
             df[col] = df[col].where(pd.notnull(df[col]), None)
-    
+
     return df
 
 def clean_numeric_column(series):
-    """
-    Clean numeric column by removing commas, spaces, and converting to numeric
-    """
-    # Convert to string and remove commas and spaces
     cleaned = series.astype(str).str.replace(',', '', regex=False)
     cleaned = cleaned.str.replace(' ', '', regex=False)
-    
-    # Convert to numeric, coercing errors to NaN
     cleaned = pd.to_numeric(cleaned, errors="coerce")
-    
-    # Convert NaN to None for database compatibility
     cleaned = cleaned.where(pd.notnull(cleaned), None)
-    
     return cleaned
 
 # ✅ Load env
@@ -64,6 +67,7 @@ task_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task"
 )
 
+# ✅ Target (PostgreSQL)
 target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
     pool_pre_ping=True,
@@ -73,64 +77,56 @@ target_engine = create_engine(
 
 @op
 def extract_commission_data():
-    # now = datetime.now()
+    # ⏱️ ดึงเฉพาะข้อมูล "วันนี้" ตามเวลาไทย
+    start_dt, end_dt = _today_range_th()
+    print(f"⏱️ Time window (TH): {start_dt} → {end_dt}")
 
-    # start_time = now.replace(minute=0, second=0, microsecond=0)
-    # end_time = now.replace(minute=59, second=59, microsecond=999999)
-
-    # start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    # end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') 
-
-    df_select_plan = pd.read_sql("""
+    # ใช้พารามิเตอร์ ปลอดภัยกว่า และง่ายต่อการเปลี่ยนช่วงเวลาในอนาคต
+    q_select_plan = text("""
         SELECT quo_num,id_cus,no_car,current_campaign 
         FROM fin_system_select_plan 
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-09-07'
-            AND id_cus NOT LIKE '%%FIN-TestApp%%'
-            AND id_cus NOT LIKE '%%FIN-TestApp3%%'
-            AND id_cus NOT LIKE '%%FIN-TestApp2%%'
-            AND id_cus NOT LIKE '%%FIN-TestApp-2025%%'
-            AND id_cus NOT LIKE '%%FIN-Tester1%%'
-            AND id_cus NOT LIKE '%%FIN-Tester2%%'
-            AND id_cus NOT LIKE '%%FINTEST-01%%'
-    """, source_engine)
+        WHERE update_at >= :start_dt AND update_at < :end_dt
+          AND id_cus NOT LIKE '%%FIN-TestApp%%'
+          AND id_cus NOT LIKE '%%FIN-TestApp3%%'
+          AND id_cus NOT LIKE '%%FIN-TestApp2%%'
+          AND id_cus NOT LIKE '%%FIN-TestApp-2025%%'
+          AND id_cus NOT LIKE '%%FIN-Tester1%%'
+          AND id_cus NOT LIKE '%%FIN-Tester2%%'
+          AND id_cus NOT LIKE '%%FINTEST-01%%'
+    """)
 
-    df_fin_order = pd.read_sql("""
-        SELECT quo_num,numpay,order_number
-        FROM fin_order 
-    """, task_engine)
-
-    df_system_pay = pd.read_sql("""
+    # ตารางอื่นอาจไม่ต้องกรองเวลา (ข้อมูลอ้างอิง/สะสม) แต่ถ้าต้องการก็เพิ่ม WHERE แบบเดียวกันได้
+    q_fin_order = text("""SELECT quo_num,numpay,order_number FROM fin_order""")
+    q_system_pay = text("""
         SELECT quo_num,show_com_prb,show_com_ins,discom,
                show_price_com_count,show_com_addon,condition_install,
                chanel_main, condi_com
-        FROM fin_system_pay 
-    """, source_engine)
-
-    df_com_rank = pd.read_sql("""
-        SELECT 
-            quo_num,
-            SUM(com_invite) AS com_invite,
-            SUM(com_rank) AS com_rank,
-            SUM(com_total) AS total_commission
+        FROM fin_system_pay
+    """)
+    q_com_rank = text("""
+        SELECT quo_num,
+               SUM(com_invite) AS com_invite,
+               SUM(com_rank)   AS com_rank,
+               SUM(com_total)  AS total_commission
         FROM fin_com_rank
-        GROUP BY quo_num;
-    """, source_engine)
-
-    df_fin_finance = pd.read_sql("""
-        SELECT order_number, money_one ,money_ten 
-        FROM fin_finance
-    """, task_engine)
-
-    df_wp_users = pd.read_sql("""
+        GROUP BY quo_num
+    """)
+    q_fin_finance = text("""SELECT order_number, money_one ,money_ten FROM fin_finance""")
+    q_wp_users = text("""
         SELECT cuscode as id_cus
         FROM wp_users 
         WHERE cuscode NOT IN ("FINTEST-01", "FIN-TestApp", "Admin-VIF", "adminmag_fin")
-    """, source_engine)
+    """)
+    q_per = text("""SELECT quo_num,de_per_install FROM fin_com_detail""")
 
-    df_per = pd.read_sql("""
-        SELECT quo_num,de_per_install 
-        FROM fin_com_detail 
-    """, source_engine)
+    with source_engine.connect() as scon, task_engine.connect() as tcon:
+        df_select_plan = pd.read_sql(q_select_plan, scon, params={"start_dt": start_dt, "end_dt": end_dt})
+        df_fin_order   = pd.read_sql(q_fin_order, tcon)
+        df_system_pay  = pd.read_sql(q_system_pay, scon)
+        df_com_rank    = pd.read_sql(q_com_rank, scon)
+        df_fin_finance = pd.read_sql(q_fin_finance, tcon)
+        df_wp_users    = pd.read_sql(q_wp_users, scon)
+        df_per         = pd.read_sql(q_per, scon)
 
     print("📦 df_select_plan:", df_select_plan.shape)
     print("📦 df_fin_order:", df_fin_order.shape)
@@ -439,52 +435,52 @@ def load_commission_data(df: pd.DataFrame):
 def fact_commission_etl():
     load_commission_data(clean_commission_data(extract_commission_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_commission_data()
+# if __name__ == "__main__":
+#     df_raw = extract_commission_data()
 
-    df_clean = clean_commission_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_commission_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # 🔍 Final check before loading to database
-    final_nan_check = df_clean.isnull().sum()
-    if final_nan_check.sum() > 0:
-        print("\n⚠️ Final NaN check before database loading:")
-        for col, count in final_nan_check[final_nan_check > 0].items():
-            print(f"  - {col}: {count} NaN values")
-    else:
-        print("\n✅ No NaN values found before database loading")
+#     # 🔍 Final check before loading to database
+#     final_nan_check = df_clean.isnull().sum()
+#     if final_nan_check.sum() > 0:
+#         print("\n⚠️ Final NaN check before database loading:")
+#         for col, count in final_nan_check[final_nan_check > 0].items():
+#             print(f"  - {col}: {count} NaN values")
+#     else:
+#         print("\n✅ No NaN values found before database loading")
     
-    # 🔍 Final comma check before loading to database
-    numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
-                        'after_tax_commission', 'paid_commission', 'commission_addon',
-                        'commission', 'com_invite', 'com_rank']
+#     # 🔍 Final comma check before loading to database
+#     numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
+#                         'after_tax_commission', 'paid_commission', 'commission_addon',
+#                         'commission', 'com_invite', 'com_rank']
     
-    print("\n🔍 Final comma check before database loading:")
-    for col in numeric_cols_main:
-        if col in df_clean.columns:
-            comma_count = df_clean[col].astype(str).str.contains(',').sum()
-            if comma_count > 0:
-                print(f"  - ⚠️ {col}: {comma_count} values still have commas")
-                # Show remaining examples
-                examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
-                print(f"    Remaining examples: {examples.tolist()}")
-            else:
-                print(f"  - ✅ {col}: No comma values found")
+#     print("\n🔍 Final comma check before database loading:")
+#     for col in numeric_cols_main:
+#         if col in df_clean.columns:
+#             comma_count = df_clean[col].astype(str).str.contains(',').sum()
+#             if comma_count > 0:
+#                 print(f"  - ⚠️ {col}: {comma_count} values still have commas")
+#                 # Show remaining examples
+#                 examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
+#                 print(f"    Remaining examples: {examples.tolist()}")
+#             else:
+#                 print(f"  - ✅ {col}: No comma values found")
     
-    # Show sample of cleaned numeric data
-    print("\n📊 Sample of cleaned numeric data:")
-    for col in numeric_cols_main[:3]:  # Show first 3 columns
-        if col in df_clean.columns:
-            sample_values = df_clean[col].dropna().head(3)
-            print(f"  - {col}: {sample_values.tolist()}")
+#     # Show sample of cleaned numeric data
+#     print("\n📊 Sample of cleaned numeric data:")
+#     for col in numeric_cols_main[:3]:  # Show first 3 columns
+#         if col in df_clean.columns:
+#             sample_values = df_clean[col].dropna().head(3)
+#             print(f"  - {col}: {sample_values.tolist()}")
 
-    # output_path = "fact_commission.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_commission.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "fact_commission.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_commission.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_commission_data(df_clean)
-    print("🎉 completed! Data upserted to fact_commission.")
+#     load_commission_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_commission.")

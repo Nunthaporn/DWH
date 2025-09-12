@@ -215,7 +215,7 @@ def load_card_agent_data(df: pd.DataFrame):
     #    หมายเหตุ: เราตั้งค่า create_at/update_at ให้ที่ DB ฝั่ง UPDATE; ส่วน INSERT เราเติมทั้งคู่
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            for i, batch_df in enumerate(chunk_dataframe(df_to_insert, 1000), start=1):
+            for i, batch_df in enumerate(chunk_dataframe(df_to_insert, 5000), start=1):
                 recs = to_records(batch_df)
                 if not recs:
                     continue
@@ -282,19 +282,19 @@ def load_card_agent_data(df: pd.DataFrame):
 def dim_card_agent_etl():
     load_card_agent_data(clean_card_agent_data(extract_card_agent_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_card_agent_data()
+# if __name__ == "__main__":
+#     df_raw = extract_card_agent_data()
 
-    df_clean = clean_card_agent_data((df_raw))
-    print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_card_agent_data((df_raw))
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_card_agent.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_card_agent.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # output_path = "dim_card_agent.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_card_agent.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_card_agent_data(df_clean)
-    print("🎉 completed! Data upserted to dim_card_agent.")
+#     load_card_agent_data(df_clean)
+#     print("🎉 completed! Data upserted to dim_card_agent.")

@@ -1,25 +1,24 @@
-# %%
 from dagster import op, job
 import pandas as pd
 import numpy as np
 import os
-import time
-import random
 import re
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine, text, MetaData, Table, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-# ✅ Load .env
+# =========================
+# 🔧 ENV & DB CONNECTIONS
+# =========================
 load_dotenv()
 
-# ✅ DB Connections
-# Source: MariaDB
+# MariaDB (source)
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_pre_ping=True
 )
 
-# Target: PostgreSQL
+# PostgreSQL (target)
 target_engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
     connect_args={
@@ -32,191 +31,183 @@ target_engine = create_engine(
     pool_pre_ping=True
 )
 
-# ---------- helpers ----------
+# =========================
+# 🔧 HELPERS
+# =========================
 def base_id_series(s: pd.Series) -> pd.Series:
-    """คืน base id โดยตัดคำลงท้าย '-defect' และ trim ช่องว่าง"""
-    return s.astype(str).str.strip().str.replace(r'-defect$', '', regex=True)
+    """คืนค่า agent_id ที่ตัด suffix '-defect' ออกสำหรับทำคีย์กลาง"""
+    return s.astype(str).str.strip().str.replace(r"-defect$", "", regex=True)
 
-# ---------- EXTRACT ----------
+def normalize_str_col(s: pd.Series) -> pd.Series:
+    s = s.astype("string")
+    s = s.str.strip()
+    s = s.mask(s.str.len() == 0)
+    s = s.mask(s.str.lower().isin(["nan", "none", "null", "undefined"]))
+    return s
+
+# =========================
+# 🧲 EXTRACT + TRANSFORM
+# =========================
 @op
-def extract_quotation_idcus_from_pay() -> pd.DataFrame:
-    """ดึง quo_num, id_cus จาก fin_system_pay (ฝั่ง source)"""
-    q = text("SELECT quo_num, id_cus FROM fin_system_pay")
-    df = pd.read_sql(q, source_engine)
-    df = df.rename(columns={'quo_num': 'quotation_num', 'id_cus': 'agent_id'})
-    # strip เบื้องต้น
-    df['agent_id'] = df['agent_id'].astype(str).str.strip()
-    print(f"📦 df_pay (quo_num,id_cus): {df.shape}")
-    return df
-
-@op
-def extract_fact_sales_quotation_null() -> pd.DataFrame:
-    """ดึงเฉพาะ quotation_num ที่ agent_id ยังเป็น NULL (ฝั่ง target)"""
-    q = text("SELECT quotation_num FROM fact_sales_quotation")
-    df = pd.read_sql(q, target_engine)
-    print(f"📦 df_fsq_null: {df.shape}")
-    return df
-
-@op
-def extract_dim_agent_for_normalization() -> pd.DataFrame:
+def extract_agent_mapping() -> pd.DataFrame:
     """
-    ดึง agent_id ทั้งหมดจาก dim_agent (ฝั่ง target)
-    ใช้เพื่อ normalize mapping (เช่น กรณีมีทั้ง base และ base-defect)
+    ดึง agent จาก fin_system_pay (source) + quotation ทั้งหมดจาก fact_sales_quotation (target)
+    แล้วยุบ agent_id ฝั่งมิติ (dim_agent) ให้เหลือ standard เดียวต่อ base_id
+    แล้วเลือก agent_id ที่เหมาะสมสำหรับแต่ละ quotation_num
     """
-    q = text("SELECT agent_id FROM dim_agent")
-    df = pd.read_sql(q, target_engine)
-    print(f"📦 df_dim_agent: {df.shape}")
-    return df
+    # 1) ดึงจาก source: fin_system_pay
+    df_career = pd.read_sql(text("SELECT quo_num, id_cus FROM fin_system_pay"), source_engine)
+    df_career = df_career.rename(columns={"id_cus": "agent_id", "quo_num": "quotation_num"})
+    df_career["agent_id"] = normalize_str_col(df_career["agent_id"])
 
-# ---------- TRANSFORM / JOIN ----------
-@op
-def normalize_and_join(
-    df_pay: pd.DataFrame,
-    df_fsq_null: pd.DataFrame,
-    df_dim_agent: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    1) กรองเฉพาะ quotation_num ที่ agent_id ใน FSQ ยังเป็น NULL
-    2) Normalize agent_id โดยใช้ base (ตัด -defect)
-       - รวมกลุ่ม agent_id จาก dim_agent ด้วย base เดียวกัน
-       - ถ้ามีทั้ง non-defect และ defect ให้เลือกตัวที่ลงท้าย -defect (prefer defect)
-    3) แม็ป agent_id ของฝั่ง pay ให้เป็น agent_id ที่ normalize แล้ว
-    """
-    # --- เตรียมฝั่ง dim_agent: เลือกตัวแทนต่อ base (prefer -defect) ---
-    dm = df_dim_agent.copy()
-    dm['__base'] = base_id_series(dm['agent_id'])
-    dm['__is_defect'] = dm['agent_id'].str.contains(r'-defect$', case=False, na=False)
+    # 2) ดึง quotation ทั้งหมดใน fact_sales_quotation (target)
+    df_fact = pd.read_sql(text("SELECT quotation_num FROM fact_sales_quotation"), target_engine)
 
-    dup_mask = dm['__base'].duplicated(keep=False)
-    main_single = dm[~dup_mask].copy()  # base ไม่ซ้ำ
+    # 3) right-join เพื่อให้มีทุก quotation แม้ไม่มีใน pay
+    df_m1 = pd.merge(df_career, df_fact, on="quotation_num", how="right")
+
+    # 4) มิติ agent (target) เพื่อทำ standardization
+    df_main = pd.read_sql(text("SELECT agent_id FROM dim_agent"), target_engine)
+    df_main["agent_id"] = normalize_str_col(df_main["agent_id"]).dropna()
+
+    # 4.1) ทำคีย์ base และเลือกตัวแทน/ตัว defect
+    dfm = df_main.copy()
+    dfm["__base"] = base_id_series(dfm["agent_id"])
+    dfm["__is_defect"] = dfm["agent_id"].str.contains(r"-defect$", case=False, na=False)
+    dup_mask = dfm["__base"].duplicated(keep=False)
+
+    main_single = dfm[~dup_mask].copy()
+    # sort: non-defect ก่อน, defect หลัง → keep='last' จะได้ defect ถ้ามี
     main_dups = (
-        dm[dup_mask]
-        .sort_values(['__base', '__is_defect'])  # non-defect ก่อน, defect หลัง
-        .drop_duplicates('__base', keep='last')   # เก็บ defect ถ้ามี
+        dfm[dup_mask]
+        .sort_values(["__base", "__is_defect"])
+        .drop_duplicates("__base", keep="last")
     )
-    dm_norm = pd.concat([main_single, main_dups], ignore_index=True)
-    dm_norm = dm_norm[['agent_id', '__base']].rename(columns={'agent_id': 'agent_id_main'})
+    df_main_norm = pd.concat([main_single, main_dups], ignore_index=True)
 
-    # --- เตรียมฝั่ง pay + fsq(null) ---
-    m1 = pd.merge(
-        df_pay[['quotation_num', 'agent_id']],
-        df_fsq_null[['quotation_num']],
-        on='quotation_num',
-        how='right'
-    )
-    # คีย์กลางสำหรับแม็ป
-    m1['__base'] = base_id_series(m1['agent_id'])
+    # 5) ทำคีย์กลางที่ด้าน mapping
+    df_m1["__base"] = base_id_series(df_m1["agent_id"])
 
-    # --- แม็ปรวมกัน ---
-    merged = pd.merge(
-        m1,
-        dm_norm,
-        on='__base',
-        how='left',
-        suffixes=('_pay', '_main')
+    # 6) จับคู่ด้วย base
+    df_join = pd.merge(
+        df_m1,
+        df_main_norm.drop(columns=["__is_defect"], errors="ignore"),
+        on="__base",
+        how="left",
+        suffixes=("_m1", "_main"),
+        indicator=False,
     )
 
-    # agent_id_final: ถ้าแม็ปกับ main ได้ -> ใช้ agent_id_main, ไม่งั้นใช้ของ pay เดิม
-    merged['agent_id_final'] = np.where(
-        merged['agent_id_main'].notna(), merged['agent_id_main'], merged['agent_id']
+    # 7) เลือก agent_id_final: ถ้าแมตช์มิติได้ใช้ของมิติ, ไม่งั้นใช้ของเดิม
+    df_join["agent_id_final"] = np.where(
+        df_join["agent_id_main"].notna(), df_join["agent_id_main"], df_join["agent_id_m1"]
     )
 
-    # เคลียร์คอลัมน์ช่วย
-    cols_keep = ['quotation_num', 'agent_id_final']
-    out = merged[cols_keep].rename(columns={'agent_id_final': 'agent_id'})
+    # 8) คืนเฉพาะ 2 คอลัมน์ที่ต้องใช้ และ normalize อีกรอบ
+    df_out = df_join[["quotation_num", "agent_id_final"]].rename(columns={"agent_id_final": "agent_id"})
+    df_out["agent_id"] = normalize_str_col(df_out["agent_id"])
 
-    # ทำความสะอาด & ลดซ้ำ
-    out = out.replace(['None', 'none', 'nan', 'NaN', 'NaT', ''], pd.NA)
-    out = out.dropna(subset=['quotation_num', 'agent_id'])
-    out['quotation_num'] = out['quotation_num'].astype('string').str.strip()
-    out['agent_id'] = out['agent_id'].astype('string').str.strip()
-    out = out.drop_duplicates(subset=['quotation_num'])
+    # กันซ้ำ quotation_num (ถ้ามี) โดยให้แถวที่ agent_id ไม่ว่างอยู่ก่อน
+    df_out["__has_agent"] = df_out["agent_id"].notna().astype(int)
+    df_out = df_out.sort_values(["quotation_num", "__has_agent"], ascending=[True, False]) \
+                   .drop_duplicates("quotation_num", keep="first") \
+                   .drop(columns="__has_agent")
+    return df_out
 
-    print(f"📦 df_update_candidates (clean): {out.shape}")
-    return out
 
-# ---------- LOAD (UPDATE) ----------
+# =========================
+# 🧹 STAGE TEMP TABLE
+# =========================
 @op
-def update_agent_id(df_selected: pd.DataFrame) -> None:
-    if df_selected.empty:
-        print("ℹ️ No rows to update.")
-        return
+def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
+    """
+    สร้างตารางชั่วคราว dim_agent_temp (quotation_num, agent_id)
+    และ normalize ตัวสะกด agent_id ตาม dim_agent (case-insensitive)
+    """
+    if df_map.empty:
+        # สร้างตารางว่าง (schema เดียวกัน) เพื่อให้ step ถัดไปทำงานได้
+        df_map = pd.DataFrame({"quotation_num": pd.Series(dtype="string"),
+                               "agent_id": pd.Series(dtype="string")})
 
-    # กันกรณีหลุดมา
-    df_selected = (
-      df_selected
-      .dropna(subset=["quotation_num", "agent_id"])
-      .drop_duplicates(subset=["quotation_num"])
-    )
+    # โหลดลง PG (replace)
+    df_tmp = df_map.copy()
+    df_tmp["quotation_num"] = normalize_str_col(df_tmp["quotation_num"])
+    df_tmp["agent_id"] = normalize_str_col(df_tmp["agent_id"])
 
+    df_tmp.to_sql("dim_agent_temp", target_engine, if_exists="replace", index=False, method="multi", chunksize=20_000)
+    print(f"✅ staged to dim_agent_temp: {len(df_tmp):,} rows")
+
+    # Normalize ตัวสะกด agent_id ให้ตรงกับ dim_agent
+    normalize_query = text("""
+        UPDATE dim_agent_temp t
+        SET agent_id = da.agent_id
+        FROM dim_agent da
+        WHERE LOWER(da.agent_id) = LOWER(t.agent_id)
+          AND t.agent_id IS DISTINCT FROM da.agent_id;
+    """)
     with target_engine.begin() as conn:
-        # ลดโอกาสแฮงค์และ deadlock
-        conn.exec_driver_sql("SET lock_timeout = '3s'")
-        conn.exec_driver_sql("SET deadlock_timeout = '200ms'")
-        conn.exec_driver_sql("SET statement_timeout = '60s'")
+        res = conn.execute(normalize_query)
+        print(f"🔄 normalized agent_id casing: {res.rowcount} rows")
 
-        # 1) สร้าง temp table (ใช้ TEXT เพราะ agent_id อาจมี '-defect')
-        conn.exec_driver_sql("""
-            CREATE TEMP TABLE tmp_agent_updates(
-                quotation_num text PRIMARY KEY,
-                agent_id text NOT NULL
-            ) ON COMMIT DROP
-        """)
+    return "dim_agent_temp"
 
-        # 2) bulk insert ลง temp table
-        df_selected.to_sql(
-            "tmp_agent_updates",
-            con=conn,
-            if_exists="append",
-            index=False,
-            method="multi",
-            chunksize=10_000
-        )
 
-        # 3) UPDATE จริง (อัปเดตเฉพาะที่เปลี่ยน/ยังว่าง)
-        update_sql = text("""
-            UPDATE fact_sales_quotation f
-            SET agent_id = d.agent_id,
-                update_at = NOW()
-            FROM tmp_agent_updates t
-            JOIN dim_agent d
-            ON lower(d.agent_id) = lower(t.agent_id)   -- join แบบ lowercase
-            WHERE f.quotation_num = t.quotation_num
-            AND (f.agent_id IS NULL OR f.agent_id IS DISTINCT FROM d.agent_id);
-        """)
+# =========================
+# 🚀 APPLY UPDATE TO FACT
+# =========================
+@op
+def update_fact_from_temp(temp_table_name: str) -> int:
+    """
+    อัปเดต fact_sales_quotation.agent_id จาก temp table (จับคู่ quotation_num)
+    โดยใช้ตัวสะกดมาตรฐานจาก dim_agent
+    """
+    if not temp_table_name:
+        print("⚠️ temp table name missing, skip update.")
+        return 0
 
-        # 4) ใส่ retry เมื่อเจอ deadlock
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                result = conn.execute(update_sql)
-                print(f"✅ Updated rows: {result.rowcount}")
-                print("✅ Update agent_id completed successfully.")
-                break
-            except OperationalError as e:
-                msg = str(getattr(e, "orig", e)).lower()
-                if "deadlock detected" in msg and attempt < max_retries - 1:
-                    sleep_s = (2 ** attempt) + random.random()
-                    print(f"⚠️ Deadlock detected. Retrying in {sleep_s:.2f}s (attempt {attempt+1}/{max_retries})")
-                    time.sleep(sleep_s)
-                    continue
-                raise
+    update_query = text(f"""
+        UPDATE fact_sales_quotation fsq
+        SET agent_id = da.agent_id
+        FROM {temp_table_name} dc
+        JOIN dim_agent da
+          ON LOWER(da.agent_id) = LOWER(dc.agent_id)
+        WHERE fsq.quotation_num = dc.quotation_num
+          AND fsq.agent_id IS DISTINCT FROM da.agent_id;
+    """)
+    with target_engine.begin() as conn:
+        res = conn.execute(update_query)
+        print(f"✅ fact_sales_quotation updated: {res.rowcount} rows")
+        return res.rowcount or 0
 
-# ---------- JOB ----------
+
+# =========================
+# 🧹 CLEANUP TEMP
+# =========================
+@op
+def drop_dim_agent_temp(temp_table_name: str) -> None:
+    if not temp_table_name:
+        return
+    with target_engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
+    print("🗑️ dropped dim_agent_temp")
+
+
+# =========================
+# 🧱 DAGSTER JOB
+# =========================
 @job
-def update_fact_sales_quotation_agent_id():
-    update_agent_id(
-        normalize_and_join(
-            extract_quotation_idcus_from_pay(),
-            extract_fact_sales_quotation_null(),
-            extract_dim_agent_for_normalization()
-        )
-    )
+def fix_agent_id_on_fact():
+    temp = stage_dim_agent_temp(extract_agent_mapping())
+    _ = update_fact_from_temp(temp)
+    drop_dim_agent_temp(temp)
 
-if __name__ == "__main__":
-    df_pay = extract_quotation_idcus_from_pay()
-    df_fsq = extract_fact_sales_quotation_null()
-    df_dim = extract_dim_agent_for_normalization()
-    df_join = normalize_and_join(df_pay, df_fsq, df_dim)
-    update_agent_id(df_join)
-    print("🎉 completed! agent_id updated.")
+
+# =========================
+# ▶️ LOCAL RUN
+# # =========================
+# if __name__ == "__main__":
+#     df_map = extract_agent_mapping()
+#     tname = stage_dim_agent_temp(df_map)
+#     updated = update_fact_from_temp(tname)
+#     drop_dim_agent_temp(tname)
+#     print(f"🎉 done. updated rows = {updated}")

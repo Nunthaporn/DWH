@@ -1,300 +1,299 @@
-# %%
 from dagster import op, job
-import pandas as pd
+import os
+import re
 import numpy as np
-import os, re, time, random
+import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
 
-# ✅ Load .env
+# =========================
+# 🔧 ENV & DB CONNECTIONS
+# =========================
 load_dotenv()
 
-# ✅ DB connections
-# Sources (MariaDB)
-src_fin = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
-    pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=3600,
-    connect_args={"connect_timeout": 30}
+# MariaDB (source)
+src_main_engine = create_engine(
+    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_pre_ping=True, pool_recycle=3600
 )
-src_task = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
-    pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=3600,
-    connect_args={"connect_timeout": 30}
-)
-
-# Target (PostgreSQL)
-tgt = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
-    pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=3600,
-    connect_args={"connect_timeout": 30, "application_name": "payment_plan_id_update"}
+src_task_engine = create_engine(
+    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
+    pool_pre_ping=True, pool_recycle=3600
 )
 
-# ---------- helpers ----------
-def _strip_lower(s):
-    return "" if s is None or (isinstance(s, float) and pd.isna(s)) else str(s).strip().lower()
+# PostgreSQL (target)
+tgt_engine = create_engine(
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@"
+    f"{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+        "options": "-c statement_timeout=300000",
+    },
+    pool_pre_ping=True, pool_recycle=3600
+)
 
-def _safe_to_int(series: pd.Series) -> pd.Series:
-    out = pd.to_numeric(series, errors='coerce').fillna(0).astype(int)
-    out = out.replace({0: 1})  # ตามกฎเดิม: 0 -> 1
-    return out
+NULL_TOKENS = {"", "nan", "none", "null", "undefined", "nat"}
 
-def _nan_string_to_nan(df: pd.DataFrame) -> pd.DataFrame:
-    return df.map(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+def norm_str(s: pd.Series) -> pd.Series:
+    s = s.astype("string").str.strip()
+    return s.mask(s.str.lower().isin(NULL_TOKENS))
 
-# ---------- EXTRACT ----------
+# =========================
+# 🧲 EXTRACT (MariaDB)
+# =========================
 @op
-def extract_select_plan_id() -> pd.DataFrame:
-    with src_fin.connect() as conn:
-        df = pd.read_sql("SELECT quo_num, type_insure FROM fin_system_select_plan", conn)
-    print(f"📦 select_plan: {df.shape}")
+def extract_payment_sources() -> pd.DataFrame:
+    df_plan = pd.read_sql(
+        "SELECT quo_num, type_insure FROM fin_system_select_plan",
+        src_main_engine
+    )
+    df_pay = pd.read_sql(
+        "SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install FROM fin_system_pay",
+        src_main_engine
+    )
+    # แก้ชื่อช่องทางที่เจอในโน้ตบุ๊ก
+    df_pay["chanel"] = df_pay["chanel"].replace({"ผ่อนบัตร": "เข้าฟิน"})
+
+    df_order = pd.read_sql(
+        "SELECT quo_num, status_paybill FROM fin_order",
+        src_task_engine
+    )
+
+    df = pd.merge(df_plan, df_pay, on="quo_num", how="left")
+    df = pd.merge(df, df_order, on="quo_num", how="left")
     return df
 
-@op
-def extract_pay() -> pd.DataFrame:
-    with src_fin.connect() as conn:
-        df = pd.read_sql("""
-            SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install
-            FROM fin_system_pay
-        """, conn)
-    print(f"📦 pay: {df.shape}")
-    return df
+# =========================
+# 🧼 TRANSFORM
+# =========================
+def _standardize_receiver(row) -> str:
+    ch  = str(row.get("chanel", "")).strip().lower()
+    chm = str(row.get("chanel_main", "")).strip().lower()
+    cb  = str(row.get("clickbank", "")).strip().lower()
+
+    # คงค่า explicit
+    if ch in ("เข้าฟิน", "เข้าประกัน"):
+        return {"เข้าฟิน": "เข้าฟิน", "เข้าประกัน": "เข้าประกัน"}[ch]
+
+    # เงื่อนไขสำคัญจากโน้ตบุ๊ก (ส่วนใหญ่ set เป็น 'เข้าฟิน')
+    # บัตร/ผ่อน/ออนไลน์ ที่คู่กับ creditcard/qrcode/ธนาคาร → ปรับเป็นเข้าฟิน
+    if chm in ("ผ่อนบัตรเครดิต", "ผ่อนบัตร") and (cb in ("creditcard", "") and ch in ("ผ่อนบัตร", "ผ่อนบัตรเครดิต")):
+        return "เข้าฟิน"
+    if chm == "ตัดบัตรเครดิต" and ((cb in ("", "creditcard")) or cb.startswith("ธนาคาร")) and ch in ("ออนไลน์", "ผ่อนโอน", "ตัดบัตรเครดิต"):
+        return "เข้าฟิน"
+    if chm == "ผ่อนบัตรเครดิต" and (cb in ("qrcode", "creditcard", "")) and ch == "ออนไลน์":
+        return "เข้าฟิน"
+    if chm == "ผ่อนบัตรเครดิต" and cb.startswith("ธนาคาร") and ch == "ออนไลน์":
+        return "เข้าฟิน"
+    if chm == "ผ่อนบัตรเครดิต" and cb == "ธนาคารกรุงไทย" and ch == "ผ่อนบัตร":
+        return "เข้าฟิน"
+
+    # โอน/ผ่อนโอน
+    if chm == "ผ่อนโอน" and cb == "qrcode" and ch == "ผ่อนโอน":
+        return "เข้าฟิน"
+    if chm == "ผ่อนโอน" and cb.startswith("ธนาคาร") and ch in ("ผ่อนบัตร", "ผ่อนโอน", "ออนไลน์"):
+        return "เข้าฟิน"
+    if chm == "ผ่อนชำระ" and (cb in ("qrcode", "") or cb.startswith("ธนาคาร")) and ch == "ผ่อนโอน":
+        return "เข้าฟิน"
+    if chm == "โอนเงิน" and cb.startswith("ธนาคาร") and ch == "ออนไลน์":
+        return "เข้าฟิน"
+
+    # ตัดบัตรเครดิตกรณีทั่วไป
+    if chm == "ตัดบัตรเครดิต" and cb == "" and ch == "ตัดบัตรเครดิต":
+        return "เข้าฟิน"
+
+    # default: คืนค่าเดิม
+    return str(row.get("chanel", "")).strip()
+
+def _determine_payment_channel(row) -> str:
+    ch_main = str(row.get("chanel_main", "")).strip().lower()
+    cb_raw  = row.get("clickbank")
+    cb = str(cb_raw).strip().lower()
+    cb_empty = (cb_raw is None) or (cb == "")
+
+    if ch_main in ("ตัดบัตรเครดิต", "ผ่อนบัตร", "ผ่อนบัตรเครดิต", "ผ่อนชำระ"):
+        if "qrcode" in cb:
+            return "QR Code"
+        if "creditcard" in cb:
+            return "2C2P"
+        return "ตัดบัตรกับฟิน"
+
+    if ch_main in ("โอนเงิน", "ผ่อนโอน"):
+        return "QR Code" if "qrcode" in cb else "โอนเงิน"
+
+    if ch_main and cb_empty:
+        return row.get("chanel_main") or ""
+
+    if not ch_main and not cb_empty:
+        if "qrcode" in cb:
+            return "QR Code"
+        if "creditcard" in cb:
+            return "2C2P"
+        return row.get("clickbank") or ""
+
+    if not cb_empty:
+        if "qrcode" in cb:
+            return "QR Code"
+        if "creditcard" in cb:
+            return "2C2P"
+        return row.get("clickbank") or ""
+
+    return ""
 
 @op
-def extract_order_status() -> pd.DataFrame:
-    with src_task.connect() as conn:
-        df = pd.read_sql("SELECT quo_num, status_paybill FROM fin_order", conn)
-    print(f"📦 order_status: {df.shape}")
-    return df
+def transform_payment_rows(df_src: pd.DataFrame) -> pd.DataFrame:
+    df = df_src.copy()
 
-@op
-def extract_dim_payment_plan() -> pd.DataFrame:
-    with tgt.connect() as conn:
-        df = pd.read_sql(text("""
-            SELECT payment_plan_id, payment_channel, payment_reciever, payment_type, installment_number
-            FROM dim_payment_plan
-        """), conn)
-    print(f"📦 dim_payment_plan: {df.shape}")
-    return df
+    # แปลงสตริง 'nan' → NaN
+    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
 
-@op
-def extract_fsq_missing_payment_plan() -> pd.DataFrame:
-    with tgt.connect() as conn:
-        df = pd.read_sql(text("""
-            SELECT quotation_num
-            FROM fact_sales_quotation
-            WHERE payment_plan_id IS NULL
-        """), conn)
-    print(f"📦 fsq missing payment_plan_id: {df.shape}")
-    return df
+    # trim text fields
+    for col in ["chanel", "chanel_main", "clickbank"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
 
-# ---------- TRANSFORM ----------
-@op
-def build_payment_facts(df_plan: pd.DataFrame, df_pay: pd.DataFrame, df_orderstatus: pd.DataFrame) -> pd.DataFrame:
-    # 1) pre-clean
-    df_pay = df_pay.copy()
-    df_pay['chanel'] = df_pay['chanel'].replace({'ผ่อนบัตร': 'เข้าฟิน'})  # normalize
-    merged = pd.merge(df_pay, df_orderstatus, on='quo_num', how='left')
-    merged = _nan_string_to_nan(merged)
+    # มาตรฐานผู้รับเงิน (payment_reciever)
+    df["chanel"] = df.apply(_standardize_receiver, axis=1)
 
-    # 2) strings cleanup
-    for col in ['chanel', 'chanel_main', 'clickbank']:
-        merged[col] = merged[col].fillna('').astype(str).str.strip()
+    # payment_channel
+    df["payment_channel"] = df.apply(_determine_payment_channel, axis=1)
 
-    # 3) rewrite chanel ตาม rule (np.select)
-    ch = merged['chanel'].str.lower()
-    chm = merged['chanel_main'].str.lower()
-    cb = merged['clickbank'].str.lower()
+    # ลดคอลัมน์
+    df.drop(columns=["chanel_main", "clickbank", "condition_install"], inplace=True, errors="ignore")
 
-    conditions = [
-        ch == 'เข้าฟิน',
-        ch == 'เข้าประกัน',
-        (chm.isin(['ผ่อนบัตรเครดิต', 'ผ่อนบัตร']) & cb.isin(['creditcard', '']) & ch.eq('ผ่อนบัตร')),
-        (chm.isin(['ผ่อนบัตร']) & cb.isin(['creditcard', '']) & ch.eq('ผ่อนบัตรเครดิต')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.isin(['']) & ch.eq('ผ่อนบัตร')),
-        (chm.eq('ผ่อนโอน') & cb.isin(['qrcode']) & ch.eq('ผ่อนโอน')),
-        (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนบัตร')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.isin(['creditcard', '']) & ch.eq('ออนไลน์')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
-        (chm.eq('ผ่อนบัตรเครดิต') & cb.isin(['qrcode','creditcard','']) & ch.eq('ออนไลน์')),
-        (chm.eq('ผ่อนบัตรเครดิต') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
-        (chm.eq('โอนเงิน') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ตัดบัตรเครดิต')),
-        (chm.eq('ผ่อนชำระ') & (cb.isin(['qrcode', '']) | cb.str.startswith('ธนาคาร')) & ch.eq('ผ่อนโอน')),
-        (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ผ่อนโอน')),
-        (chm.eq('ผ่อนโอน') & cb.str.startswith('ธนาคาร') & ch.eq('ออนไลน์')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.eq('') & ch.eq('ผ่อนโอน')),
-        (chm.eq('ผ่อนโอน') & cb.eq('') & ch.eq('ผ่อนโอน')),
-        (chm.eq('ผ่อนบัตรเครดิต') & cb.eq('ธนาคารกรุงไทย') & ch.eq('ผ่อนบัตร')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.eq('creditcard') & ch.eq('ผ่อนบัตร')),
-        (chm.eq('ตัดบัตรเครดิต') & cb.eq('creditcard') & ch.eq('ตัดบัตรเครดิต')),
-    ]
-    choices = ['เข้าฟิน', 'เข้าประกัน'] + ['เข้าฟิน'] * (len(conditions) - 2)
-    merged['chanel'] = np.select(conditions, choices, default=merged['chanel'])
+    # เปลี่ยนชื่อคอลัมน์ให้ตรง schema
+    df.rename(columns={
+        "quo_num": "quotation_num",
+        "type_insure": "type_insurance",
+        "chanel": "payment_reciever",        # (สะกดตาม schema)
+        "status_paybill": "payment_type",
+        "numpay": "installment_number"
+    }, inplace=True)
 
-    # 4) derive payment_channel
-    def determine_payment_channel(row):
-        ch_main = _strip_lower(row['chanel_main'])
-        cb_raw = row['clickbank']; cb = _strip_lower(cb_raw)
-        is_cb_empty = (cb_raw is None) or (cb == '')
-        if ch_main in ['ตัดบัตรเครดิต', 'ผ่อนบัตร', 'ผ่อนบัตรเครดิต', 'ผ่อนชำระ']:
-            if 'qrcode' in cb:  return 'QR Code'
-            if 'creditcard' in cb: return '2C2P'
-            return 'ตัดบัตรกับฟิน'
-        if ch_main in ['โอนเงิน', 'ผ่อนโอน']:
-            if 'qrcode' in cb: return 'QR Code'
-            return 'โอนเงิน'
-        if ch_main and is_cb_empty:
-            return row['chanel_main']
-        if not ch_main and not is_cb_empty:
-            if 'qrcode' in cb: return 'QR Code'
-            if 'creditcard' in cb: return '2C2P'
-            return row['clickbank']
-        if not is_cb_empty:
-            if 'qrcode' in cb: return 'QR Code'
-            if 'creditcard' in cb: return '2C2P'
-            return row['clickbank']
-        return ''
-
-    merged['payment_channel'] = merged.apply(determine_payment_channel, axis=1)
-
-    # 5) tidy / rename to canonical columns for join
-    merged = merged.drop(columns=['chanel_main', 'clickbank', 'condition_install'], errors='ignore')
-    merged = merged.rename(columns={
-        'quo_num': 'quotation_num',
-        'type_insure': 'type_insurance',
-        'chanel': 'payment_reciever',
-        'status_paybill': 'payment_type',
-        'numpay': 'installment_number',
+    # clean ค่า/กรณีพิเศษ
+    df["payment_reciever"] = df["payment_reciever"].replace({
+        "เข้าประกัน1": "เข้าประกัน",
+        "เข้าฟินลิป": "เข้าฟิลลิป"
     })
-    merged['payment_reciever'] = merged['payment_reciever'].replace({'เข้าประกัน1': 'เข้าประกัน', 'เข้าฟินลิป': 'เข้าฟิลลิป'})
-    merged['installment_number'] = _safe_to_int(merged['installment_number'])
 
-    # join type_insurance (optional: for diagnostic)
-    merged = pd.merge(
-        merged,
-        df_plan.rename(columns={'quo_num': 'quotation_num', 'type_insure': 'type_insurance'}),
-        on='quotation_num', how='left', suffixes=('', '_sp')
-    )
-    # prefer existing if not null else plan’s type
-    merged['type_insurance'] = np.where(
-        merged['type_insurance'].notna(), merged['type_insurance'], merged['type_insurance_sp']
-    )
-    merged.drop(columns=['type_insurance_sp'], inplace=True)
+    # installment_number → int (0 → 1)
+    df["installment_number"] = pd.to_numeric(df["installment_number"], errors="coerce").fillna(0).astype(int)
+    df["installment_number"] = df["installment_number"].replace({0: 1})
 
-    keep = ['quotation_num', 'payment_channel', 'payment_reciever', 'payment_type', 'installment_number', 'type_insurance']
-    merged = merged[keep].drop_duplicates()
-    print(f"🧹 payment facts (for mapping): {merged.shape}")
-    return merged
+    # คอลัมน์ที่ต้องใช้ downstream
+    need_cols = ["quotation_num", "type_insurance", "payment_reciever", "payment_type",
+                 "installment_number", "payment_channel"]
+    return df[need_cols]
 
+# =========================
+# 📖 DIM LOOKUP
+# =========================
 @op
-def attach_payment_plan_id(df_payment_facts: pd.DataFrame, dim_payment_plan: pd.DataFrame) -> pd.DataFrame:
+def fetch_dim_payment_plan() -> pd.DataFrame:
+    return pd.read_sql(
+        text("SELECT payment_plan_id, payment_channel, payment_reciever, payment_type, installment_number FROM dim_payment_plan"),
+        tgt_engine
+    )
+
+# =========================
+# 🔗 JOIN → get payment_plan_id
+# =========================
+@op
+def map_to_payment_plan_id(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
     df = pd.merge(
-        df_payment_facts,
-        dim_payment_plan,
+        df_keys,
+        df_dim,
         on=["payment_channel", "payment_reciever", "payment_type", "installment_number"],
-        how="inner"
+        how="inner"  # ต้องแม็ปได้เท่านั้น
     )
-    df = df[['quotation_num', 'payment_plan_id']].drop_duplicates()
-    print(f"🔗 mapped to dim_payment_plan: {df.shape}")
+    return df[["quotation_num", "payment_plan_id"]].drop_duplicates("quotation_num")
+
+# =========================
+# 🧹 Keep only facts missing payment_plan_id
+# =========================
+@op
+def restrict_to_missing_in_fact(df_pairs: pd.DataFrame) -> pd.DataFrame:
+    df_missing = pd.read_sql(
+        text("SELECT quotation_num FROM fact_sales_quotation WHERE payment_plan_id IS NULL"),
+        tgt_engine
+    )
+    df = pd.merge(df_pairs, df_missing, on="quotation_num", how="inner")
+    df["quotation_num"] = norm_str(df["quotation_num"])
+    df["payment_plan_id"] = pd.to_numeric(df["payment_plan_id"], errors="coerce").astype("Int64")
     return df
 
+# =========================
+# 🧼 Stage temp table
+# =========================
 @op
-def filter_to_missing_fsq(df_map: pd.DataFrame, fsq_missing: pd.DataFrame) -> pd.DataFrame:
-    df = pd.merge(df_map, fsq_missing, on='quotation_num', how='right')
-    # diagnostics
-    if 'payment_plan_id' in df.columns:
-        null_count = df['payment_plan_id'].isna().sum()
-        print(f"ℹ️ NULL payment_plan_id after FSQ filter: {null_count} / {len(df)}")
-        if null_count > 0:
-            try:
-                df[df['payment_plan_id'].isna()].head(1000).to_excel("payment_plan_id_null.xlsx", index=False)
-                print("💾 saved examples to payment_plan_id_null.xlsx")
-            except Exception:
-                pass
-    else:
-        print("❌ payment_plan_id column not found.")
-    df = df[['quotation_num', 'payment_plan_id']].copy()
-    for c in ['quotation_num', 'payment_plan_id']:
-        df[c] = df[c].astype('string').str.strip()
-    df = df.dropna(subset=['quotation_num']).drop_duplicates(subset=['quotation_num'])
-    print(f"✅ update candidates: {df.shape}")
-    return df
+def stage_payment_plan_temp(df_map: pd.DataFrame) -> str:
+    tbl = "dim_payment_plan_temp"
+    if df_map.empty:
+        # ทำตารางว่างเพื่อให้สคริปต์ส่วนถัดไปรันได้เสมอ
+        df_map = pd.DataFrame({"quotation_num": pd.Series(dtype="string"),
+                               "payment_plan_id": pd.Series(dtype="Int64")})
+    df_map.to_sql(tbl, tgt_engine, if_exists="replace", index=False, method="multi", chunksize=20000)
+    print(f"✅ staged {tbl}: {len(df_map):,} rows")
+    return tbl
 
-# ---------- LOAD (UPDATE) ----------
+# =========================
+# 🚀 Update fact with temp (NULL-safe)
+# =========================
 @op
-def update_payment_plan_id(df_updates: pd.DataFrame) -> None:
-    if df_updates.empty:
-        print("ℹ️ No rows to update.")
+def update_fact_payment_plan_id(temp_table_name: str) -> int:
+    if not temp_table_name:
+        return 0
+    q = text(f"""
+        UPDATE fact_sales_quotation fsq
+        SET payment_plan_id = t.payment_plan_id
+        FROM {temp_table_name} t
+        WHERE fsq.quotation_num = t.quotation_num;
+    """)
+    with tgt_engine.begin() as conn:
+        res = conn.execute(q)
+        print(f"✅ fact_sales_quotation updated: {res.rowcount} rows")
+        return res.rowcount or 0
+
+# =========================
+# 🗑️ Drop temp
+# =========================
+@op
+def drop_payment_plan_temp(temp_table_name: str) -> None:
+    if not temp_table_name:
         return
-    with tgt.begin() as conn:
-        conn.exec_driver_sql("SET lock_timeout = '3s'")
-        conn.exec_driver_sql("SET deadlock_timeout = '200ms'")
-        conn.exec_driver_sql("SET statement_timeout = '60s'")
+    with tgt_engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
+    print("🗑️ dropped dim_payment_plan_temp")
 
-        conn.exec_driver_sql("""
-            CREATE TEMP TABLE tmp_payment_plan_updates(
-                quotation_num text PRIMARY KEY,
-                payment_plan_id text
-            ) ON COMMIT DROP
-        """)
-
-        df_updates.to_sql(
-            "tmp_payment_plan_updates",
-            con=conn, if_exists="append", index=False,
-            method="multi", chunksize=10_000
-        )
-
-        update_sql = text("""
-            UPDATE fact_sales_quotation f
-            SET payment_plan_id = t.payment_plan_id,
-                update_at       = NOW()
-            FROM tmp_payment_plan_updates t
-            WHERE f.quotation_num = t.quotation_num
-              AND (f.payment_plan_id IS NULL OR f.payment_plan_id IS DISTINCT FROM t.payment_plan_id)
-        """)
-
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                result = conn.execute(update_sql)
-                print(f"🚀 Updated rows: {result.rowcount}")
-                break
-            except OperationalError as e:
-                msg = str(getattr(e, "orig", e)).lower()
-                if "deadlock detected" in msg and attempt < max_retries - 1:
-                    sleep_s = (2 ** attempt) + random.random()
-                    print(f"⚠️ Deadlock detected. Retrying in {sleep_s:.2f}s (attempt {attempt+1}/{max_retries})")
-                    time.sleep(sleep_s)
-                    continue
-                raise
-        print("✅ Update payment_plan_id completed.")
-
-# ---------- JOB ----------
+# =========================
+# 🧱 DAGSTER JOB
+# =========================
 @job
-def update_fact_sales_quotation_payment_plan_id():
-    update_payment_plan_id(
-        filter_to_missing_fsq(
-            attach_payment_plan_id(
-                build_payment_facts(
-                    extract_select_plan_id(),
-                    extract_pay(),
-                    extract_order_status()
-                ),
-                extract_dim_payment_plan()
-            ),
-            extract_fsq_missing_payment_plan()
-        )
-    )
+def fix_payment_plan_id_on_fact():
+    src = extract_payment_sources()
+    rows = transform_payment_rows(src)
+    dim = fetch_dim_payment_plan()
+    pairs = map_to_payment_plan_id(rows, dim)
+    needed = restrict_to_missing_in_fact(pairs)
+    temp = stage_payment_plan_temp(needed)
+    _ = update_fact_payment_plan_id(temp)
+    drop_payment_plan_temp(temp)
 
-if __name__ == "__main__":
-    sp = extract_select_plan_id()
-    pay = extract_pay()
-    st = extract_order_status()
-    facts = build_payment_facts(sp, pay, st)
-    dim = extract_dim_payment_plan()
-    mapped = attach_payment_plan_id(facts, dim)
-    fsq = extract_fsq_missing_payment_plan()
-    updates = filter_to_missing_fsq(mapped, fsq)
-    update_payment_plan_id(updates)
-    print("🎉 completed! payment_plan_id updated.")
+# =========================
+# ▶️ Local run (optional)
+# =========================
+# if __name__ == "__main__":
+#     s = extract_payment_sources()
+#     r = transform_payment_rows(s)
+#     d = fetch_dim_payment_plan()
+#     p = map_to_payment_plan_id(r, d)
+#     n = restrict_to_missing_in_fact(p)
+#     t = stage_payment_plan_temp(n)
+#     updated = update_fact_payment_plan_id(t)
+#     drop_payment_plan_temp(t)
+#     print(f"🎉 done. updated rows = {updated}")

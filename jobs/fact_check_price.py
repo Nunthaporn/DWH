@@ -4,95 +4,178 @@ import numpy as np
 import json
 import re
 import os
-import time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table, inspect, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import OperationalError, DisconnectionError
+from sqlalchemy import create_engine, MetaData, Table, text
 from datetime import datetime, timedelta
 
-# ✅ Load .env
+# py>=3.9
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+# =========================
+# 🔧 ENV & CONNECTIONS
+# =========================
 load_dotenv()
 
 # ✅ DB source (MariaDB)
-source_user = os.getenv('DB_USER')
-source_password = os.getenv('DB_PASSWORD')
-source_host = os.getenv('DB_HOST')
-source_port = os.getenv('DB_PORT')
-source_db = 'fininsurance'
-
 source_engine = create_engine(
-    f"mysql+pymysql://{source_user}:{source_password}@{source_host}:{source_port}/{source_db}"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    pool_pre_ping=True, pool_recycle=3600
 )
 
 # ✅ DB target (PostgreSQL)
-target_user = os.getenv('DB_USER_test')
-target_password = os.getenv('DB_PASSWORD_test')
-target_host = os.getenv('DB_HOST_test')
-target_port = os.getenv('DB_PORT_test')
-target_db = 'fininsurance'
-
 target_engine = create_engine(
-    f"postgresql+psycopg2://{target_user}:{target_password}@{target_host}:{target_port}/{target_db}",
-    pool_size=5,
-    max_overflow=10,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    connect_args={"connect_timeout": 30, "application_name": "fact_check_price_etl"}
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@"
+    f"{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    pool_pre_ping=True, pool_recycle=3600,
+    connect_args={"connect_timeout": 30, "application_name": "fact_check_price_etl",
+                  "options": "-c statement_timeout=300000"}
 )
 
-def retry_db_operation(operation, max_retries=3, delay=2):
-    for attempt in range(max_retries):
-        try:
-            return operation()
-        except (OperationalError, DisconnectionError) as e:
-            if attempt == max_retries - 1:
-                raise e
-            print(f"⚠️ DB error (attempt {attempt + 1}): {e}")
-            time.sleep(delay)
-            delay *= 2
-
-# === Helpers: ทำความสะอาดตัวเลขเงิน (เอาลูกน้ำ/สัญลักษณ์) ===
+# =========================
+# 🧰 Helpers
+# =========================
 THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
 def normalize_money(sr: pd.Series) -> pd.Series:
     """
-    แปลงค่าจำนวนเงินให้เป็นตัวเลขล้วน (รองรับเลขไทย, มีลูกน้ำ, ช่วงค่า, สัญลักษณ์อื่นๆ)
-    เช่น "370,000" -> 370000.0, "300,000-400,000" -> 300000.0
-    คืนค่าเป็น pandas Float64 (nullable)
+    แปลงสตริงจำนวนเงิน -> float (รองรับเลขไทย, คอมม่า, ช่วงค่า)
     """
     s = sr.astype(str).str.strip().str.translate(THAI_DIGITS)
-    # เหลือเฉพาะตัวเลข จุด ลบ และคอมม่า (ชั่วคราว)
-    s = s.str.replace(r"[^\d\.\-,]", "", regex=True)
-    # ตัดคอมม่าออก
-    s = s.str.replace(",", "", regex=False)
-    # ดึงเลขตัวแรก (กรณีเป็นช่วง "300000-400000")
+    s = s.str.replace(r"[^\d\.\-,]", "", regex=True)   # เก็บเฉพาะ 0-9.-,
+    s = s.str.replace(",", "", regex=False)            # ตัดคอมม่า
     s = s.str.extract(r"(-?\d+(?:\.\d+)?)", expand=False)
     return pd.to_numeric(s, errors="coerce").astype("Float64")
 
+def _json_extract_names(results_json, limit=4):
+    if pd.isna(results_json):
+        return [None]*limit
+    try:
+        data = json.loads(results_json)
+    except Exception:
+        return [None]*limit
+    names = []
+    if isinstance(data, list):
+        for d in data:
+            if isinstance(d, dict):
+                names.append(d.get("company_name"))
+            if len(names) >= limit:
+                break
+    elif isinstance(data, dict):
+        names.append(data.get("company_name"))
+    names += [None]*(limit-len(names))
+    return names[:limit]
+
+def _json_extract_selected(selected_json):
+    if pd.isna(selected_json):
+        return None
+    try:
+        data = json.loads(selected_json)
+    except Exception:
+        return None
+    if isinstance(data, list) and data:
+        item0 = data[0]
+        return item0.get("company_name") if isinstance(item0, dict) else None
+    if isinstance(data, dict):
+        return data.get("company_name")
+    return None
+
+def _extract_plate(text_val):
+    if pd.isna(text_val) or str(text_val).strip() == "":
+        return None
+    text = str(text_val).strip()
+    # ลบชื่อจังหวัดก่อนจับป้ายทะเบียน
+    provinces = [
+        "กรุงเทพมหานคร","กระบี่","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร","ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี",
+        "ชัยนาท","ชัยภูมิ","ชุมพร","เชียงใหม่","เชียงราย","ตรัง","ตราด","ตาก","นครนายก","นครปฐม","นครพนม",
+        "นครราชสีมา","นครศรีธรรมราช","นครสวรรค์","นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี",
+        "ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา","พังงา","พัทลุง","พิจิตร","พิษณุโลก",
+        "เพชรบุรี","เพชรบูรณ์","แพร่","พะเยา","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน","ยะลา","ยโสธร",
+        "ระนอง","ระยอง","ราชบุรี","ร้อยเอ็ด","ลพบุรี","ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา",
+        "สตูล","สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี","สิงห์บุรี","สุโขทัย","สุพรรณบุรี",
+        "สุราษฎร์ธานี","สุรินทร์","หนองคาย","หนองบัวลำภู","อ่างทอง","อุดรธานี","อุทัยธานี","อุตรดิตถ์",
+        "อุบลราชธานี","อำนาจเจริญ"
+    ]
+    for prov in provinces:
+        text = text.replace(prov, "")
+    if '//' in text:
+        text = text.split('//')[0]
+    elif '/' in text:
+        text = text.split('/')[0]
+    text = (text.replace('-', '')
+                .replace('/', '')
+                .replace(',', '')
+                .replace('+', '')
+                .replace(' ', ''))
+    text = re.sub(r'^ป\d+และป\d+\+?', '', text)
+    text = re.sub(r'^ป\d+\+?', '', text)
+    text = re.sub(r'^งานป\d+', '', text)
+    m = re.match(r'(\d{1}[ก-ฮ]{2}\d{1,4}|[ก-ฮ]{1,3}\d{1,4})', text)
+    if not m:
+        return None
+    plate = m.group(1)
+    return plate if len(plate) > 3 else None
+
+def _extract_province(text_val):
+    if pd.isna(text_val) or str(text_val).strip() == "":
+        return None
+    s = str(text_val)
+    for prov in [
+        "กรุงเทพมหานคร","กระบี่","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร","ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี",
+        "ชัยนาท","ชัยภูมิ","ชุมพร","เชียงใหม่","เชียงราย","ตรัง","ตราด","ตาก","นครนายก","นครปฐม","นครพนม",
+        "นครราชสีมา","นครศรีธรรมราช","นครสวรรค์","นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี",
+        "ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา","พังงา","พัทลุง","พิจิตร","พิษณุโลก",
+        "เพชรบุรี","เพชรบูรณ์","แพร่","พะเยา","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน","ยะลา","ยโสธร",
+        "ระนอง","ระยอง","ราชบุรี","ร้อยเอ็ด","ลพบุรี","ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา",
+        "สตูล","สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี","สิงห์บุรี","สุโขทัย","สุพรรณบุรี",
+        "สุราษฎร์ธานี","สุรินทร์","หนองคาย","หนองบัวลำภู","อ่างทอง","อุดรธานี","อุทัยธานี","อุตรดิตถ์",
+        "อุบลราชธานี","อำนาจเจริญ"
+    ]:
+        if prov in s:
+            return prov
+    return None
+
+def _bkk_today_range():
+    """คืนค่า start,end ของ 'วันนี้' (ตามเวลาไทย) แบบ naive (ไม่มี tz) สำหรับใช้ใน SQL"""
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
+# =========================
+# 🧲 EXTRACT (วันนี้ - เวลาไทย)
+# =========================
 @op
 def extract_check_price_data() -> pd.DataFrame:
-    # ปรับช่วงเวลาได้ตามต้องการ
-    # start_str = '2025-08-09'
-    # end_str = '2025-08-31'
+    start, end = _bkk_today_range()
 
-    query_logs = """
-    SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
-           assured_insurance_capital1, camera, addon, quo_num, create_at,
-           results, selected, carprovince
-    FROM fin_customer_logs_B2B
-    WHERE create_at BETWEEN '2025-05-01' AND '2025-08-31'
-    """
-    query_checkprice = """
-    SELECT id_cus, datekey, brand, model, submodel, yearcar, idcar, nocar,
-           type_ins, company, tunprakan, deduct, status, type_driver,
-           type_camera, type_addon, status_send
-    FROM fin_checkprice
-    WHERE datekey BETWEEN '2025-05-01' AND '2025-08-31'
-    """
-    df_logs = pd.read_sql(query_logs, source_engine)
-    df_check = pd.read_sql(query_checkprice, source_engine)
-
+    q_logs = text("""
+        SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
+               assured_insurance_capital1, camera, addon, quo_num, create_at,
+               results, selected, carprovince
+        FROM fin_customer_logs_B2B
+        WHERE create_at >= :start AND create_at < :end
+    """)
+    q_check = text("""
+        SELECT id_cus, datekey, brand, model, submodel, yearcar, idcar, nocar,
+               type_ins, company, tunprakan, deduct, status, type_driver,
+               type_camera, type_addon, status_send
+        FROM fin_checkprice
+        WHERE datekey >= :start AND datekey < :end
+    """)
+    with source_engine.begin() as conn:
+        df_logs = pd.read_sql(q_logs, conn, params={"start": start, "end": end})
+        df_check = pd.read_sql(q_check, conn, params={"start": start, "end": end})
     return pd.DataFrame({"logs": [df_logs], "check": [df_check]})
 
 @op
@@ -290,7 +373,7 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
 @op
 def load_check_price_data(df: pd.DataFrame):
     try:
-        table_name = 'fact_check_price_temp'
+        table_name = 'fact_check_price'
         # ใช้ transaction_date เป็นตัวเทียบแทน composite key
         compare_column = 'transaction_date'
 
@@ -437,20 +520,20 @@ def load_check_price_data(df: pd.DataFrame):
 def fact_check_price_etl():
     load_check_price_data(clean_check_price_data(extract_check_price_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_check_price_data()
-    # print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_check_price_data()
+#     # print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_check_price_data(df_raw)
-#     print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_check_price_data(df_raw)
+# #     print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "fact_check_price.csv"
-    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_check_price.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    output_path = "fact_check_price1.xlsx"
-    df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_check_price1.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_check_price_data(df_clean)
-    print("🎉 completed! Data upserted to fact_check_price.")
+#     load_check_price_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_check_price.")

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, MetaData
 from sqlalchemy.dialects.postgresql import insert
 import numpy as np
 import re
-from sqlalchemy import create_engine, MetaData, Table, inspect
+from sqlalchemy import create_engine, MetaData, Table, inspect, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import datetime
 
@@ -162,9 +162,9 @@ def clean_company_data(df: pd.DataFrame):
 @op
 def load_to_company(df: pd.DataFrame):
     table_name = 'dim_company'
-    pk_columns = ['company_name', 'logo_path']
+    pk_columns = ['company_name']
 
-    # ✅ Drop duplicates ตาม composite key
+    # ✅ ตัดซ้ำตาม composite key
     df = df.drop_duplicates(subset=pk_columns).copy()
 
     with target_engine.connect() as conn:
@@ -172,9 +172,9 @@ def load_to_company(df: pd.DataFrame):
 
     df_existing = df_existing.drop_duplicates(subset=pk_columns).copy()
 
-    # ✅ สร้าง key เพื่อเปรียบเทียบและจัดการ insert/update
-    def make_key(df):
-        return df[pk_columns].astype(str).agg('|'.join, axis=1)
+    # ✅ make_key สำหรับเทียบชุดข้อมูล
+    def make_key(df_):
+        return df_[pk_columns].astype(str).agg('|'.join, axis=1)
 
     df['merge_key'] = make_key(df)
     df_existing['merge_key'] = make_key(df_existing)
@@ -186,13 +186,14 @@ def load_to_company(df: pd.DataFrame):
     df_common_new = df[df['merge_key'].isin(common_keys)].copy()
     df_common_old = df_existing[df_existing['merge_key'].isin(common_keys)].copy()
 
-    # ✅ 🔥 แปลง NaT → None สำหรับทุก datetime column ก่อน insert
+    # 🔥 แปลง NaT → None ก่อน insert
     for col in df_to_insert.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
         df_to_insert[col] = df_to_insert[col].apply(lambda x: x if pd.notna(x) else None)
 
     merged = df_common_new.merge(df_common_old, on=pk_columns, suffixes=('_new', '_old'))
 
-    exclude_columns = pk_columns + ['id_company', 'create_at', 'update_at']
+    # ❗️ตัด merge_key ออกจาก compare และ exclude ให้หมด
+    exclude_columns = pk_columns + ['company_id', 'create_at', 'update_at', 'merge_key']
     compare_cols = [
         col for col in df.columns
         if col not in exclude_columns
@@ -202,9 +203,11 @@ def load_to_company(df: pd.DataFrame):
 
     def is_different(row):
         for col in compare_cols:
-            if pd.isna(row[f"{col}_new"]) and pd.isna(row[f"{col}_old"]):
+            a = row[f"{col}_new"]
+            b = row[f"{col}_old"]
+            if pd.isna(a) and pd.isna(b):
                 continue
-            if row[f"{col}_new"] != row[f"{col}_old"]:
+            if a != b:
                 return True
         return False
 
@@ -213,46 +216,75 @@ def load_to_company(df: pd.DataFrame):
     df_diff_renamed = df_diff[pk_columns + update_cols].copy()
     df_diff_renamed.columns = pk_columns + compare_cols
 
+    # 🔒 กันพลาด: ตัด merge_key ออกอีกรอบเผื่อหลุดมา
+    if 'merge_key' in df_to_insert.columns:
+        df_to_insert = df_to_insert.drop(columns=['merge_key'], errors='ignore')
+    if 'merge_key' in df_diff_renamed.columns:
+        df_diff_renamed = df_diff_renamed.drop(columns=['merge_key'], errors='ignore')
+
     metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
+    # INSERT เฉพาะแถวใหม่
     if not df_to_insert.empty:
         with target_engine.begin() as conn:
-            conn.execute(metadata.insert(), df_to_insert.drop(columns=['merge_key']).to_dict(orient='records'))
+            # filter columns ให้ตรงกับตาราง ป้องกันคอลัมน์หลง
+            allowed_cols = set(c.name for c in metadata.columns)
+            records = [
+                {k: v for k, v in rec.items() if k in allowed_cols}
+                for rec in df_to_insert.to_dict(orient='records')
+            ]
+            conn.execute(metadata.insert(), records)
 
+    # UPDATE เฉพาะเมื่อมีความต่างจริง ๆ + อัปเดต update_at ตอน UPDATE เท่านั้น
     if not df_diff_renamed.empty:
         with target_engine.begin() as conn:
-            for record in df_diff_renamed.to_dict(orient='records'):
+            allowed_cols = set(c.name for c in metadata.columns)
+            for rec in df_diff_renamed.to_dict(orient='records'):
+                # filter columns ให้ตรงกับตาราง
+                record = {k: v for k, v in rec.items() if k in allowed_cols}
+
                 stmt = pg_insert(metadata).values(**record)
+
                 update_columns = {
                     c.name: stmt.excluded[c.name]
                     for c in metadata.columns
-                    if c.name not in pk_columns + ['id_company', 'create_at', 'update_at']
+                    if c.name not in set(pk_columns) | {'company_id', 'create_at', 'update_at'}
+                    and c.name in record  # อัปเดตเฉพาะคอลัมน์ที่ส่งมา
                 }
-                # update_at ให้เป็นเวลาปัจจุบัน
-                update_columns['update_at'] = datetime.now()
+                update_columns['update_at'] = func.now()  # เวลา DB
+
+                # เงื่อนไขเปลี่ยนจริง: IS DISTINCT FROM
+                change_conds = or_(
+                    *[
+                        getattr(metadata.c, col).is_distinct_from(stmt.excluded[col])
+                        for col in compare_cols
+                    ]
+                )
+
                 stmt = stmt.on_conflict_do_update(
                     index_elements=pk_columns,
-                    set_=update_columns
+                    set_=update_columns,
+                    where=change_conds
                 )
                 conn.execute(stmt)
 
     print(f"🆕 Insert: {len(df_to_insert)} rows")
-    print(f"🔄 Update: {len(df_diff_renamed)} rows")
+    print(f"🔄 Update (changed): {len(df_diff_renamed)} rows")
 
 @job
 def dim_company_etl():
     load_to_company(clean_company_data(extract_company_data()))
 
-if __name__ == "__main__":
-    df_row = extract_company_data()
-    # print("✅ Extracted logs:", df_row.shape)
+# if __name__ == "__main__":
+#     df_row = extract_company_data()
+#     # print("✅ Extracted logs:", df_row.shape)
 
-    df_clean = clean_company_data((df_row))
-    # print("✅ Cleaned columns:", df_clean.columns)
+#     df_clean = clean_company_data((df_row))
+#     # print("✅ Cleaned columns:", df_clean.columns)
 
-    # output_path = "dim_company.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "dim_company.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_to_company(df_clean)
-    print("🎉 completed! Data upserted to dim_company.")
+#     load_to_company(df_clean)
+#     print("🎉 completed! Data upserted to dim_company.")

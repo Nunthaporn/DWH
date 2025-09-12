@@ -114,7 +114,7 @@ def extract_installment_data():
             df_plan = pd.read_sql("""
                 SELECT quo_num
                 FROM fin_system_select_plan
-                WHERE datestart BETWEEN '2025-01-01' AND '2025-09-08'
+                WHERE datestart BETWEEN '2025-09-08' AND '2025-09-12'
             """, fresh_source_1)
         except Exception as e:
             print(f"❌ Error loading plan data: {e}")
@@ -907,14 +907,14 @@ def load_installment_data(df: pd.DataFrame):
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
         
-if __name__ == "__main__":
-    df_raw = extract_installment_data()
+# if __name__ == "__main__":
+#     df_raw = extract_installment_data()
 
-    df_clean = clean_installment_data((df_raw))
+#     df_clean = clean_installment_data((df_raw))
 
-    output_path = "fact_installment_payments.csv"
-    df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-    print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_installment_payments.csv"
+#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#     # print(f"💾 Saved to {output_path}")
 
-    # load_installment_data(df_clean)
-    print("🎉 completed! Data upserted to fact_installment_payments.")
+#     load_installment_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_installment_payments.")

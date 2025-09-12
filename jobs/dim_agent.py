@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, MetaData, Table, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ============ ENV & ENGINES ============
 load_dotenv()
@@ -42,9 +42,30 @@ target_engine = create_engine(
     pool_pre_ping=True,
 )
 
-# ============ EXTRACT ============
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
+
+# ============ EXTRACT (today only) ============
 @op
 def extract_agent_data():
+    # คำนวณช่วงเวลา "วันนี้" ตามเวลาไทย
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        start = start_th.replace(tzinfo=None)  # ตัด timezone ก่อนส่งไป DB
+        end = end_th.replace(tzinfo=None)
+    else:
+        # fallback: สมมติ UTC+7
+        now = datetime.utcnow() + timedelta(hours=7)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+
+    print(f"⏱️ Querying between {start} and {end}")
+
     query_main = text("""
         SELECT
             cuscode, name, rank,
@@ -55,25 +76,34 @@ def extract_agent_data():
             headteam, status_vip
         FROM wp_users
         WHERE
-            (cuscode = 'WEB-T2R')  -- ✅ whitelist
-            OR (
-              user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'adminmag_fin', 'FNG00-00001')
-              AND name NOT LIKE '%%ทดสอบ%%'
-              AND name NOT LIKE '%%tes%%'
-              AND name NOT LIKE '%%test%%'
-              AND name NOT LIKE '%%เทสระบบ%%'
-              AND name NOT LIKE '%%Tes ระบบ%%'
-              AND name NOT LIKE '%%ทด่ท%%'
-              AND name NOT LIKE '%%ทด สอบ%%'
-              AND name NOT LIKE '%%ปัญญวัฒน์ โพธิ์ศรีทอง%%'
-              AND name NOT LIKE '%%เอกศิษฎ์ เจริญธันยบูรณ์%%'
-              AND cuscode NOT LIKE '%%FIN-TestApp%%'
-              AND cuscode NOT LIKE '%%FIN-Tester1%%'
-              AND cuscode NOT LIKE '%%FIN-Tester2%%'
-              AND display_name NOT LIKE '%%ทดสอบ%%'
+            (
+              (cuscode = 'WEB-T2R')  -- ✅ whitelist
+              OR (
+                user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'adminmag_fin', 'FNG00-00001')
+                AND name NOT LIKE '%%ทดสอบ%%'
+                AND name NOT LIKE '%%tes%%'
+                AND name NOT LIKE '%%test%%'
+                AND name NOT LIKE '%%เทสระบบ%%'
+                AND name NOT LIKE '%%Tes ระบบ%%'
+                AND name NOT LIKE '%%ทด่ท%%'
+                AND name NOT LIKE '%%ทด สอบ%%'
+                AND name NOT LIKE '%%ปัญญวัฒน์ โพธิ์ศรีทอง%%'
+                AND name NOT LIKE '%%เอกศิษฎ์ เจริญธันยบูรณ์%%'
+                AND cuscode NOT LIKE '%%FIN-TestApp%%'
+                AND cuscode NOT LIKE '%%FIN-Tester1%%'
+                AND cuscode NOT LIKE '%%FIN-Tester2%%'
+                AND display_name NOT LIKE '%%ทดสอบ%%'
+              )
+            )
+            -- ✅ กรองข้อมูลวันนี้ (เวลาไทย)
+            AND (
+                (user_registered IS NOT NULL AND user_registered >= :start AND user_registered < :end)
+                OR
+                (date_active   IS NOT NULL AND date_active   >= :start AND date_active   < :end)
             )
     """)
-    df_main = pd.read_sql(query_main, source_engine)
+
+    df_main = pd.read_sql(query_main, source_engine, params={"start": start, "end": end})
 
     # career (left join)
     query_career = text("SELECT cuscode, career FROM policy_register")
@@ -539,21 +569,20 @@ def dim_agent_etl():
     load_to_wh(df_clean)
     backfill_date_active(df_clean)
 
-# ============ MAIN ============
-if __name__ == "__main__":
-    df_raw = extract_agent_data()
-    print("✅ Extracted logs:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_agent_data()
+#     print("✅ Extracted logs:", df_raw.shape)
 
-    df_clean = clean_agent_data(df_raw)
-    print("✅ Cleaned rows:", len(df_clean))
+#     df_clean = clean_agent_data(df_raw)
+#     print("✅ Cleaned rows:", len(df_clean))
 
-    df_clean = clean_null_values_op(df_clean)
+#     df_clean = clean_null_values_op(df_clean)
 
-    df_clean.to_excel("dim_agent1.xlsx", index=False)
-    print("💾 Saved to dim_agent.xlsx")
+#     df_clean.to_excel("dim_agent1.xlsx", index=False)
+#     print("💾 Saved to dim_agent.xlsx")
 
-    # load_to_wh(df_clean)
-    # backfill_date_active(df_clean)
-    print("🎉 completed!")
+#     # load_to_wh(df_clean)
+#     # backfill_date_active(df_clean)
+#     print("🎉 completed!")
 
 

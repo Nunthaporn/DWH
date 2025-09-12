@@ -1,4 +1,4 @@
-from dagster import op, job
+from dagster import op, job, schedule
 import pandas as pd
 import numpy as np
 import re
@@ -10,6 +10,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from datetime import datetime, timedelta
 from sqlalchemy import or_, func
+
+# timezone helper
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except Exception:
+    ZoneInfo = None
 
 # ✅ Load .env
 load_dotenv()
@@ -59,90 +65,49 @@ def retry_db_operation(operation, max_retries=3, delay=2):
             time.sleep(delay)
             delay *= 2
 
+def _today_range_th():
+    """Return naive datetimes [start, end) for 'today' in Asia/Bangkok."""
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        # ส่งเป็น naive ให้ MySQL
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
 @op
 def extract_car_data():
-    # ปรับช่วงเวลาได้ตามต้องการ
-    start_str = '2025-01-01'
-    end_str = '2025-09-08'
+    # ดึงเฉพาะ "วันนี้" เวลาไทย
+    start_dt, end_dt = _today_range_th()
+    print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
 
-    # try:
-    #     with source_engine.connect() as conn:
-    #         inspector = inspect(conn)
-    #         tables = inspector.get_table_names()
-    #         if 'fin_system_pay' not in tables:
-    #             print("❌ ERROR: Table 'fin_system_pay' not found!")
-    #             return pd.DataFrame()
-    #         if 'fin_system_select_plan' not in tables:
-    #             print("❌ ERROR: Table 'fin_system_select_plan' not found!")
-    #             return pd.DataFrame()
-
-    #         count_pay = conn.execute(
-    #             text("SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN :s AND :e"),
-    #             {"s": start_str, "e": end_str}
-    #         ).scalar()
-    #         count_plan = conn.execute(
-    #             text("SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN :s AND :e"),
-    #             {"s": start_str, "e": end_str}
-    #         ).scalar()
-    #         print(f"📊 Records in date range - fin_system_pay: {count_pay}, fin_system_select_plan: {count_plan}")
-
-    #         if count_pay == 0 and count_plan == 0:
-    #             print("⚠️ No data in 7 days, trying 3 days...")
-    #             now = datetime.now()
-    #             start_str_3 = (now - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
-    #             count_pay_3 = conn.execute(
-    #                 text("SELECT COUNT(*) FROM fin_system_pay WHERE datestart BETWEEN :s AND :e"),
-    #                 {"s": start_str_3, "e": end_str}
-    #             ).scalar()
-    #             count_plan_3 = conn.execute(
-    #                 text("SELECT COUNT(*) FROM fin_system_select_plan WHERE datestart BETWEEN :s AND :e"),
-    #                 {"s": start_str_3, "e": end_str}
-    #             ).scalar()
-
-    #             if count_pay_3 > 0 or count_plan_3 > 0:
-    #                 print(f"✅ Found data in 3 days - fin_system_pay: {count_pay_3}, fin_system_select_plan: {count_plan_3}")
-    #                 start_str = start_str_3
-    #             else:
-    #                 print("⚠️ No data in 3 days, using last 1000 records")
-    #                 start_str = None
-    #                 end_str = None
-    # except Exception as e:
-    #     print(f"❌ ERROR connecting to database: {e}")
-    #     return pd.DataFrame()
-
-    if start_str and end_str:
-        query_pay = f"""
-            SELECT quo_num, TRIM(id_motor1) as id_motor1, TRIM(id_motor2) as id_motor2, datestart
-            FROM fin_system_pay
-            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
-            ORDER BY datestart DESC
-        """
-        query_plan = f"""
-            SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
-                   yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, datestart
-            FROM fin_system_select_plan
-            ORDER BY datestart DESC
-        """
-    else:
-        query_pay = """
-            SELECT quo_num, TRIM(id_motor1) as id_motor1, TRIM(id_motor2) as id_motor2, datestart
-            FROM fin_system_pay
-            WHERE datestart BETWEEN '{start_str}' AND '{end_str}'
-            ORDER BY datestart DESC 
-        """
-        query_plan = """
-            SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
-                   yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
-                   weight_car, cc_car, color_car, datestart
-            FROM fin_system_select_plan
-            ORDER BY datestart DESC
-
-        """
+    # ใช้พารามิเตอร์ ปลอดภัยกว่า
+    query_pay = text("""
+        SELECT quo_num,
+               TRIM(id_motor1) AS id_motor1,
+               TRIM(id_motor2) AS id_motor2,
+               datestart
+        FROM fin_system_pay
+        WHERE datestart >= :start_dt AND datestart < :end_dt
+        ORDER BY datestart DESC
+    """)
+    query_plan = text("""
+        SELECT quo_num, idcar, carprovince, camera, no_car, brandplan, seriesplan, sub_seriesplan,
+               yearplan, detail_car, vehGroup, vehBodyTypeDesc, seatingCapacity,
+               weight_car, cc_car, color_car, datestart
+        FROM fin_system_select_plan
+        WHERE datestart >= :start_dt AND datestart < :end_dt
+        ORDER BY datestart DESC
+    """)
 
     try:
         with source_engine.connect() as conn:
-            df_pay = pd.read_sql(query_pay, conn.connection)
+            df_pay = pd.read_sql(query_pay, conn, params={"start_dt": start_dt, "end_dt": end_dt})
         print(f"📦 df_pay: {df_pay.shape}")
     except Exception as e:
         print(f"❌ ERROR querying fin_system_pay: {e}")
@@ -150,7 +115,7 @@ def extract_car_data():
 
     try:
         with source_engine.connect() as conn:
-            df_plan = pd.read_sql(query_plan, conn.connection)
+            df_plan = pd.read_sql(query_plan, conn, params={"start_dt": start_dt, "end_dt": end_dt})
         print(f"📦 df_plan: {df_plan.shape}")
     except Exception as e:
         print(f"❌ ERROR querying fin_system_select_plan: {e}")
@@ -168,7 +133,7 @@ def extract_car_data():
         print("⚠️ Only fin_system_select_plan has data, using it alone")
         df_merged = df_plan.copy()
     else:
-        print("❌ No data found in both tables")
+        print("❌ No data found in both tables for today")
         df_merged = pd.DataFrame()
 
     if not df_merged.empty:
@@ -504,23 +469,23 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-if __name__ == "__main__":
-    df_raw = extract_car_data()
-    print("✅ Extracted data shape:", df_raw.shape)
+# if __name__ == "__main__":
+#     df_raw = extract_car_data()
+#     print("✅ Extracted data shape:", df_raw.shape)
 
-    if not df_raw.empty:
-        df_clean = clean_car_data(df_raw)
-        print("✅ Cleaned data shape:", df_clean.shape)
-        print("✅ Cleaned columns:", list(df_clean.columns))
+#     if not df_raw.empty:
+#         df_clean = clean_car_data(df_raw)
+#         print("✅ Cleaned data shape:", df_clean.shape)
+#         print("✅ Cleaned columns:", list(df_clean.columns))
 
-        # output_path = "dim_car.csv"
-        # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-        # print(f"💾 Saved to {output_path}")
+#         # output_path = "dim_car.csv"
+#         # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+#         # print(f"💾 Saved to {output_path}")
 
-        # df_clean.to_excel("dim_car1.xlsx", index=False)
-        # print("💾 Saved to dim_car.xlsx")
+#         # df_clean.to_excel("dim_car1.xlsx", index=False)
+#         # print("💾 Saved to dim_car.xlsx")
 
-        load_car_data(df_clean)
-        print("🎉 completed! Data to dim_car.")
-    else:
-        print("❌ No data extracted, skipping cleaning and saving")
+#         load_car_data(df_clean)
+#         print("🎉 completed! Data to dim_car.")
+#     else:
+#         print("❌ No data extracted, skipping cleaning and saving")

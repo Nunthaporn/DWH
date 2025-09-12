@@ -5,17 +5,24 @@ import os
 import re
 import time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData, Table,func, or_
+from sqlalchemy import create_engine, MetaData, Table, func, or_, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from datetime import datetime, timedelta
+
+# timezone helper
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
 
 # ✅ Load .env
 load_dotenv()
 
 # ✅ Source DB connections with timeout and retry settings
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
     pool_pre_ping=True,
     pool_recycle=3600,
     pool_timeout=30,
@@ -29,7 +36,8 @@ source_engine = create_engine(
 )
 
 task_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
     pool_pre_ping=True,
     pool_recycle=3600,
     pool_timeout=30,
@@ -44,29 +52,38 @@ task_engine = create_engine(
 
 # ✅ Target PostgreSQL
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@"
+    f"{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance"
 )
 
 # -------------------------
 # 🔧 Utilities
 # -------------------------
 
+def _today_range_th():
+    """คืนค่า (start_dt, end_dt) เป็น naive datetime ของช่วงวันนี้ตาม Asia/Bangkok"""
+    if ZoneInfo:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
 def normalize_null_like_series(col: pd.Series) -> pd.Series:
-    """แปลงค่า null-like ('', 'NULL', 'None', 'NaN', 'N/A', '-', 'ไม่มี', 'ไม่ระบุ') เป็น pd.NA แบบ case-insensitive"""
+    """แปลงค่า null-like เป็น pd.NA (case-insensitive)"""
     if col.dtype == object or pd.api.types.is_string_dtype(col):
         s = col.astype(str)
-        mask = s.str.strip().str.lower().isin({
-            '', 'null', 'none', 'nan', 'na', 'n/a', '-', 'ไม่มี', 'ไม่ระบุ'
-        })
+        mask = s.str.strip().str.lower().isin({'', 'null', 'none', 'nan', 'na', 'n/a', '-', 'ไม่มี', 'ไม่ระบุ'})
         return col.mask(mask, pd.NA)
     return col
 
 def purge_na_tokens(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    เคลียร์ค่า null-like ทุกแบบสำหรับ export/โหลดเข้า DB:
-    - สตริง '<NA>', 'NA', 'N/A', 'NULL', 'None', 'NaN', '' -> None (case-insensitive, trim)
-    - pd.NA/NaN -> None
-    """
+    """เคลียร์ค่า null-like สำหรับ export/โหลดเข้า DB"""
     token_set = {'<na>', 'na', 'n/a', 'null', 'none', 'nan', ''}
     for col in df.columns:
         if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
@@ -87,63 +104,43 @@ def remove_commas_from_numeric(value):
     return value
 
 def is_numeric_like_series(s: pd.Series) -> pd.Series:
-    """
-    คืน mask ว่า cell ดูเป็นตัวเลขหรือไม่ (หลังลบ comma และ trim)
-    """
-    s_str = s.astype(str).str.replace(',', '', regex=False).str.strip()
+    s_str = s.astype(str).str.replace(',', '', regex=False).str.trim()
     return s_str.str.match(r'^-?\d+(\.\d+)?$', na=False)
 
 def clean_numeric_commas_for_series(col: pd.Series) -> pd.Series:
-    """
-    ลบ comma และแปลงเป็นตัวเลขเฉพาะตำแหน่งที่เป็น numeric-like
-    ตำแหน่งอื่นคงค่าเดิม (ข้อความ)
-    """
     s = col.astype(str).str.replace(',', '', regex=False).str.strip()
     mask = s.str.match(r'^-?\d+(\.\d+)?$', na=False)
     out = col.copy()
     out[mask] = pd.to_numeric(s[mask], errors='coerce')
-    # ทำให้สตริงว่าง/คำว่า null-like เป็น NA
     out = normalize_null_like_series(out)
     return out
 
 def auto_clean_numeric_like_columns(df: pd.DataFrame, exclude: set | None = None, threshold: float = 0.8, min_numeric_rows: int = 5) -> pd.DataFrame:
-    """
-    ตรวจจับคอลัมน์ข้อความที่ 'ส่วนใหญ่' เป็นตัวเลข แล้วลบ comma/แปลงเป็นตัวเลขเฉพาะ cell ที่ใช่
-    - threshold: สัดส่วน (ในแถวที่ไม่ว่าง) ที่เป็นตัวเลข เช่น 0.8 = 80%
-    - min_numeric_rows: จำนวนแถวขั้นต่ำที่เป็นตัวเลขเพื่อป้องกัน false positive
-    """
     exclude = exclude or set()
     for col in df.columns:
         if col in exclude:
             continue
         if not (df[col].dtype == object or pd.api.types.is_string_dtype(df[col])):
             continue
-
         s = df[col].astype(str).str.strip()
-        # ข้ามคอลัมน์ที่มีตัวอักษรไทยบ่อย (ไม่น่าใช่ตัวเลข)
         thai_frac = s.str.contains(r'[ก-๙]', regex=True, na=False).mean()
         if thai_frac > 0.2:
             continue
-
-        # ประเมินเฉพาะแถวที่ไม่ว่าง/ไม่ใช่ null-like
         non_null_mask = ~s.str.strip().str.lower().isin({'', 'null', 'none', 'nan', 'na', 'n/a', '-', 'ไม่มี', 'ไม่ระบุ'})
         if non_null_mask.sum() == 0:
             continue
-
         numeric_like_mask = is_numeric_like_series(s[non_null_mask])
         numeric_like_ratio = numeric_like_mask.mean()
         numeric_like_count = numeric_like_mask.sum()
-
         if numeric_like_ratio >= threshold and numeric_like_count >= min_numeric_rows:
             df[col] = clean_numeric_commas_for_series(df[col])
     return df
 
 def clean_insurance_company(company):
-    """ทำความสะอาดชื่อบริษัทประกัน: เก็บเฉพาะอักษรไทย, ตัดตัวเลข/อังกฤษ/สัญลักษณ์, กัน pattern แปลก"""
+    """ทำความสะอาดชื่อบริษัทประกัน (คงไว้เฉพาะข้อความไทยที่ดูสมเหตุสมผล)"""
     if pd.isna(company) or company is None:
         return None
     company_str = str(company).strip()
-
     invalid_patterns = [
         r'[<>"\'\`\\]', r'\.\./', r'[\(\)\{\}\[\]]+', r'[!@#$%^&*+=|]+',
         r'XOR', r'if\(', r'now\(\)', r'\$\{', r'\?\?\?\?', r'[0-9]+[XO][0-9]+',
@@ -151,12 +148,10 @@ def clean_insurance_company(company):
     for pattern in invalid_patterns:
         if re.search(pattern, company_str, re.IGNORECASE):
             return None
-
     if len(company_str) < 2 or len(company_str) > 100:
         return None
     if not re.search(r'[ก-๙]', company_str):
         return None
-
     cleaned_company = re.sub(r'[0-9a-zA-Z\s]+', ' ', company_str)
     cleaned_company = re.sub(r'\s+', ' ', cleaned_company).strip()
     if len(cleaned_company) < 2:
@@ -165,26 +160,24 @@ def clean_insurance_company(company):
         return None
     return cleaned_company
 
-def execute_query_with_retry(engine, query, max_retries=3, delay=5):
-    """Execute query with retry mechanism for connection issues"""
+def execute_query_with_retry(engine, query, params=None, max_retries=3, delay=5):
+    """Execute query with retry mechanism for connection issues (รองรับ params)"""
     for attempt in range(max_retries):
         try:
             print(f"🔄 Attempt {attempt + 1}/{max_retries} - Executing query...")
-            df = pd.read_sql(query, engine)
+            with engine.connect() as conn:
+                df = pd.read_sql(query, conn, params=params)
             print(f"✅ Query executed successfully on attempt {attempt + 1}")
             return df
         except (OperationalError, DisconnectionError) as e:
-            if "Lost connection" in str(e) or "connection was forcibly closed" in str(e):
-                print(f"⚠️ Connection lost on attempt {attempt + 1}: {str(e)}")
-                if attempt < max_retries - 1:
-                    print(f"⏳ Waiting {delay} seconds before retry...")
-                    time.sleep(delay)
-                    delay *= 2
-                    engine.dispose()
-                else:
-                    print(f"❌ All retry attempts failed")
-                    raise
+            print(f"⚠️ DB error on attempt {attempt + 1}: {str(e)}")
+            if attempt < max_retries - 1:
+                print(f"⏳ Waiting {delay} seconds before retry...")
+                time.sleep(delay)
+                delay *= 2
+                engine.dispose()
             else:
+                print("❌ All retry attempts failed")
                 raise
         except Exception as e:
             print(f"❌ Unexpected error: {str(e)}")
@@ -201,7 +194,7 @@ def close_engines():
         print(f"⚠️ Warning: Error closing connections: {str(e)}")
 
 def parse_amount(value):
-    """แปลงจำนวนเงินทนสตริง: 'ฟรี', '0 บาท', '1,234', 'ระบบเดิม', None -> ตัวเลขหรือ NaN"""
+    """แปลงจำนวนเงินทนสตริง -> float/NaN"""
     if pd.isna(value):
         return np.nan
     s = str(value).strip().lower()
@@ -221,27 +214,33 @@ def parse_amount(value):
 
 @op
 def extract_motor_data():
-    plan_query = """
+    # ⏱️ คำนวณช่วง "วันนี้" (Asia/Bangkok)
+    start_dt, end_dt = _today_range_th()
+    print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
+
+    # ดึงจาก fin_system_select_plan เฉพาะวันนี้ด้วยพารามิเตอร์
+    plan_query = text("""
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
         FROM fin_system_select_plan
-        WHERE update_at BETWEEN '2025-01-01' AND '2025-09-08' 
+        WHERE update_at >= :start_dt AND update_at < :end_dt
           AND type_insure = 'ประกันรถ'
-    """
-    df_plan = execute_query_with_retry(source_engine, plan_query)
+    """)
+    df_plan = execute_query_with_retry(source_engine, plan_query, params={"start_dt": start_dt, "end_dt": end_dt})
 
-    order_query = """
+    # ตารางอื่นเป็นข้อมูลอ้างอิง/ประกอบ (ไม่กรองเวลา) — หากต้องการกรอง เพิ่ม WHERE เหมือนกันได้
+    order_query = text("""
         SELECT quo_num, responsibility1, responsibility2, responsibility3, responsibility4,
                damage1, damage2, damage3, damage4, protect1, protect2, protect3, protect4,
                IF(sendtype = 'ที่อยู่ใหม่', provincenew, province) AS delivery_province,
                show_ems_price, show_ems_type, sendtype
         FROM fin_order
-    """
+    """)
     df_order = execute_query_with_retry(task_engine, order_query)
 
-    pay_query = """
+    pay_query = text("""
         SELECT quo_num, date_warranty, date_exp
         FROM fin_system_pay
-    """
+    """)
     df_pay = execute_query_with_retry(source_engine, pay_query)
 
     print("📦 df_plan:", df_plan.shape)
@@ -536,30 +535,30 @@ def fact_insurance_motor_etl():
 # ▶️ Main (standalone run)
 # -------------------------
 
-if __name__ == "__main__":
-    try:
-        print("🚀 Starting fact_insurance_motor ETL process...")
-        print("📥 Extracting data from source databases...")
-        data_tuple = extract_motor_data()
-        print("✅ Data extraction completed")
+# if __name__ == "__main__":
+#     try:
+#         print("🚀 Starting fact_insurance_motor ETL process...")
+#         print("📥 Extracting data from source databases...")
+#         data_tuple = extract_motor_data()
+#         print("✅ Data extraction completed")
 
-        print("🧹 Cleaning and transforming data...")
-        df_clean = clean_motor_data(data_tuple)
-        print("✅ Data cleaning completed")
-        print("✅ Cleaned columns:", df_clean.columns)
+#         print("🧹 Cleaning and transforming data...")
+#         df_clean = clean_motor_data(data_tuple)
+#         print("✅ Data cleaning completed")
+#         print("✅ Cleaned columns:", df_clean.columns)
 
-        # output_path = "fact_insurance_motor.xlsx"
-        # df_export = purge_na_tokens(df_clean.copy())
-        # df_export.to_excel(output_path, index=False, engine='openpyxl')
-        # print(f"💾 Saved to {output_path}")
+#         # output_path = "fact_insurance_motor.xlsx"
+#         # df_export = purge_na_tokens(df_clean.copy())
+#         # df_export.to_excel(output_path, index=False, engine='openpyxl')
+#         # print(f"💾 Saved to {output_path}")
 
-        # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
-        print("📤 Loading data to target database...")
-        load_motor_data(df_clean)
-        print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+#         # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
+#         print("📤 Loading data to target database...")
+#         load_motor_data(df_clean)
+#         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
 
-    except Exception as e:
-        print(f"❌ ETL process failed: {str(e)}")
-        raise
-    finally:
-        close_engines()
+#     except Exception as e:
+#         print(f"❌ ETL process failed: {str(e)}")
+#         raise
+#     finally:
+#         close_engines()
