@@ -44,7 +44,7 @@ def _nan_string_to_nan(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- EXTRACT ----------
 @op
-def extract_select_plan() -> pd.DataFrame:
+def extract_select_plan_id() -> pd.DataFrame:
     with src_fin.connect() as conn:
         df = pd.read_sql("SELECT quo_num, type_insure FROM fin_system_select_plan", conn)
     print(f"📦 select_plan: {df.shape}")
@@ -277,7 +277,7 @@ def update_fact_sales_quotation_payment_plan_id():
         filter_to_missing_fsq(
             attach_payment_plan_id(
                 build_payment_facts(
-                    extract_select_plan(),
+                    extract_select_plan_id(),
                     extract_pay(),
                     extract_order_status()
                 ),
@@ -288,7 +288,7 @@ def update_fact_sales_quotation_payment_plan_id():
     )
 
 if __name__ == "__main__":
-    sp = extract_select_plan()
+    sp = extract_select_plan_id()
     pay = extract_pay()
     st = extract_order_status()
     facts = build_payment_facts(sp, pay, st)
