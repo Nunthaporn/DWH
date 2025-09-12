@@ -57,21 +57,21 @@ fact_insurance_motor_schedule = ScheduleDefinition(
 )
 update_agent_id_schedule = ScheduleDefinition(
     job=update_agent_id_on_fact,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/16 * * * *", 
 )
 update_car_id_schedule = ScheduleDefinition(
     job=update_car_id_on_fact,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/16 * * * *", 
 )
 update_customer_id_schedule = ScheduleDefinition(
     job=update_company_id_job,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/16 * * * *", 
 )
 update_payment_plan_id_schedule = ScheduleDefinition(
     job=update_payment_plan_id_on_fact,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/16 * * * *", 
 )
 update_order_type_id_schedule = ScheduleDefinition(
     job=update_order_type_id_on_fact,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/16 * * * *", 
 )
