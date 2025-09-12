@@ -6,6 +6,7 @@ import re
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, text
+from sqlalchemy import update, func, bindparam
 from datetime import datetime, timedelta
 
 # py>=3.9
@@ -374,24 +375,17 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
 def load_check_price_data(df: pd.DataFrame):
     try:
         table_name = 'fact_check_price'
-        # ใช้ transaction_date เป็นตัวเทียบแทน composite key
         compare_column = 'transaction_date'
 
         print(f"📊 Processing {len(df)} rows...")
-        
-        # ตรวจสอบ data types ก่อน
+
+        # ตรวจประเภทข้อมูล
         print("🔍 Data types before processing:")
         print(f"  {compare_column}: {df[compare_column].dtype}")
 
-        # ✅ วันปัจจุบัน (เริ่มต้นเวลา 00:00:00)
-        # today_str = datetime.now().strftime('%Y-%m-%d')
-
-        # ✅ Load เฉพาะข้อมูลที่อัปเดตวันนี้จาก PostgreSQL
+        # ✅ โหลดข้อมูลเก่า (ควรพิจารณาดึงเฉพาะคอลัมน์ที่เทียบ/ช่วงวันที่ที่เกี่ยวข้องเพื่อประสิทธิภาพ)
         with target_engine.connect() as conn:
-            df_existing = pd.read_sql(
-                f"SELECT * FROM {table_name}",
-                conn
-            )
+            df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
 
         print(f"📅 Found {len(df_existing)}")
 
@@ -409,18 +403,20 @@ def load_check_price_data(df: pd.DataFrame):
         df_common_old = df_existing[df_existing[compare_column].isin(common_ids)].copy()
 
         # รวมข้อมูลเพื่อเทียบ
-        merged = df_common_new.merge(df_common_old, on=compare_column, suffixes=('_new', '_old'), how='inner')
+        merged = df_common_new.merge(
+            df_common_old, on=compare_column, suffixes=('_new', '_old'), how='inner'
+        )
 
-        # คอลัมน์ที่ต้องเทียบ (ยกเว้น transaction_date และ metadata columns)
+        # คอลัมน์ที่ไม่ต้องเทียบ
         exclude_columns = [compare_column, 'check_price_id', 'create_at', 'update_at']
-        
-        # หาคอลัมน์ที่เหมือนกันทั้ง df และ df_existing
+
+        # เลือกคอลัมน์ร่วมที่เทียบได้จริง
         all_columns = set(df_common_new.columns) & set(df_common_old.columns)
         compare_cols = [
             col for col in all_columns
             if col not in exclude_columns
-            and f"{col}_new" in merged.columns
-            and f"{col}_old" in merged.columns
+               and f"{col}_new" in merged.columns
+               and f"{col}_old" in merged.columns
         ]
 
         def is_different(row):
@@ -434,19 +430,22 @@ def load_check_price_data(df: pd.DataFrame):
             return False
 
         # กรองแถวที่มีการเปลี่ยนแปลง
-        df_diff = merged[merged.apply(is_different, axis=1)].copy()
+        if compare_cols:
+            df_diff = merged[merged.apply(is_different, axis=1)].copy()
+        else:
+            df_diff = pd.DataFrame()
 
         if not df_diff.empty and compare_cols:
             update_cols = [f"{col}_new" for col in compare_cols]
             all_cols = [compare_column] + update_cols
-
-            # เช็คให้ชัวร์ว่าคอลัมน์ที่เลือกมีจริง
             existing_cols = [c for c in all_cols if c in df_diff.columns]
-            
-            if len(existing_cols) > 1:  # ต้องมี compare_column และอย่างน้อย 1 คอลัมน์อื่น
+
+            if len(existing_cols) > 1:
                 df_diff_renamed = df_diff.loc[:, existing_cols].copy()
-                # เปลี่ยนชื่อ column ให้ตรงกับตารางจริง
-                new_col_names = [compare_column] + [col.replace('_new', '') for col in existing_cols if col != compare_column]
+                # เปลี่ยนชื่อ *_new -> ชื่อคอลัมน์จริง
+                new_col_names = [compare_column] + [
+                    col.replace('_new', '') for col in existing_cols if col != compare_column
+                ]
                 df_diff_renamed.columns = new_col_names
             else:
                 df_diff_renamed = pd.DataFrame()
@@ -458,57 +457,50 @@ def load_check_price_data(df: pd.DataFrame):
 
         metadata = Table(table_name, MetaData(), autoload_with=target_engine)
 
-        # Insert เฉพาะข้อมูลใหม่
+        # ===== INSERT เฉพาะข้อมูลใหม่ =====
         if not df_to_insert.empty:
-            # แปลง NaN เป็น None สำหรับ PostgreSQL
             df_to_insert_valid = df_to_insert[df_to_insert[compare_column].notna()].copy()
             df_to_insert_valid = df_to_insert_valid.replace({np.nan: None})
-            
+
             dropped = len(df_to_insert) - len(df_to_insert_valid)
             if dropped > 0:
                 print(f"⚠️ Skipped {dropped} rows with null {compare_column}")
+
             if not df_to_insert_valid.empty:
                 with target_engine.begin() as conn:
                     conn.execute(metadata.insert(), df_to_insert_valid.to_dict(orient='records'))
                 print(f"✅ Inserted {len(df_to_insert_valid)} new records")
 
-        # Update เฉพาะข้อมูลที่มีการเปลี่ยนแปลง
+        # ===== UPDATE เฉพาะแถวที่มีการเปลี่ยนแปลงจริง ๆ =====
         if not df_diff_renamed.empty and compare_cols:
-            # แปลง NaN เป็น None สำหรับ PostgreSQL
             df_diff_renamed = df_diff_renamed.replace({np.nan: None})
-            
+
             with target_engine.begin() as conn:
                 for record in df_diff_renamed.to_dict(orient='records'):
-                    # ใช้ UPDATE statement แทน ON CONFLICT
                     transaction_date = record[compare_column]
-                    
-                    # สร้าง SET clause สำหรับคอลัมน์ที่ต้องอัปเดต
-                    set_clause = []
-                    update_values = {}
-                    
-                    for c in metadata.columns:
-                        if c.name not in [compare_column, 'check_price_id', 'create_at', 'update_at']:
-                            if c.name in record:
-                                set_clause.append(f"{c.name} = %({c.name})s")
-                                update_values[c.name] = record[c.name]
-                    
-                    # เพิ่ม update_at
-                    set_clause.append("update_at = %(update_at)s")
-                    update_values['update_at'] = datetime.now()
-                    update_values['transaction_date'] = transaction_date
-                    
-                    # สร้าง UPDATE statement
-                    update_sql = f"""
-                    UPDATE {table_name} 
-                    SET {', '.join(set_clause)}
-                    WHERE {compare_column} = %(transaction_date)s
-                    """
-                    
-                    conn.execute(text(update_sql), update_values)
+
+                    # เก็บเฉพาะฟิลด์ที่มีอยู่และไม่ใช่ metadata columns
+                    values = {
+                        k: v for k, v in record.items()
+                        if k not in [compare_column, 'check_price_id', 'create_at', 'update_at']
+                    }
+
+                    # ✅ มีฟิลด์เปลี่ยน → อัปเดตพร้อม update_at = now()
+                    if values:
+                        values['update_at'] = func.now()
+
+                        stmt = (
+                            update(metadata)
+                            .where(metadata.c.transaction_date == bindparam('transaction_date'))
+                            .values(**values)
+                        )
+
+                        conn.execute(stmt, {'transaction_date': transaction_date})
+
             print(f"✅ Updated {len(df_diff_renamed)} records")
 
         print("✅ Insert/update completed.")
-        
+
     except Exception as e:
         print(f"❌ Error in load_check_price_data: {str(e)}")
         print(f"🔍 Error type: {type(e).__name__}")
