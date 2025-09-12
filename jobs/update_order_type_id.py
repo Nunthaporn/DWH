@@ -16,12 +16,12 @@ load_dotenv()
 # ✅ DB Connections
 # Source (MariaDB)
 src_engine_fin = create_engine(
-    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
     pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=3600,
     connect_args={"connect_timeout": 30}
 )
 src_engine_task = create_engine(
-    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
     pool_size=5, max_overflow=10, pool_pre_ping=True, pool_recycle=3600,
     connect_args={"connect_timeout": 30}
 )
