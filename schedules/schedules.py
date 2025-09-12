@@ -37,7 +37,7 @@ fact_check_price_schedule = ScheduleDefinition(
 )
 fact_installment_payments_schedule = ScheduleDefinition(
     job=fact_installment_payments_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/35 * * * *", 
 )
 fact_sales_quotation_schedule = ScheduleDefinition(
     job=fact_sales_quotation_etl,
@@ -57,21 +57,21 @@ fact_insurance_motor_schedule = ScheduleDefinition(
 )
 update_agent_id_schedule = ScheduleDefinition(
     job=update_agent_id_on_fact,
-    cron_schedule="*/16 * * * *", 
+    cron_schedule="*/20 * * * *", 
 )
 update_car_id_schedule = ScheduleDefinition(
     job=update_car_id_on_fact,
-    cron_schedule="*/16 * * * *", 
+    cron_schedule="*/20 * * * *", 
 )
 update_customer_id_schedule = ScheduleDefinition(
     job=update_company_id_job,
-    cron_schedule="*/16 * * * *", 
+    cron_schedule="*/20 * * * *", 
 )
 update_payment_plan_id_schedule = ScheduleDefinition(
     job=update_payment_plan_id_on_fact,
-    cron_schedule="*/16 * * * *", 
+    cron_schedule="*/20 * * * *", 
 )
 update_order_type_id_schedule = ScheduleDefinition(
     job=update_order_type_id_on_fact,
-    cron_schedule="*/16 * * * *", 
+    cron_schedule="*/20 * * * *", 
 )
