@@ -229,7 +229,7 @@ def drop_dim_car_temp(temp_table_name: str) -> None:
 # 🧱 DAGSTER JOB
 # =========================
 @job
-def fix_car_id_on_fact():
+def update_car_id_on_fact():
     keys = extract_and_clean_vin_keys()
     dimc = fetch_dim_car_min()
     mapping = build_car_mapping(keys, dimc)

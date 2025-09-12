@@ -9,11 +9,11 @@ from jobs.fact_sales_quotation import fact_sales_quotation_etl
 from jobs.fact_commission import fact_commission_etl
 from jobs.dim_card_agent import dim_card_agent_etl
 from jobs.fact_insurance_motor import fact_insurance_motor_etl
-from jobs.update_agent_id import fix_agent_id_on_fact
-from jobs.update_car_id import fix_car_id_on_fact
+from jobs.update_agent_id import update_agent_id_on_fact
+from jobs.update_car_id import update_car_id_on_fact
 from jobs.update_company_id import update_company_id_job
-from jobs.update_payment_plan_id import fix_payment_plan_id_on_fact
-from jobs.update_order_type_id import fix_order_type_id_on_fact
+from jobs.update_payment_plan_id import update_payment_plan_id_on_fact
+from jobs.update_order_type_id import update_order_type_id_on_fact
 
 dim_company_schedule = ScheduleDefinition(
     job=dim_company_etl,
@@ -56,11 +56,11 @@ fact_insurance_motor_schedule = ScheduleDefinition(
     cron_schedule="*/15 * * * *", 
 )
 update_agent_id_schedule = ScheduleDefinition(
-    job=fix_agent_id_on_fact,
+    job=update_agent_id_on_fact,
     cron_schedule="*/15 * * * *", 
 )
 update_car_id_schedule = ScheduleDefinition(
-    job=fix_car_id_on_fact,
+    job=update_car_id_on_fact,
     cron_schedule="*/15 * * * *", 
 )
 update_customer_id_schedule = ScheduleDefinition(
@@ -68,10 +68,10 @@ update_customer_id_schedule = ScheduleDefinition(
     cron_schedule="*/15 * * * *", 
 )
 update_payment_plan_id_schedule = ScheduleDefinition(
-    job=fix_payment_plan_id_on_fact,
+    job=update_payment_plan_id_on_fact,
     cron_schedule="*/15 * * * *", 
 )
 update_order_type_id_schedule = ScheduleDefinition(
-    job=fix_order_type_id_on_fact,
+    job=update_order_type_id_on_fact,
     cron_schedule="*/15 * * * *", 
 )

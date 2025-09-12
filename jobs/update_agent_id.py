@@ -196,7 +196,7 @@ def drop_dim_agent_temp(temp_table_name: str) -> None:
 # 🧱 DAGSTER JOB
 # =========================
 @job
-def fix_agent_id_on_fact():
+def update_agent_id_on_fact():
     temp = stage_dim_agent_temp(extract_agent_mapping())
     _ = update_fact_from_temp(temp)
     drop_dim_agent_temp(temp)

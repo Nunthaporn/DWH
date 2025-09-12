@@ -338,7 +338,7 @@ def drop_dim_order_type_temp(temp_table_name: str) -> None:
 # 🧱 DAGSTER JOB
 # =========================
 @job
-def fix_order_type_id_on_fact():
+def update_order_type_id_on_fact():
     merged = extract_merge_sources()
     keys = transform_build_keys(merged)
     dim = fetch_dim_order_type()
