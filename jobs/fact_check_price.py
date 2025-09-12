@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, text, func, update, bindparam
 from sqlalchemy.sql import tuple_
 from datetime import datetime, timedelta
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # py>=3.9
 try:
@@ -375,120 +376,48 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
 def load_check_price_data(df: pd.DataFrame):
     try:
         table_name = 'fact_check_price'
-        compare_column = 'transaction_date'
+        # ชุดคีย์ที่ “บ่งชี้ 1 แถว” ในตารางจริง (ต้องมี UNIQUE INDEX/CONSTRAINT ใน DB)
+        conflict_cols = ['id_cus', 'car_code', 'transaction_date', 'input_type']
 
-        print(f"📊 Processing {len(df)} rows...")
-        print("🔍 Data types before processing:")
-        print(f"  {compare_column}: {df[compare_column].dtype}")
-
-        # ✅ โหลดข้อมูลปัจจุบันจาก Postgres
-        with target_engine.connect() as conn:
-            df_existing = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-
-        print(f"📅 Found {len(df_existing)}")
-
-        # ✅ ลบซ้ำในข้อมูลเดิม (ความปลอดภัย)
-        df_existing = df_existing[~df_existing.duplicated(keep='first')].copy()
-
-        # ✅ หาว่าอะไรใหม่ / อะไรซ้ำ
-        existing_ids = set(df_existing[compare_column].dropna().tolist())
-        new_ids = set(df[compare_column].dropna().tolist()) - existing_ids
-        common_ids = set(df[compare_column].dropna().tolist()) & existing_ids
-
-        df_to_insert = df[df[compare_column].isin(new_ids)].copy()
-        df_common_new = df[df[compare_column].isin(common_ids)].copy()
-        df_common_old = df_existing[df_existing[compare_column].isin(common_ids)].copy()
-
-        # ✅ เตรียม diff เฉพาะแถวที่ค่าแตกต่าง (คัดก่อนเพื่อลดงาน DB)
-        merged = df_common_new.merge(df_common_old, on=compare_column, suffixes=('_new', '_old'), how='inner')
-
-        exclude_columns = [compare_column, 'check_price_id', 'create_at', 'update_at']
-        all_columns = set(df_common_new.columns) & set(df_common_old.columns)
-        compare_cols = [
-            col for col in all_columns
-            if col not in exclude_columns
-        ]
-
-        def is_different(row):
-            for col in compare_cols:
-                vn = row.get(f"{col}_new")
-                vo = row.get(f"{col}_old")
-                # เทียบแบบ Python ก่อน (คร่าว ๆ) เพื่อลดจำนวนแถวไป DB
-                if (pd.isna(vn) and pd.isna(vo)) or (vn == vo):
-                    continue
-                return True
-            return False
-
-        df_diff = merged[merged.apply(is_different, axis=1)].copy()
-
-        if not df_diff.empty and compare_cols:
-            update_cols = [c for c in compare_cols if f"{c}_new" in df_diff.columns]
-            keep_cols = [compare_column] + [f"{c}_new" for c in update_cols]
-            df_diff_renamed = df_diff.loc[:, keep_cols].copy()
-            df_diff_renamed.columns = [compare_column] + update_cols
-        else:
-            df_diff_renamed = pd.DataFrame()
-
-        print(f"🆕 Insert: {len(df_to_insert)} rows")
-        print(f"🔄 Update: {len(df_diff_renamed)} rows")
-
-        # ✅ โหลดโครงสร้างตาราง
+        # เตรียมตาราง
         tbl = Table(table_name, MetaData(), autoload_with=target_engine)
 
-        # ---------- INSERT ----------
-        if not df_to_insert.empty:
-            df_to_insert_valid = df_to_insert[df_to_insert[compare_column].notna()].copy()
-            df_to_insert_valid = df_to_insert_valid.replace({np.nan: None})
-            dropped = len(df_to_insert) - len(df_to_insert_valid)
-            if dropped > 0:
-                print(f"⚠️ Skipped {dropped} rows with null {compare_column}")
+        # ทำความสะอาดก่อน insert
+        df = df.replace({np.nan: None})
+        records = df.to_dict(orient='records')
 
-            if not df_to_insert_valid.empty:
-                with target_engine.begin() as conn:
-                    conn.execute(tbl.insert(), df_to_insert_valid.to_dict(orient='records'))
-                print(f"✅ Inserted {len(df_to_insert_valid)} new records")
+        updatable_cols = [
+            c.name for c in tbl.columns
+            if c.name not in conflict_cols + ['check_price_id', 'create_at', 'update_at']
+        ]
 
-        # ---------- UPDATE (update_at เฉพาะเมื่อข้อมูลเปลี่ยนจริง) ----------
-        if not df_diff_renamed.empty:
-            df_diff_renamed = df_diff_renamed.replace({np.nan: None})
+        if not records:
+            print("ℹ️ No records to upsert.")
+            return
 
-            # เตรียมคอลัมน์อัปเดตจริงตามโครงสร้างตาราง
-            updatable_cols = [
-                c.name for c in tbl.columns
-                if c.name not in [compare_column, 'check_price_id', 'create_at', 'update_at']
-            ]
-            with target_engine.begin() as conn:
-                for record in df_diff_renamed.to_dict(orient='records'):
-                    key_val = record[compare_column]
+        with target_engine.begin() as conn:
+            # สร้าง insert statement
+            stmt = pg_insert(tbl).values(records)
 
-                    # เลือกเฉพาะคอลัมน์ที่มีค่าใน record
-                    cols_to_update = [c for c in updatable_cols if c in record]
+            # SET ส่วนที่ต้องอัปเดต (จาก EXCLUDED)
+            set_mapping = {c: getattr(stmt.excluded, c) for c in updatable_cols}
+            set_mapping['update_at'] = func.now()
 
-                    if not cols_to_update:
-                        continue
+            # WHERE เฉพาะเมื่อค่า “ต่างจริง”
+            left_tuple = tuple_(*(getattr(tbl.c, c) for c in updatable_cols))
+            right_tuple = tuple_(*(getattr(stmt.excluded, c) for c in updatable_cols))
 
-                    # สร้างเงื่อนไข ROW(...) IS DISTINCT FROM ROW(...)
-                    left_tuple = tuple_(*(getattr(tbl.c, c) for c in cols_to_update))
-                    right_tuple = tuple_(*(bindparam(c, record[c]) for c in cols_to_update))
+            stmt = stmt.on_conflict_do_update(
+                index_elements=conflict_cols,
+                set_=set_mapping,
+                where=left_tuple.is_distinct_from(right_tuple)
+            )
 
-                    stmt = (
-                        update(tbl)
-                        .where(getattr(tbl.c, compare_column) == key_val)
-                        .where(left_tuple.is_distinct_from(right_tuple))
-                        .values({**{c: record[c] for c in cols_to_update}, 'update_at': func.now()})
-                    )
+            conn.execute(stmt)
 
-                    conn.execute(stmt)
-
-            print(f"✅ Updated (changed rows only): {len(df_diff_renamed)} attempted")
-
-        print("✅ Insert/update completed.")
-
+        print("✅ Upsert completed (update_at เฉพาะแถวที่เปลี่ยนจริง)")
     except Exception as e:
-        print(f"❌ Error in load_check_price_data: {str(e)}")
-        print(f"🔍 Error type: {type(e).__name__}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error in load_check_price_data: {e}")
         raise
 
 @job
