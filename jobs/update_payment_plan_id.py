@@ -13,12 +13,12 @@ load_dotenv()
 
 # MariaDB (source)
 src_main_engine = create_engine(
-    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
     f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
     pool_pre_ping=True, pool_recycle=3600
 )
 src_task_engine = create_engine(
-    f"mariadb+mariadbconnector://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
     f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance_task",
     pool_pre_ping=True, pool_recycle=3600
 )
