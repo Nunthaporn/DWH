@@ -171,8 +171,7 @@ def update_fact_from_temp(temp_table_name: str) -> int:
         FROM {temp_table_name} dc
         JOIN dim_agent da
           ON LOWER(da.agent_id) = LOWER(dc.agent_id)
-        WHERE fsq.quotation_num = dc.quotation_num
-          AND fsq.agent_id IS DISTINCT FROM da.agent_id;
+        WHERE fsq.quotation_num = dc.quotation_num;
     """)
     with target_engine.begin() as conn:
         res = conn.execute(update_query)
