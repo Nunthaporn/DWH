@@ -50,7 +50,7 @@ def strip_and_collapse(s):
 
 # ---------- EXTRACT ----------
 @op
-def extract_pay() -> pd.DataFrame:
+def extract_sys_pay() -> pd.DataFrame:
     q = """
         SELECT quo_num, TRIM(id_motor1) AS id_motor1, TRIM(id_motor2) AS id_motor2
         FROM fin_system_pay
@@ -244,7 +244,7 @@ def update_fact_sales_quotation_car_id():
         filter_existing_fsq(
             join_with_dim_car(
                 build_candidate_car_mapping(
-                    extract_pay(),
+                    extract_sys_pay(),
                     extract_plan()
                 ),
                 extract_dim_car()
@@ -255,7 +255,7 @@ def update_fact_sales_quotation_car_id():
 
 # 👇 รันแบบสคริปต์เดี่ยว (ไม่ผ่าน Dagster UI) ก็ได้
 # if __name__ == "__main__":
-#     df_pay = extract_pay()
+#     df_pay = extract_sys_pay()
 #     df_plan = extract_plan()
 #     df_dim = extract_dim_car()
 #     df_candidate = build_candidate_car_mapping(df_pay, df_plan)
