@@ -15,12 +15,9 @@ from .update_customer_id import update_fact_sales_quotation_customer_id
 from .update_payment_plan_id import update_fact_sales_quotation_payment_plan_id
 from .update_order_type_id import update_fact_sales_quotation_order_type_id
 from schedules.schedules import dim_company_schedule  
-from schedules.schedules import dim_sales_schedule  
 from schedules.schedules import dim_agent_schedule  
 from schedules.schedules import dim_car_schedule
 from schedules.schedules import dim_customer_schedule
-from schedules.schedules import dim_order_type_schedule
-from schedules.schedules import dim_payment_plan_schedule
 from schedules.schedules import fact_check_price_schedule
 from schedules.schedules import fact_installment_payments_schedule
 from schedules.schedules import fact_sales_quotation_schedule
@@ -32,7 +29,6 @@ from schedules.schedules import update_car_id_schedule
 from schedules.schedules import update_customer_id_schedule
 from schedules.schedules import update_payment_plan_id_schedule
 from schedules.schedules import update_order_type_id_schedule
-from schedules.schedules import update_sales_id_schedule
 
 # ✅ ของเก่า (asset)
 @asset
@@ -48,11 +44,10 @@ defs = Definitions(
           fact_sales_quotation_etl,fact_commission_etl,dim_card_agent_etl,fact_insurance_motor_etl,
           update_fact_sales_quotation_agent_id,update_fact_sales_quotation_car_id,update_fact_sales_quotation_customer_id,
           update_fact_sales_quotation_payment_plan_id,update_fact_sales_quotation_order_type_id,], 
-    schedules=[dim_company_schedule,dim_sales_schedule,dim_agent_schedule, dim_car_schedule,
-               fact_check_price_schedule,dim_customer_schedule,dim_order_type_schedule,
-               dim_payment_plan_schedule,fact_installment_payments_schedule,
+    schedules=[dim_company_schedule,dim_agent_schedule, dim_car_schedule,
+               fact_check_price_schedule,dim_customer_schedule,fact_installment_payments_schedule,
                fact_sales_quotation_schedule, fact_commission_schedule,dim_card_agent_schedule,
                fact_insurance_motor_schedule,update_agent_id_schedule,update_car_id_schedule,update_customer_id_schedule,
-               update_payment_plan_id_schedule,update_order_type_id_schedule, update_sales_id_schedule],              
+               update_payment_plan_id_schedule,update_order_type_id_schedule],              
 )
 
