@@ -4,7 +4,7 @@ import numpy as np
 import os
 import re
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, MetaData, Table, func
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # =========================
@@ -15,19 +15,21 @@ PG_SCHEMA = os.getenv("PG_SCHEMA", "public")
 
 # MariaDB (source)
 source_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
     pool_pre_ping=True
 )
 
 # PostgreSQL (target)
 target_engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@"
+    f"{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
     connect_args={
         "keepalives": 1,
         "keepalives_idle": 30,
         "keepalives_interval": 10,
         "keepalives_count": 5,
-        # 👇 ตั้ง search_path=public + statement_timeout
+        # 👇 ตั้ง search_path + statement_timeout (จะปิดเฉพาะช่วง UPDATE ด้วย SET LOCAL)
         "options": f"-c search_path={PG_SCHEMA} -c statement_timeout=300000"
     },
     pool_pre_ping=True
@@ -126,6 +128,7 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
     """
     สร้างตารางชั่วคราว {PG_SCHEMA}.dim_agent_temp (quotation_num, agent_id)
     และ normalize ตัวสะกด agent_id ตาม {PG_SCHEMA}.dim_agent (case-insensitive)
+    พร้อมสร้างดัชนีที่จำเป็น + ANALYZE
     """
     if df_map.empty:
         df_map = pd.DataFrame({
@@ -149,7 +152,7 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
     )
     print(f"✅ staged to {PG_SCHEMA}.dim_agent_temp: {len(df_tmp):,} rows")
 
-    # 👇 อ้างอิงด้วยชื่อเต็ม
+    # 👇 normalize casing ให้ตรงกับ dim_agent
     normalize_query = text(f"""
         UPDATE {PG_SCHEMA}.dim_agent_temp t
         SET agent_id = da.agent_id
@@ -157,11 +160,28 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
         WHERE LOWER(da.agent_id) = LOWER(t.agent_id)
           AND t.agent_id IS DISTINCT FROM da.agent_id;
     """)
-    with target_engine.begin() as conn:
-        res = conn.execute(normalize_query)
-        print(f"🔄 normalized agent_id casing: {res.rowcount} rows")
 
-    # ส่งคืนชื่อเต็ม (schema-qualified) ให้ step ถัดไปใช้ตรงกัน
+    # 🆕 สร้าง indexes (ถาวรและชั่วคราว) + ANALYZE
+    # ddl = f"""
+    # DO $$
+    # BEGIN
+    #     -- ถ้ายังไม่มี index ฝั่งถาวร ให้สร้าง (ไม่ error ถ้ามีอยู่แล้ว)
+    #     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_fsq_quotation_num ON {PG_SCHEMA}.fact_sales_quotation(quotation_num)';
+    #     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_dim_agent_agent_id ON {PG_SCHEMA}.dim_agent(agent_id)';
+    # END$$;
+
+    # CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_q ON {PG_SCHEMA}.dim_agent_temp(quotation_num);
+    # CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_a ON {PG_SCHEMA}.dim_agent_temp(agent_id);
+
+    # ANALYZE {PG_SCHEMA}.dim_agent_temp;
+    # """
+
+    # with target_engine.begin() as conn:
+    #     res = conn.execute(normalize_query)
+    #     print(f"🔄 normalized agent_id casing: {res.rowcount} rows")
+    #     conn.execute(text(ddl))
+    #     print("🔧 indexes ready + ANALYZE on temp done")
+
     return f"{PG_SCHEMA}.dim_agent_temp"
 
 # =========================
@@ -171,28 +191,38 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
 def update_fact_from_temp(temp_table_name: str) -> int:
     """
     อัปเดต {PG_SCHEMA}.fact_sales_quotation.agent_id จาก temp table (จับคู่ quotation_num)
-    โดยใช้ตัวสะกดมาตรฐานจาก {PG_SCHEMA}.dim_agent
+    โดย **ไม่ต้อง join dim_agent อีก** เพราะ agent_id ใน temp ถูก normalize แล้ว
+    ปิด statement_timeout เฉพาะทรานแซกชันนี้ และอัปเดตเฉพาะแถวที่เปลี่ยนจริง
     """
     if not temp_table_name:
         print("⚠️ temp table name missing, skip update.")
         return 0
 
-    # บังคับให้เป็นชื่อเต็ม schema.table
     if "." not in temp_table_name:
         temp_table_name = f"{PG_SCHEMA}.{temp_table_name}"
 
-    update_query = text(f"""
+    update_sql = f"""
+        -- ปิด timeout เฉพาะทรานแซกชันนี้
+        SET LOCAL statement_timeout = 0;
+
+        WITH cand AS (
+            SELECT fsq.ctid AS fsq_ctid, dc.agent_id AS new_agent
+            FROM {PG_SCHEMA}.fact_sales_quotation fsq
+            JOIN {temp_table_name} dc
+              ON fsq.quotation_num = dc.quotation_num
+            WHERE fsq.agent_id IS DISTINCT FROM dc.agent_id
+        )
         UPDATE {PG_SCHEMA}.fact_sales_quotation fsq
-        SET agent_id = da.agent_id
-        FROM {temp_table_name} dc
-        JOIN {PG_SCHEMA}.dim_agent da
-          ON LOWER(da.agent_id) = LOWER(dc.agent_id)
-        WHERE fsq.quotation_num = dc.quotation_num;
-    """)
+        SET agent_id = cand.new_agent
+        FROM cand
+        WHERE fsq.ctid = cand.fsq_ctid;
+    """
     with target_engine.begin() as conn:
-        res = conn.execute(update_query)
-        print(f"✅ fact_sales_quotation updated: {res.rowcount} rows")
-        return res.rowcount or 0
+        res = conn.execute(text(update_sql))
+        updated = res.rowcount or 0
+
+    print(f"✅ fact_sales_quotation updated: {updated} rows")
+    return updated
 
 # =========================
 # 🧹 CLEANUP TEMP

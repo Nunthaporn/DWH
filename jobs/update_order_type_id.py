@@ -11,8 +11,6 @@ from sqlalchemy import create_engine, text
 # =========================
 load_dotenv()
 
-PG_SCHEMA = os.getenv("PG_SCHEMA", "public")
-
 # MariaDB (source)
 source_engine_main = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
@@ -34,7 +32,7 @@ target_engine = create_engine(
         "keepalives_idle": 30,
         "keepalives_interval": 10,
         "keepalives_count": 5,
-        "options": "-c statement_timeout=300000"
+        "options": "-c statement_timeout=300000",
     },
     pool_pre_ping=True, pool_recycle=3600
 )
@@ -77,8 +75,8 @@ def normalize_str(s: pd.Series) -> pd.Series:
     s = s.astype("string").str.strip()
     return s.mask(s.str.lower().isin(NULL_TOKENS))
 
-def base_from_type_key(text: str) -> str | None:
-    low = _lower(text)
+def base_from_type_key(text_in: str) -> str | None:
+    low = _lower(text_in)
     for pat, label in BASE_MAP:
         if re.search(pat, low):
             return label
@@ -167,16 +165,15 @@ def parse_key_channel(row):
 # =========================
 @op
 def extract_merge_sources() -> pd.DataFrame:
-    df = pd.read_sql("""
-        SELECT quo_num,type_insure,type_work, type_status , type_key, app_type, chanel_key,token, in_advance, check_tax
-        FROM fin_system_select_plan
-    """, source_engine_main)
-
-    df1 = pd.read_sql("""
-        SELECT quo_num, worksend
-        FROM fin_order
-    """, source_engine_task)
-
+    with source_engine_main.begin() as conn_main, source_engine_task.begin() as conn_task:
+        df = pd.read_sql(text("""
+            SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key, token, in_advance, check_tax
+            FROM fin_system_select_plan
+        """), conn_main)
+        df1 = pd.read_sql(text("""
+            SELECT quo_num, worksend
+            FROM fin_order
+        """), conn_task)
     out = pd.merge(df, df1, on="quo_num", how="left")
     return out
 
@@ -218,8 +215,10 @@ def transform_build_keys(df_merged: pd.DataFrame) -> pd.DataFrame:
         "worksend": "work_type",
     }, inplace=True)
 
-    # rule: if order_type == 1 → NULL
-    df.loc[df["order_type"] == 1, "order_type"] = np.nan
+    # rule: if order_type == 1 → NULL (handle both str/int)
+    with np.errstate(all='ignore'):
+        as_num = pd.to_numeric(df["order_type"], errors="coerce")
+    df.loc[as_num == 1, "order_type"] = np.nan
 
     # override order_type by in_advance / check_tax
     df["order_type"] = np.select(
@@ -255,10 +254,11 @@ def transform_build_keys(df_merged: pd.DataFrame) -> pd.DataFrame:
 # =========================
 @op
 def fetch_dim_order_type() -> pd.DataFrame:
-    df = pd.read_sql(
-        text("SELECT order_type_id,type_insurance, order_type, check_type, work_type, key_channel FROM dim_order_type"),
-        target_engine
-    )
+    with target_engine.begin() as conn:
+        df = pd.read_sql(
+            text("SELECT order_type_id, type_insurance, order_type, check_type, work_type, key_channel FROM dim_order_type"),
+            conn
+        )
     return df
 
 # =========================
@@ -275,75 +275,48 @@ def join_to_dim_order_type(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.Da
     return out
 
 # =========================
-# 🧹 Keep only facts missing order_type_id
+# 🚀 Stage + Update + Drop (รวมใน op เดียว)
 # =========================
 @op
-def restrict_to_fact_missing(out_pairs: pd.DataFrame) -> pd.DataFrame:
-    facts = pd.read_sql(
-        text("SELECT quotation_num FROM fact_sales_quotation WHERE order_type_id IS NULL"),
-        target_engine
-    )
-    out = pd.merge(out_pairs, facts, on="quotation_num", how="inner")
-    # keep only rows with a resolved order_type_id
-    out = out[out["order_type_id"].notna()].drop_duplicates(subset=["quotation_num"])
-    return out[["quotation_num", "order_type_id"]]
-
-# =========================
-# 🧼 Stage temp table
-# =========================
-@op
-def stage_dim_order_type_temp(df_map: pd.DataFrame) -> str:
-    if df_map.empty:
-        df_map = pd.DataFrame(
-            {"quotation_num": pd.Series(dtype="string"),
-             "order_type_id": pd.Series(dtype="Int64")}
+def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
+    # 1) ดึงเฉพาะ quotation ที่ fact ยังว่างจาก DB
+    with target_engine.begin() as tconn:
+        facts = pd.read_sql(
+            text("SELECT quotation_num FROM fact_sales_quotation WHERE order_type_id IS NULL"),
+            tconn
         )
-    # sanitize
-    df_map = df_map.copy()
-    df_map["quotation_num"] = df_map["quotation_num"].astype(str).str.strip()
-    df_map["order_type_id"] = pd.to_numeric(df_map["order_type_id"], errors="coerce").astype("Int64")
 
-    df_map.to_sql(
-        "dim_order_type_temp",
-        target_engine,
-        schema=PG_SCHEMA,
-        if_exists="replace",
-        index=False,
-        method="multi",
-        chunksize=20000
-    )
-    print(f"✅ staged {PG_SCHEMA}.dim_order_type_temp: {len(df_map):,} rows")
+    need = pd.merge(df_pairs, facts, on="quotation_num", how="inner")
+    need = need[need["order_type_id"].notna()].drop_duplicates(subset=["quotation_num"])
 
-    return f"{PG_SCHEMA}.dim_order_type_temp"
-
-# =========================
-# 🚀 Update fact with temp (NULL-safe)
-# =========================
-@op
-def update_fact_order_type_id(temp_table_name: str) -> int:
-    if not temp_table_name:
+    if need.empty:
+        print("⚠️ No rows to update.")
         return 0
-    update_query = text(f"""
-        UPDATE fact_sales_quotation AS fsq
-        SET order_type_id = dc.order_type_id
-        FROM {temp_table_name} AS dc
-        WHERE fsq.quotation_num = dc.quotation_num;
-    """)
-    with target_engine.begin() as conn:
-        res = conn.execute(update_query)
-        print(f"✅ fact_sales_quotation updated: {res.rowcount} rows")
-        return res.rowcount or 0
 
-# =========================
-# 🗑️ Drop temp
-# =========================
-@op
-def drop_dim_order_type_temp(temp_table_name: str) -> None:
-    if not temp_table_name:
-        return
+    # 2) Stage temp + 3) Update + 4) Drop ใน transaction เดียว
     with target_engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
-    print(f"🗑️ dropped {temp_table_name}")
+        need.to_sql(
+            "dim_order_type_temp",
+            con=conn,
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=20000
+        )
+        print(f"✅ staged dim_order_type_temp: {len(need):,} rows")
+
+        updated = conn.execute(text("""
+            UPDATE fact_sales_quotation fsq
+            SET order_type_id = dc.order_type_id
+            FROM dim_order_type_temp dc
+            WHERE fsq.quotation_num = dc.quotation_num
+        """)).rowcount or 0
+
+        conn.execute(text("DROP TABLE IF EXISTS dim_order_type_temp"))
+        print("🗑️ dropped dim_order_type_temp")
+
+    print(f"✅ fact_sales_quotation updated: {updated} rows")
+    return updated
 
 # =========================
 # 🧱 DAGSTER JOB
@@ -351,13 +324,10 @@ def drop_dim_order_type_temp(temp_table_name: str) -> None:
 @job
 def update_order_type_id_on_fact():
     merged = extract_merge_sources()
-    keys = transform_build_keys(merged)
-    dim = fetch_dim_order_type()
-    pairs = join_to_dim_order_type(keys, dim)
-    needed = restrict_to_fact_missing(pairs)
-    temp = stage_dim_order_type_temp(needed)
-    _ = update_fact_order_type_id(temp)
-    drop_dim_order_type_temp(temp)
+    keys   = transform_build_keys(merged)
+    dim    = fetch_dim_order_type()
+    pairs  = join_to_dim_order_type(keys, dim)
+    _      = upsert_order_type_ids(pairs)
 
 # =========================
 # ▶️ Local run (optional)
@@ -367,8 +337,5 @@ if __name__ == "__main__":
     k = transform_build_keys(m)
     d = fetch_dim_order_type()
     p = join_to_dim_order_type(k, d)
-    n = restrict_to_fact_missing(p)
-    t = stage_dim_order_type_temp(n)
-    updated = update_fact_order_type_id(t)
-    drop_dim_order_type_temp(t)
+    updated = upsert_order_type_ids(p)
     print(f"🎉 done. updated rows = {updated}")
