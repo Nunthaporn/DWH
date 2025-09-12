@@ -1,7 +1,9 @@
-pandas
-sqlalchemy
-pymysql
-psycopg2-binary
-python-dotenv
-dagster
-dagster-cloud
+dagster==1.7.16
+dagster-webserver==1.7.16
+dagster-postgres==0.23.16
+pandas==2.2.2
+SQLAlchemy==2.0.32
+python-dotenv==1.0.1
+pymysql==1.1.1
+psycopg2-binary==2.9.9
+pyyaml==6.0.2
