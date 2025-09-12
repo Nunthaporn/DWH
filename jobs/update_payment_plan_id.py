@@ -48,21 +48,22 @@ def norm_str(s: pd.Series) -> pd.Series:
 # =========================
 @op
 def extract_payment_sources() -> pd.DataFrame:
-    df_plan = pd.read_sql(
-        "SELECT quo_num, type_insure FROM fin_system_select_plan",
-        src_main_engine
-    )
-    df_pay = pd.read_sql(
-        "SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install FROM fin_system_pay",
-        src_main_engine
-    )
-    # แก้ชื่อช่องทางที่เจอในโน้ตบุ๊ก
-    df_pay["chanel"] = df_pay["chanel"].replace({"ผ่อนบัตร": "เข้าฟิน"})
+    with src_main_engine.begin() as c_main, src_task_engine.begin() as c_task:
+        df_plan = pd.read_sql(
+            text("SELECT quo_num, type_insure FROM fin_system_select_plan"),
+            c_main
+        )
+        df_pay = pd.read_sql(
+            text("SELECT quo_num, chanel_main, clickbank, chanel, numpay, condition_install FROM fin_system_pay"),
+            c_main
+        )
+        df_order = pd.read_sql(
+            text("SELECT quo_num, status_paybill FROM fin_order"),
+            c_task
+        )
 
-    df_order = pd.read_sql(
-        "SELECT quo_num, status_paybill FROM fin_order",
-        src_task_engine
-    )
+    # แก้ชื่อช่องทางที่เคยเจอในโน้ตบุ๊ก
+    df_pay["chanel"] = df_pay["chanel"].replace({"ผ่อนบัตร": "เข้าฟิน"})
 
     df = pd.merge(df_plan, df_pay, on="quo_num", how="left")
     df = pd.merge(df, df_order, on="quo_num", how="left")
@@ -80,8 +81,7 @@ def _standardize_receiver(row) -> str:
     if ch in ("เข้าฟิน", "เข้าประกัน"):
         return {"เข้าฟิน": "เข้าฟิน", "เข้าประกัน": "เข้าประกัน"}[ch]
 
-    # เงื่อนไขสำคัญจากโน้ตบุ๊ก (ส่วนใหญ่ set เป็น 'เข้าฟิน')
-    # บัตร/ผ่อน/ออนไลน์ ที่คู่กับ creditcard/qrcode/ธนาคาร → ปรับเป็นเข้าฟิน
+    # กฎเข้าฟินตามเคสที่พบ
     if chm in ("ผ่อนบัตรเครดิต", "ผ่อนบัตร") and (cb in ("creditcard", "") and ch in ("ผ่อนบัตร", "ผ่อนบัตรเครดิต")):
         return "เข้าฟิน"
     if chm == "ตัดบัตรเครดิต" and ((cb in ("", "creditcard")) or cb.startswith("ธนาคาร")) and ch in ("ออนไลน์", "ผ่อนโอน", "ตัดบัตรเครดิต"):
@@ -93,7 +93,6 @@ def _standardize_receiver(row) -> str:
     if chm == "ผ่อนบัตรเครดิต" and cb == "ธนาคารกรุงไทย" and ch == "ผ่อนบัตร":
         return "เข้าฟิน"
 
-    # โอน/ผ่อนโอน
     if chm == "ผ่อนโอน" and cb == "qrcode" and ch == "ผ่อนโอน":
         return "เข้าฟิน"
     if chm == "ผ่อนโอน" and cb.startswith("ธนาคาร") and ch in ("ผ่อนบัตร", "ผ่อนโอน", "ออนไลน์"):
@@ -103,11 +102,9 @@ def _standardize_receiver(row) -> str:
     if chm == "โอนเงิน" and cb.startswith("ธนาคาร") and ch == "ออนไลน์":
         return "เข้าฟิน"
 
-    # ตัดบัตรเครดิตกรณีทั่วไป
     if chm == "ตัดบัตรเครดิต" and cb == "" and ch == "ตัดบัตรเครดิต":
         return "เข้าฟิน"
 
-    # default: คืนค่าเดิม
     return str(row.get("chanel", "")).strip()
 
 def _determine_payment_channel(row) -> str:
@@ -195,10 +192,14 @@ def transform_payment_rows(df_src: pd.DataFrame) -> pd.DataFrame:
 # =========================
 @op
 def fetch_dim_payment_plan() -> pd.DataFrame:
-    return pd.read_sql(
-        text("SELECT payment_plan_id, payment_channel, payment_reciever, payment_type, installment_number FROM dim_payment_plan"),
-        tgt_engine
-    )
+    with tgt_engine.begin() as conn:
+        return pd.read_sql(
+            text("""
+                SELECT payment_plan_id, payment_channel, payment_reciever, payment_type, installment_number
+                FROM dim_payment_plan
+            """),
+            conn
+        )
 
 # =========================
 # 🔗 JOIN → get payment_plan_id
@@ -209,80 +210,71 @@ def map_to_payment_plan_id(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.Da
         df_keys,
         df_dim,
         on=["payment_channel", "payment_reciever", "payment_type", "installment_number"],
-        how="inner"  # ต้องแม็ปได้เท่านั้น
+        how="inner"
     )
     return df[["quotation_num", "payment_plan_id"]].drop_duplicates("quotation_num")
 
 # =========================
-# 🧹 Keep only facts missing payment_plan_id
+# 🚀 Restrict + Stage + Update + Drop (รวมใน op เดียว)
 # =========================
 @op
-def restrict_to_missing_in_fact(df_pairs: pd.DataFrame) -> pd.DataFrame:
-    df_missing = pd.read_sql(
-        text("SELECT quotation_num FROM fact_sales_quotation WHERE payment_plan_id IS NULL"),
-        tgt_engine
-    )
-    df = pd.merge(df_pairs, df_missing, on="quotation_num", how="inner")
-    df["quotation_num"] = norm_str(df["quotation_num"])
-    df["payment_plan_id"] = pd.to_numeric(df["payment_plan_id"], errors="coerce").astype("Int64")
-    return df
+def upsert_payment_plan_ids(df_pairs: pd.DataFrame) -> int:
+    # 1) ดึงเฉพาะ quotation ที่ fact ยังว่างจาก DB
+    with tgt_engine.begin() as conn:
+        df_missing = pd.read_sql(
+            text("SELECT quotation_num FROM fact_sales_quotation WHERE payment_plan_id IS NULL"),
+            conn
+        )
 
-# =========================
-# 🧼 Stage temp table
-# =========================
-@op
-def stage_payment_plan_temp(df_map: pd.DataFrame) -> str:
-    tbl = "dim_payment_plan_temp"
-    if df_map.empty:
-        # ทำตารางว่างเพื่อให้สคริปต์ส่วนถัดไปรันได้เสมอ
-        df_map = pd.DataFrame({"quotation_num": pd.Series(dtype="string"),
-                               "payment_plan_id": pd.Series(dtype="Int64")})
-    df_map.to_sql(tbl, tgt_engine, if_exists="replace", index=False, method="multi", chunksize=20000)
-    print(f"✅ staged {tbl}: {len(df_map):,} rows")
-    return tbl
-
-# =========================
-# 🚀 Update fact with temp (NULL-safe)
-# =========================
-@op
-def update_fact_payment_plan_id(temp_table_name: str) -> int:
-    if not temp_table_name:
+    need = pd.merge(df_pairs, df_missing, on="quotation_num", how="inner")
+    if need.empty:
+        print("⚠️ No rows to update.")
         return 0
-    q = text(f"""
-        UPDATE fact_sales_quotation fsq
-        SET payment_plan_id = t.payment_plan_id
-        FROM {temp_table_name} t
-        WHERE fsq.quotation_num = t.quotation_num;
-    """)
-    with tgt_engine.begin() as conn:
-        res = conn.execute(q)
-        print(f"✅ fact_sales_quotation updated: {res.rowcount} rows")
-        return res.rowcount or 0
 
-# =========================
-# 🗑️ Drop temp
-# =========================
-@op
-def drop_payment_plan_temp(temp_table_name: str) -> None:
-    if not temp_table_name:
-        return
+    # sanitize types
+    need["quotation_num"] = norm_str(need["quotation_num"])
+    need["payment_plan_id"] = pd.to_numeric(need["payment_plan_id"], errors="coerce").astype("Int64")
+    need = need[need["payment_plan_id"].notna()].drop_duplicates(subset=["quotation_num"])
+
+    if need.empty:
+        print("⚠️ No resolvable rows after cleaning.")
+        return 0
+
+    # 2) Stage temp + 3) Update + 4) Drop ใน transaction เดียว
     with tgt_engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
-    print("🗑️ dropped dim_payment_plan_temp")
+        need.to_sql(
+            "dim_payment_plan_temp",
+            con=conn,
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=20000
+        )
+        print(f"✅ staged dim_payment_plan_temp: {len(need):,} rows")
+
+        updated = conn.execute(text("""
+            UPDATE fact_sales_quotation fsq
+            SET payment_plan_id = t.payment_plan_id
+            FROM dim_payment_plan_temp t
+            WHERE fsq.quotation_num = t.quotation_num
+        """)).rowcount or 0
+
+        conn.execute(text("DROP TABLE IF EXISTS dim_payment_plan_temp"))
+        print("🗑️ dropped dim_payment_plan_temp")
+
+    print(f"✅ fact_sales_quotation updated: {updated} rows")
+    return updated
 
 # =========================
 # 🧱 DAGSTER JOB
 # =========================
 @job
 def update_payment_plan_id_on_fact():
-    src = extract_payment_sources()
-    rows = transform_payment_rows(src)
-    dim = fetch_dim_payment_plan()
+    src   = extract_payment_sources()
+    rows  = transform_payment_rows(src)
+    dim   = fetch_dim_payment_plan()
     pairs = map_to_payment_plan_id(rows, dim)
-    needed = restrict_to_missing_in_fact(pairs)
-    temp = stage_payment_plan_temp(needed)
-    _ = update_fact_payment_plan_id(temp)
-    drop_payment_plan_temp(temp)
+    _     = upsert_payment_plan_ids(pairs)
 
 # =========================
 # ▶️ Local run (optional)
@@ -292,8 +284,5 @@ def update_payment_plan_id_on_fact():
 #     r = transform_payment_rows(s)
 #     d = fetch_dim_payment_plan()
 #     p = map_to_payment_plan_id(r, d)
-#     n = restrict_to_missing_in_fact(p)
-#     t = stage_payment_plan_temp(n)
-#     updated = update_fact_payment_plan_id(t)
-#     drop_payment_plan_temp(t)
+#     updated = upsert_payment_plan_ids(p)
 #     print(f"🎉 done. updated rows = {updated}")
