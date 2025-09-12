@@ -477,25 +477,26 @@ def load_check_price_data(df: pd.DataFrame):
 
             with target_engine.begin() as conn:
                 for record in df_diff_renamed.to_dict(orient='records'):
-                    transaction_date = record[compare_column]
+                    tx = record[compare_column]
 
-                    # เก็บเฉพาะฟิลด์ที่มีอยู่และไม่ใช่ metadata columns
+                    # เก็บเฉพาะฟิลด์ที่จะอัปเดตจริง ๆ (ไม่รวมคีย์/เมทาดาต้า)
                     values = {
                         k: v for k, v in record.items()
                         if k not in [compare_column, 'check_price_id', 'create_at', 'update_at']
                     }
 
-                    # ✅ มีฟิลด์เปลี่ยน → อัปเดตพร้อม update_at = now()
                     if values:
+                        # ให้ DB เซ็ตเวลาเอง และอัปเดตเฉพาะเมื่อมีการเปลี่ยนแปลง
                         values['update_at'] = func.now()
 
                         stmt = (
                             update(metadata)
-                            .where(metadata.c.transaction_date == bindparam('transaction_date'))
+                            .where(metadata.c.transaction_date == bindparam('b_transaction_date'))
                             .values(**values)
                         )
 
-                        conn.execute(stmt, {'transaction_date': transaction_date})
+                        # ใส่พารามิเตอร์ด้วยชื่อที่ "ไม่ชน" กับคอลัมน์
+                        conn.execute(stmt, {'b_transaction_date': int(tx) if pd.notna(tx) else None})
 
             print(f"✅ Updated {len(df_diff_renamed)} records")
 
