@@ -219,9 +219,9 @@ def update_agent_id_on_fact():
 # =========================
 # ▶️ LOCAL RUN (optional)
 # =========================
-# if __name__ == "__main__":
-#     df_map = extract_agent_mapping()
-#     tname = stage_dim_agent_temp(df_map)
-#     updated = update_fact_from_temp(tname)
-#     drop_dim_agent_temp(tname)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    df_map = extract_agent_mapping()
+    tname = stage_dim_agent_temp(df_map)
+    updated = update_fact_from_temp(tname)
+    drop_dim_agent_temp(tname)
+    print(f"🎉 done. updated rows = {updated}")

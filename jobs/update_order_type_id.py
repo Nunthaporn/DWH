@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, text
 # =========================
 load_dotenv()
 
+PG_SCHEMA = os.getenv("PG_SCHEMA", "public")
+
 # MariaDB (source)
 source_engine_main = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
@@ -32,7 +34,7 @@ target_engine = create_engine(
         "keepalives_idle": 30,
         "keepalives_interval": 10,
         "keepalives_count": 5,
-        "options": "-c statement_timeout=300000",
+        "options": "-c statement_timeout=300000"
     },
     pool_pre_ping=True, pool_recycle=3600
 )
@@ -298,12 +300,21 @@ def stage_dim_order_type_temp(df_map: pd.DataFrame) -> str:
         )
     # sanitize
     df_map = df_map.copy()
-    df_map["quotation_num"] = normalize_str(df_map["quotation_num"])
+    df_map["quotation_num"] = df_map["quotation_num"].astype(str).str.strip()
     df_map["order_type_id"] = pd.to_numeric(df_map["order_type_id"], errors="coerce").astype("Int64")
 
-    df_map.to_sql("dim_order_type_temp", target_engine, if_exists="replace", index=False, method="multi", chunksize=20000)
-    print(f"✅ staged dim_order_type_temp: {len(df_map):,} rows")
-    return "dim_order_type_temp"
+    df_map.to_sql(
+        "dim_order_type_temp",
+        target_engine,
+        schema=PG_SCHEMA,
+        if_exists="replace",
+        index=False,
+        method="multi",
+        chunksize=20000
+    )
+    print(f"✅ staged {PG_SCHEMA}.dim_order_type_temp: {len(df_map):,} rows")
+
+    return f"{PG_SCHEMA}.dim_order_type_temp"
 
 # =========================
 # 🚀 Update fact with temp (NULL-safe)
@@ -313,9 +324,9 @@ def update_fact_order_type_id(temp_table_name: str) -> int:
     if not temp_table_name:
         return 0
     update_query = text(f"""
-        UPDATE fact_sales_quotation fsq
+        UPDATE fact_sales_quotation AS fsq
         SET order_type_id = dc.order_type_id
-        FROM {temp_table_name} dc
+        FROM {temp_table_name} AS dc
         WHERE fsq.quotation_num = dc.quotation_num;
     """)
     with target_engine.begin() as conn:
@@ -332,7 +343,7 @@ def drop_dim_order_type_temp(temp_table_name: str) -> None:
         return
     with target_engine.begin() as conn:
         conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
-    print("🗑️ dropped dim_order_type_temp")
+    print(f"🗑️ dropped {temp_table_name}")
 
 # =========================
 # 🧱 DAGSTER JOB
@@ -351,13 +362,13 @@ def update_order_type_id_on_fact():
 # =========================
 # ▶️ Local run (optional)
 # =========================
-# if __name__ == "__main__":
-#     m = extract_merge_sources()
-#     k = transform_build_keys(m)
-#     d = fetch_dim_order_type()
-#     p = join_to_dim_order_type(k, d)
-#     n = restrict_to_fact_missing(p)
-#     t = stage_dim_order_type_temp(n)
-#     updated = update_fact_order_type_id(t)
-#     drop_dim_order_type_temp(t)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    m = extract_merge_sources()
+    k = transform_build_keys(m)
+    d = fetch_dim_order_type()
+    p = join_to_dim_order_type(k, d)
+    n = restrict_to_fact_missing(p)
+    t = stage_dim_order_type_temp(n)
+    updated = update_fact_order_type_id(t)
+    drop_dim_order_type_temp(t)
+    print(f"🎉 done. updated rows = {updated}")

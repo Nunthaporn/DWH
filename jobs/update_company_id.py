@@ -47,12 +47,7 @@ def extract_company_sources():
 
 @op
 def build_company_temp(dfs) -> pd.DataFrame:
-    """
-    รวมข้อมูลเพื่อสร้าง temp (quotation_num, company_id)
-    - merge fin_order กับ fact (right join) เพื่อให้ครอบคลุมใบเสนอราคาที่อยู่ใน fact
-    - แม็พ company_name -> company_id จาก dim_company
-    - ตัดแถวที่ company_id ว่าง ป้องกันการเขียนทับเป็น NULL โดยไม่ตั้งใจ
-    """
+
     df_order, df_fact, df_dim = dfs
 
     # clean เบื้องต้น
@@ -83,11 +78,6 @@ def build_company_temp(dfs) -> pd.DataFrame:
 
 @op
 def update_fact_company_id(df_temp: pd.DataFrame):
-    """
-    เขียน temp ลง Postgres แล้วทำ UPDATE แบบ set-based:
-      - UPDATE เฉพาะแถวที่ค่าเปลี่ยนจริง ๆ (IS DISTINCT FROM)
-      - ลบ temp ทิ้งเมื่อเสร็จงาน
-    """
     if df_temp.empty:
         print("⚠️ No rows to update.")
         return
