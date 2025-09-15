@@ -305,7 +305,10 @@ def extract_installment_data():
     df_test = read_df("""
         SELECT quo_num
         FROM fin_system_select_plan
-        WHERE name IN ('ทดสอบ','test')
+        where name NOT IN ('ทดสอบ','tes','test','เทสระบบ','Tes ระบบ','ทด่ท','ทด สอบ',
+            'ปัญญวัฒน์ โพธิ์ศรีทอง','เอกศิษฎ์ เจริญธันยบูรณ์','ทดสอย',
+            'ทดสิบ','ทดสอล','ทด','ทดมแ','ทดดสอบ','ทดลอง','ทดลอง ทิพย',
+            'ทดลองคีย์งาน','ทดวสอบ','ทอสอบ','ทเสอบ','ทบสอบ')
     """, source_engine)
 
     print(f"✅ Loaded: plan({len(df_plan)}), inst({len(df_inst)}), order({len(df_order)}), "

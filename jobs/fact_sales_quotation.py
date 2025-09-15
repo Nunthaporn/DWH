@@ -116,56 +116,20 @@ def extract_sales_quotation_data():
         # เงื่อนไขกรอง plan — เปลี่ยนมาใช้พารามิเตอร์วันแทน hardcode
         where_plan = """
             WHERE datestart >= :start_dt AND datestart < :end_dt
-              AND id_cus NOT LIKE '%%FIN-TestApp%%'
-              AND id_cus NOT LIKE '%%FIN-TestApp3%%'
-              AND id_cus NOT LIKE '%%FIN-TestApp2%%'
-              AND id_cus NOT LIKE '%%FIN-TestApp-2025%%'
-              AND id_cus NOT LIKE '%%FIN-Tester1%%'
-              AND id_cus NOT LIKE '%%FIN-Tester2%%'
-              AND id_cus NOT LIKE '%%FTR22-9999%%'
-              AND id_cus NOT LIKE '%%FIN19090009%%'
-              AND id_cus NOT LIKE '%%fintest-01%%'
-              AND id_cus NOT LIKE '%%fpc25-9999%%'
-              AND id_cus NOT LIKE '%%bkk1_Hutsabodin%%'
-              AND id_cus NOT LIKE '%%bkk1_Siraprapa%%'
-              AND id_cus NOT LIKE '%%FNG22-072450%%'
-              AND id_cus NOT LIKE '%%FNG23-087046%%'
-              AND id_cus NOT LIKE '%%upc2_Siraprapa%%'
-              AND id_cus NOT LIKE '%%THAI25-12345%%'
-              AND id_cus NOT LIKE '%%FQ2408-24075%%'
-              AND id_cus NOT LIKE '%%B2C-000000%%'
-              AND id_cus NOT LIKE '%%123123%%'
-              AND name NOT LIKE '%%ทดสอบ%%'
-              AND name NOT LIKE '%%tes%%'
-              AND name NOT LIKE '%%test%%'
-              AND name NOT LIKE '%%เทสระบบ%%'
-              AND name NOT LIKE '%%Tes ระบบ%%'
-              AND name NOT LIKE '%%ทด่ท%%'
-              AND name NOT LIKE '%%ทด สอบ%%'
-              AND name NOT LIKE '%%ปัญญวัฒน์ โพธิ์ศรีทอง%%'
-              AND name NOT LIKE '%%เอกศิษฎ์ เจริญธันยบูรณ์%%'
-              AND name NOT LIKE '%%ทดสอย%%'
-              AND name NOT LIKE '%%ทดสิบ%%'
-              AND name NOT LIKE '%%ทดสอล%%'
-              AND name NOT LIKE '%%ทด%%'
-              AND name NOT LIKE '%%ทดมแ%%'
-              AND name NOT LIKE '%%ทดดสอบ%%'
-              AND name NOT LIKE '%%ทดลอง%%'
-              AND name NOT LIKE '%%ทดลอง ทิพย%%'
-              AND name NOT LIKE '%%ทดลองคีย์งาน%%'
-              AND name NOT LIKE '%%ทดวสอบ%%'
-              AND name NOT LIKE '%%ทอสอบ%%'
-              AND name NOT LIKE '%%ทเสอบ%%'
-              AND name NOT LIKE '%%ทบสอบ%%'
-              AND lastname NOT LIKE '%%ทดสด%%'
-              AND lastname NOT LIKE '%%ทดสอบ%%'
-              AND lastname NOT LIKE '%%ทดสอบ2%%'
-              AND lastname NOT LIKE '%%ทดสอบบบ%%'
-              AND lastname NOT LIKE '%%ททดสอบสอน%%'
-              AND lastname NOT LIKE '%%โวยวาย ทดสอบ%%'
-              AND lastname NOT LIKE '%%โวยวายทดสอบ%%'
-              AND lastname NOT LIKE '%%test%%'
-              AND COALESCE(company, '') NOT LIKE '%%Testing%%'
+                AND id_cus NOT IN ('FIN-TestApp','FIN-TestApp3','FIN-TestApp2','FIN-TestApp-2025',
+                                'FIN-Tester1','FIN-Tester2','FTR22-9999','FIN19090009',
+                                'fintest-01','fpc25-9999','bkk1_Hutsabodin','bkk1_Siraprapa',
+                                'FNG22-072450','FNG23-087046','upc2_Siraprapa','THAI25-12345',
+                                'FQ2408-24075','B2C-000000','123123')
+
+                AND name NOT IN ('ทดสอบ','tes','test','เทสระบบ','Tes ระบบ','ทด่ท','ทด สอบ',
+                                'ปัญญวัฒน์ โพธิ์ศรีทอง','เอกศิษฎ์ เจริญธันยบูรณ์','ทดสอย',
+                                'ทดสิบ','ทดสอล','ทด','ทดมแ','ทดดสอบ','ทดลอง','ทดลอง ทิพย',
+                                'ทดลองคีย์งาน','ทดวสอบ','ทอสอบ','ทเสอบ','ทบสอบ')
+
+                AND lastname NOT IN ('ทดสด','ทดสอบ','ทดสอบ2','ทดสอบบบ','ททดสอบสอน',
+                                    'โวยวาย ทดสอบ','โวยวายทดสอบ','test')
+                AND COALESCE(company, '') NOT LIKE '%%Testing%%'
         """
 
         sql_plan = f"""
@@ -198,7 +162,7 @@ def extract_sales_quotation_data():
                 END AS is_paybill,
 
                 CASE
-                WHEN o.viriyha LIKE '%ดวงเจริญ%'
+                WHEN o.viriyha = 'ดวงเจริญ'
                     AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง')
                 THEN 'ส่งผ่าน'
                 ELSE 'ไม่ส่งผ่าน'
