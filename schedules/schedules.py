@@ -37,7 +37,7 @@ fact_check_price_schedule = ScheduleDefinition(
 )
 fact_installment_payments_schedule = ScheduleDefinition(
     job=fact_installment_payments_etl,
-    cron_schedule="*/35 * * * *", 
+    cron_schedule="*/15 * * * *", 
 )
 fact_sales_quotation_schedule = ScheduleDefinition(
     job=fact_sales_quotation_etl,
