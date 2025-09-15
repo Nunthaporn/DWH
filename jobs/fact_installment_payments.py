@@ -499,14 +499,14 @@ def load_installment_data(df: pd.DataFrame):
 def fact_installment_payments_etl():
     load_installment_data(clean_installment_data(extract_installment_data()))
         
-if __name__ == "__main__":
-    df_raw = extract_installment_data()
+# if __name__ == "__main__":
+#     df_raw = extract_installment_data()
 
-    df_clean = clean_installment_data((df_raw))
+#     df_clean = clean_installment_data((df_raw))
 
-    # output_path = "fact_installment_payments.xlsx"
-    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-    # print(f"💾 Saved to {output_path}")
+#     # output_path = "fact_installment_payments.xlsx"
+#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+#     # print(f"💾 Saved to {output_path}")
 
-    load_installment_data(df_clean)
-    print("🎉 completed! Data upserted to fact_installment_payments.")
+#     load_installment_data(df_clean)
+#     print("🎉 completed! Data upserted to fact_installment_payments.")

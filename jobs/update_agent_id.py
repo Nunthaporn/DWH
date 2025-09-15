@@ -49,9 +49,7 @@ def base_id(s: pd.Series) -> pd.Series:
 # =========================
 @op
 def extract_agent_mapping() -> pd.DataFrame:
-    """
-    สร้าง mapping [quotation_num, agent_id] จาก MySQL + Postgres โดย normalize ตาม dim_agent
-    """
+    """สร้าง mapping [quotation_num, agent_id] จาก MySQL + Postgres โดย normalize ตาม dim_agent"""
     # source: fin_system_pay
     with source_engine.begin() as sconn:
         df_career = pd.read_sql(text("SELECT quo_num, id_cus FROM fin_system_pay"), sconn)
@@ -76,7 +74,11 @@ def extract_agent_mapping() -> pd.DataFrame:
 
     dup_mask = dfm["__base"].duplicated(keep=False)
     main_single = dfm[~dup_mask].copy()
-    main_dups = (dfm[dup_mask].sort_values(["__base", "__is_defect"]).drop_duplicates("__base", keep="last"))
+    main_dups = (
+        dfm[dup_mask]
+        .sort_values(["__base", "__is_defect"])
+        .drop_duplicates("__base", keep="last")
+    )
     df_main_norm = pd.concat([main_single, main_dups], ignore_index=True)
 
     # join ด้วย base_id
@@ -100,9 +102,11 @@ def extract_agent_mapping() -> pd.DataFrame:
     df_out = df_join[["quotation_num", "agent_id_final"]].rename(columns={"agent_id_final": "agent_id"})
     df_out["agent_id"] = normalize_str_col(df_out["agent_id"])
     df_out["__has_agent"] = df_out["agent_id"].notna().astype(int)
-    df_out = (df_out.sort_values(["quotation_num", "__has_agent"], ascending=[True, False])
-                    .drop_duplicates("quotation_num", keep="first")
-                    .drop(columns="__has_agent"))
+    df_out = (
+        df_out.sort_values(["quotation_num", "__has_agent"], ascending=[True, False])
+              .drop_duplicates("quotation_num", keep="first")
+              .drop(columns="__has_agent")
+    )
 
     # กันค่าว่าง key
     df_out = df_out.dropna(subset=["quotation_num"])
@@ -129,17 +133,16 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
     tmp["agent_id"]      = normalize_str_col(tmp.get("agent_id",      pd.Series(dtype="string")))
 
     # DDL: create table เสมอ + index
-    ddl = text(f"""
-        DROP TABLE IF EXISTS {full_tbl};
-        CREATE TABLE {full_tbl} (
-            quotation_num text,
-            agent_id      text
-        );
-        CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_quo   ON {full_tbl} (quotation_num);
-        CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_agent ON {full_tbl} (LOWER(agent_id));
-    """)
     with target_engine.begin() as conn:
-        conn.execute(ddl)
+        conn.execute(text(f"DROP TABLE IF EXISTS {full_tbl};"))
+        conn.execute(text(f"""
+            CREATE TABLE {full_tbl} (
+                quotation_num text,
+                agent_id      text
+            );
+        """))
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_quo   ON {full_tbl} (quotation_num);"))
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_dim_agent_temp_agent ON {full_tbl} (LOWER(agent_id));"))
 
     # append เฉพาะแถวที่มี key
     to_append = tmp.dropna(subset=["quotation_num"])
@@ -173,7 +176,7 @@ def update_fact_from_temp(temp_table_name: str) -> int:
         print("⚠️ temp table name missing, skip update.")
         return 0
 
-    # ตรวจว่ามีตารางจริง
+    # ตรวจว่ามีตารางจริง (กันกรณีผิด schema/name)
     with target_engine.begin() as conn:
         exists = conn.execute(text("SELECT to_regclass(:fqname)"), {"fqname": temp_table_name}).scalar()
     if not exists:
@@ -194,10 +197,10 @@ def update_fact_from_temp(temp_table_name: str) -> int:
         return res.rowcount or 0
 
 # =========================
-# 🗑️ DROP TEMP
+# 🗑️ DROP TEMP (บังคับให้รอ update ด้วยการรับ updated_count)
 # =========================
 @op
-def drop_dim_agent_temp(temp_table_name: str) -> None:
+def drop_dim_agent_temp(temp_table_name: str, updated_count: int) -> None:  # noqa: ARG002 (unused)
     if not temp_table_name:
         return
     with target_engine.begin() as conn:
@@ -209,6 +212,7 @@ def drop_dim_agent_temp(temp_table_name: str) -> None:
 # =========================
 @job
 def update_agent_id_on_fact():
-    temp_full = stage_dim_agent_temp(extract_agent_mapping())
-    _ = update_fact_from_temp(temp_full)
-    drop_dim_agent_temp(temp_full)
+    df = extract_agent_mapping()
+    temp_full = stage_dim_agent_temp(df)
+    updated = update_fact_from_temp(temp_full)      # <- ต้องเสร็จก่อน
+    drop_dim_agent_temp(temp_full, updated)         # <- แล้วค่อย drop (dependency ผูกด้วย updated)

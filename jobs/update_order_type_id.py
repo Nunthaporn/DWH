@@ -332,10 +332,10 @@ def update_order_type_id_on_fact():
 # =========================
 # ▶️ Local run (optional)
 # =========================
-if __name__ == "__main__":
-    m = extract_merge_sources()
-    k = transform_build_keys(m)
-    d = fetch_dim_order_type()
-    p = join_to_dim_order_type(k, d)
-    updated = upsert_order_type_ids(p)
-    print(f"🎉 done. updated rows = {updated}")
+# if __name__ == "__main__":
+#     m = extract_merge_sources()
+#     k = transform_build_keys(m)
+#     d = fetch_dim_order_type()
+#     p = join_to_dim_order_type(k, d)
+#     updated = upsert_order_type_ids(p)
+#     print(f"🎉 done. updated rows = {updated}")
