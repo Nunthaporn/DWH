@@ -101,6 +101,7 @@ def update_fact_company_id(df_temp: pd.DataFrame):
             SET company_id = dc.company_id
             FROM {temp_table} dc
             WHERE fsq.quotation_num = dc.quotation_num
+                AND fsq.company_id IS DISTINCT FROM dc.company_id;
         """)
         res = conn.execute(update_sql)
         print(f"🔄 updated rows: {res.rowcount:,}")

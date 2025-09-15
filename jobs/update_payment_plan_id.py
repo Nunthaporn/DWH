@@ -257,6 +257,7 @@ def upsert_payment_plan_ids(df_pairs: pd.DataFrame) -> int:
             SET payment_plan_id = t.payment_plan_id
             FROM dim_payment_plan_temp t
             WHERE fsq.quotation_num = t.quotation_num
+                AND fsq.payment_plan_id IS DISTINCT FROM dc.payment_plan_id;
         """)).rowcount or 0
 
         conn.execute(text("DROP TABLE IF EXISTS dim_payment_plan_temp"))

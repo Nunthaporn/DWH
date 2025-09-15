@@ -310,6 +310,7 @@ def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
             SET order_type_id = dc.order_type_id
             FROM dim_order_type_temp dc
             WHERE fsq.quotation_num = dc.quotation_num
+                AND fsq.order_type_id IS DISTINCT FROM dc.order_type_id;
         """)).rowcount or 0
 
         conn.execute(text("DROP TABLE IF EXISTS dim_order_type_temp"))
