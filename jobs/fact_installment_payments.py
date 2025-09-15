@@ -4,11 +4,16 @@ import pandas as pd
 import numpy as np
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, Table, text, func, or_, bindparam
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from typing import List, Dict
+
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:
+    ZoneInfo = None
 
 # =======================================
 #           ENV & ENGINES (GLOBAL)
@@ -50,6 +55,23 @@ target_engine = create_engine(
 )
 
 # =======================================
+#               HELPERS (DATE)
+# =======================================
+def today_range_th():
+    """คืนค่า (start_dt, end_dt) เป็น naive datetime ของช่วง 'วันนี้' ตาม Asia/Bangkok"""
+    if ZoneInfo is not None:
+        tz = ZoneInfo("Asia/Bangkok")
+        now_th = datetime.now(tz)
+        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_th = start_th + timedelta(days=1)
+        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
+    # fallback UTC+7
+    now = datetime.utcnow() + timedelta(hours=7)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
+# =======================================
 #               HELPERS (DB)
 # =======================================
 def read_df(sql: str, eng, params: dict | None = None) -> pd.DataFrame:
@@ -68,100 +90,6 @@ def read_df_in(sql: str, eng, param_name: str, values: List, extra_params: dict 
 def chunker(df: pd.DataFrame, size: int = 20000):
     for i in range(0, len(df), size):
         yield df.iloc[i:i+size]
-
-# =======================================
-#        HELPERS (PIVOT/TRANSFORM)
-# =======================================
-MAP12 = {'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,
-         'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12}
-
-def unpivot_installment(df_inst: pd.DataFrame) -> pd.DataFrame:
-    if df_inst.empty:
-        return pd.DataFrame(columns=['quo_num','numpay','installment_number','installment_amount','due_date'])
-
-    money = df_inst.filter(regex=r'^money_(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$')
-    dates = df_inst.filter(regex=r'^date_(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$')
-
-    m = money.melt(ignore_index=False, var_name='mcol', value_name='installment_amount')
-    d = dates.melt(ignore_index=False, var_name='dcol', value_name='due_date')
-
-    base = df_inst[['quo_num','numpay']]
-    out = base.join(m, how='right').join(d['due_date']).reset_index(drop=True)
-
-    out['installment_number'] = out['mcol'].str.extract(r'money_(\w+)')[0].map(MAP12).astype('Int64')
-    out['numpay'] = pd.to_numeric(out['numpay'], errors='coerce')
-    out = out[out['installment_number'] <= out['numpay']]
-
-    out['installment_amount'] = pd.to_numeric(out['installment_amount'].astype(str).str.replace(',', ''), errors='coerce')
-    out['due_date'] = pd.to_datetime(out['due_date'], errors='coerce')
-
-    return out[['quo_num','installment_number','installment_amount','due_date']]
-
-def unpivot_finance(df_fin: pd.DataFrame) -> pd.DataFrame:
-    """
-    แปลงคอลัมน์ moneypay_* / datepay_* ให้เป็นแนวยาว และ map เป็น installment_number 1..12
-    - รองรับกรณีบางคอลัมน์ไม่มีในตาราง (จะข้ามไป)
-    - แปลงตัวเลข/วันที่แบบเวคเตอร์
-    """
-    if df_fin.empty or 'order_number' not in df_fin.columns:
-        return pd.DataFrame(columns=['order_number','installment_number','payment_amount','payment_date'])
-
-    money_cols_all = [f'moneypay_{k}' for k in MAP12.keys()]
-    date_cols_all  = [f'datepay_{k}'  for k in MAP12.keys()]
-    money = df_fin[[c for c in money_cols_all if c in df_fin.columns]].copy()
-    dates = df_fin[[c for c in date_cols_all  if c in df_fin.columns]].copy()
-
-    # ถ้าไม่มีทั้ง money/date ก็คืน empty
-    if money.empty and dates.empty:
-        return pd.DataFrame(columns=['order_number','installment_number','payment_amount','payment_date'])
-
-    m = money.melt(ignore_index=False, var_name='mcol', value_name='payment_amount')
-    d = dates.melt(ignore_index=False, var_name='dcol', value_name='payment_date')
-
-    base = df_fin[['order_number']]
-    out = base.join(m, how='right').join(d['payment_date'], how='left').reset_index(drop=True)
-
-    out['installment_number'] = out['mcol'].str.extract(r'moneypay_(\w+)')[0].map(MAP12).astype('Int64')
-    out['payment_amount'] = pd.to_numeric(out['payment_amount'].astype(str).str.replace(',', ''), errors='coerce')
-
-    out['payment_date'] = pd.to_datetime(out['payment_date'], errors='coerce')
-    mask_2026 = out['payment_date'].dt.year.eq(2026)
-    if mask_2026.any():
-        out.loc[mask_2026, 'payment_date'] = out.loc[mask_2026, 'payment_date'] - pd.offsets.DateOffset(years=1)
-
-    return out[['order_number','installment_number','payment_amount','payment_date']]
-
-def unpivot_bill(df_bill: pd.DataFrame) -> pd.DataFrame:
-    if df_bill.empty or 'order_number' not in df_bill.columns:
-        return pd.DataFrame(columns=['order_number','installment_number','payment_proof'])
-
-    cols = [c for c in df_bill.columns if c.startswith('bill_receipt')]
-    if not cols:
-        return pd.DataFrame(columns=['order_number','installment_number','payment_proof'])
-
-    b = df_bill.melt(id_vars=['order_number'], value_vars=cols, var_name='col', value_name='payment_proof')
-    b = b[b['payment_proof'].notna()]
-    b['installment_number'] = b['col'].str.extract(r'bill_receipt(\d*)')[0].replace('', '1').astype(int)
-    return b[['order_number','installment_number','payment_proof']]
-
-def finalize_formats(df: pd.DataFrame) -> pd.DataFrame:
-    """จัดรูปแบบคอลัมน์สำหรับโหลดเข้า Postgres"""
-    if df.empty:
-        return df
-
-    for col in ['due_date', 'payment_date']:
-        if col in df.columns:
-            s = pd.to_datetime(df[col], errors='coerce')
-            df[col] = s.dt.strftime('%Y%m%d')
-            df[col] = df[col].where(s.notna(), None)
-
-    df = df.where(pd.notna(df), None)
-
-    if 'installment_number' in df.columns:
-        df['installment_number'] = pd.to_numeric(df['installment_number'], errors='coerce').astype('Int64')
-        df['installment_number'] = df['installment_number'].where(pd.notna(df['installment_number']), None)
-
-    return df
 
 # =======================================
 #     UPSERT HELPERS (PostgreSQL)
@@ -186,7 +114,10 @@ def clean_records_for_db(records: List[Dict]) -> List[Dict]:
     return [{k: to_native(v) for k, v in r.items()} for r in records]
 
 def build_conditional_upsert(table, pk_cols: List[str], update_allow_cols: List[str], records: List[Dict]):
-    """UPSERT อัปเดตเมื่อค่าต่างจริง (NULL-safe) และไม่ทับด้วย NULL"""
+    """
+    UPSERT อัปเดตเมื่อค่าต่างจริง (NULL-safe) และไม่ทับด้วย NULL
+    update_at จะเปลี่ยนจริงเฉพาะตอนที่ค่ามีการอัปเดต
+    """
     stmt = pg_insert(table).values(records)
     excluded = stmt.excluded
 
@@ -212,14 +143,14 @@ def build_conditional_upsert(table, pk_cols: List[str], update_allow_cols: List[
 # =======================================
 @op
 def extract_installment_data():
-    d1, d2 = "2025-09-12", "2025-09-15"
+    start_dt, end_dt = today_range_th()
 
     print("📊 Load target quo_num ...")
     df_plan = read_df("""
         SELECT quo_num
         FROM fin_system_select_plan
-        WHERE datestart BETWEEN :d1 AND :d2
-    """, source_engine, {"d1": d1, "d2": d2})
+        WHERE datestart >= :d1 AND datestart < :d2
+    """, source_engine, {"d1": start_dt, "d2": end_dt})
 
     if df_plan.empty:
         print("⚠️ No target plan rows.")
