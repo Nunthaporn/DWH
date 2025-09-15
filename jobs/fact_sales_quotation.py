@@ -109,6 +109,9 @@ def extract_sales_quotation_data():
     try:
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
 
+        # start_dt = "2025-01-01"
+        # end_dt   = "2025-08-31"
+
         # ⏱️ ช่วงเวลา "วันนี้" ตามเวลาไทย
         start_dt, end_dt = today_range_th()
         logger.info(f"⏱️ Window (TH): {start_dt} → {end_dt}")
@@ -191,12 +194,30 @@ def extract_sales_quotation_data():
         df_order = read_sql_stream_with_retry(sql_order, source_engine_task, params={"start_dt": start_dt, "end_dt": end_dt}, chunksize=200_000)
 
         df_pay = read_sql_stream_with_retry("""
-            SELECT quo_num, datestart, numpay, show_price_ins, show_price_prb, show_price_total,
-                   show_price_check, show_price_service, show_price_taxcar, show_price_fine,
-                   show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
-                   discount_mkt, discount_government, discount_government_fin, discount_government_ins, 
-                    coupon_addon, status AS status_fsp, status_detail, id_cus as id_cus_pay, clickbank
-            FROM fin_system_pay
+            WITH latest_pay AS (
+            SELECT
+                p.*,
+                ROW_NUMBER() OVER(
+                PARTITION BY p.quo_num
+                ORDER BY COALESCE(p.datestart,'1900-01-01') DESC,
+                        COALESCE(p.numpay,0) DESC,
+                        COALESCE(p.show_price_total,0) DESC
+                ) rn
+            FROM fin_system_pay p
+            )
+            SELECT 
+            quo_num,
+            datestart AS datestart_pay,
+            numpay,
+            show_price_ins   AS show_price_ins_pay,
+            show_price_prb   AS show_price_prb_pay,
+            show_price_total AS show_price_total_pay,
+            show_price_check, show_price_service, show_price_taxcar, show_price_fine,
+            show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
+            discount_mkt, discount_government, discount_government_fin, discount_government_ins, 
+            coupon_addon, status AS status_fsp, status_detail, id_cus as id_cus_pay, clickbank
+            FROM latest_pay
+            WHERE rn = 1
         """, source_engine, chunksize=200_000)
 
         df_risk = read_sql_stream_with_retry("""
@@ -391,20 +412,14 @@ def clean_sales_quotation_data(inputs):
         # ถ้าเงื่อนไขไหนยัง 0 ให้พิมพ์ distribution ของค่าที่เกี่ยว
         if m1.sum() == 0 or m2.sum() == 0 or m5.sum() == 0:
             print("📊 isGovernmentOfficer (top):")
-            print(to_str(is_go_raw).value_counts(dropna=False).head(10))
             print("📊 status_gpf (top):")
-            print(to_str(gpf_raw).value_counts(dropna=False).head(10))
             print("📊 is_special_campaign (top):")
-            print(to_str(is_sp_raw).value_counts(dropna=False).head(10))
 
         if m3.sum() == 0 or m4.sum() == 0:
             print("📊 newinsurance (top):")
-            print(newin_s.value_counts(dropna=False).head(10))
             print("📊 current_campaign (top):")
-            print(to_str(camp_raw).value_counts(dropna=False).head(10))
             if 'id_cus_pay' in df_merged.columns:
                 print("📊 id_cus_pay prefix (top):")
-                print(df_merged['id_cus_pay'].astype(str).str[:3].value_counts(dropna=False).head(10))
 
         # แสดงตัวอย่าง 5 แถวที่ "เกือบ" เข้า (ช่วยไล่ดูค่าจริง)
         near_tnc = df_merged[newin_s.str.contains('ธนชาต', na=False)].head(5)
@@ -429,21 +444,49 @@ def clean_sales_quotation_data(inputs):
                     .replace({'': np.nan, 'nan': np.nan, 'None': np.nan, 'null': np.nan})
                 )
 
-        # override จาก order ก่อน pay
-        override_pairs = [
-            ("show_price_ins","show_price_ins_pay"),
-            ("show_price_prb", "show_price_prb_pay"),
+        def choose_order_then_pay(order_series, pay_series, order_dt_series, pay_dt_series):
+            ord_num = pd.to_numeric(order_series, errors='coerce')
+            pay_num = pd.to_numeric(pay_series,   errors='coerce')
+
+            # 0/ค่าติดลบจาก order ถือว่าไม่น่าเชื่อ เพื่อเปิดทางให้ pay
+            ord_num_clean = ord_num.mask(ord_num <= 0)
+
+            # กรณีพื้นฐาน: ใช้ order ก่อน
+            out = ord_num_clean.copy()
+
+            # Fallback 1: ถ้า order ว่าง ให้ใช้ pay
+            out = out.combine_first(pay_num)
+
+            # Fallback 2: ถ้า pay ใหม่กว่า order และ pay มีค่า → ให้ pay ชนะ
+            newer_pay_mask = (pd.to_datetime(pay_dt_series, errors='coerce') >
+                            pd.to_datetime(order_dt_series, errors='coerce')) & pay_num.notna()
+            out = out.where(~newer_pay_mask, pay_num)
+
+            return out
+
+        # --- คอลัมน์เวลาจาก ORDER/PAY ก่อน rename ---
+        order_dt_series = df_merged.get('datekey')         # จาก df_order
+        pay_dt_series   = df_merged.get('datestart_pay')   # จาก df_pay (เรา alias ไว้แล้ว)
+
+        pairs = [
+            ("show_price_ins",   "show_price_ins_pay"),
+            ("show_price_prb",   "show_price_prb_pay"),
             ("show_price_total", "show_price_total_pay"),
         ]
-        for base_col, pay_col in override_pairs:
+
+        for base_col, pay_col in pairs:
             base_exists = base_col in df_merged.columns
-            pay_exists = pay_col in df_merged.columns
+            pay_exists  = pay_col  in df_merged.columns
             if base_exists and pay_exists:
-                df_merged[base_col] = pd.to_numeric(df_merged[base_col], errors='coerce').combine_first(
-                    pd.to_numeric(df_merged[pay_col], errors='coerce')
+                df_merged[base_col] = choose_order_then_pay(
+                    df_merged[base_col],
+                    df_merged[pay_col],
+                    order_dt_series,
+                    pay_dt_series
                 )
                 df_merged.drop(columns=[pay_col], inplace=True)
             elif (not base_exists) and pay_exists:
+                # ถ้าไม่มีเลยที่ ORDER → เอาค่าจาก PAY ไปเลย
                 df_merged[base_col] = pd.to_numeric(df_merged[pay_col], errors='coerce')
                 df_merged.drop(columns=[pay_col], inplace=True)
 
@@ -501,19 +544,27 @@ def clean_sales_quotation_data(inputs):
             ''
         )
 
-        # ===== (4) กันพลาดกรณี merge แล้วมีหลายบรรทัด (ควรเหลือน้อยจาก SQL แล้ว) =====
-        # จัดลำดับให้บรรทัดที่ "ตัวเลขครบ" และ "order_time ล่าสุด" มาก่อน จากนั้นค่อย drop_duplicates
+        # ===== (4) กันพลาดกรณี merge แล้วมีหลายบรรทัด =====
         amt_cols_after = ['ins_amount','prb_amount','total_amount','service_price','tax_car_price',
-                          'overdue_fine_price','price_addon','payment_amount','tax_amount','ems_amount']
+                        'overdue_fine_price','price_addon','payment_amount','tax_amount','ems_amount']
         for c in amt_cols_after:
             if c not in df_merged.columns:
                 df_merged[c] = np.nan
-        df_merged['_nonnull_amt'] = pd.DataFrame({c: pd.to_numeric(df_merged[c], errors='coerce') for c in amt_cols_after}).notna().sum(axis=1)
 
-        sort_key = pd.to_datetime(df_merged.get('order_time'), errors='coerce')
-        df_merged['_sort_key'] = sort_key
-        df_merged.sort_values(by=['quotation_num','_nonnull_amt','_sort_key'], ascending=[True, False, False], inplace=True)
-        df_merged = df_merged.drop_duplicates(subset=['quotation_num'], keep='first').drop(columns=['_nonnull_amt','_sort_key'])
+        df_merged['_nonnull_amt'] = pd.DataFrame({c: pd.to_numeric(df_merged[c], errors='coerce')
+                                                for c in amt_cols_after}).notna().sum(axis=1)
+
+        # ใช้เวลาจ่ายจริง (datestart_pay) มาก่อน แล้วค่อยเวลาของ order (datekey)
+        df_merged['_sort_pay'] = pd.to_datetime(df_merged.get('datestart_pay'), errors='coerce')
+        df_merged['_sort_ord'] = pd.to_datetime(df_merged.get('datekey'),       errors='coerce')
+
+        df_merged.sort_values(
+            by=['quotation_num','_nonnull_amt','_sort_pay','_sort_ord'],
+            ascending=[True, False, False, False],
+            inplace=True
+        )
+        df_merged = df_merged.drop_duplicates(subset=['quotation_num'], keep='first') \
+                            .drop(columns=['_nonnull_amt','_sort_pay','_sort_ord'])
 
         # sale_team
         def assign_sale_team(row):
