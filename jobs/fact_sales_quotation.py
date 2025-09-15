@@ -163,7 +163,7 @@ def extract_sales_quotation_data():
 
                 CASE
                 WHEN o.viriyha = 'ดวงเจริญ'
-                    AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง')
+                    AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง', 'เมืองไทยประกันภัย', 'ทิพยประกันภัย')
                 THEN 'ส่งผ่าน'
                 ELSE 'ไม่ส่งผ่าน'
                 END AS is_duangcharoen,
