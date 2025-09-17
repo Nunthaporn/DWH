@@ -94,13 +94,6 @@ def extract_agent_data():
                 AND cuscode NOT LIKE '%%FIN-Tester2%%'
                 AND display_name NOT LIKE '%%ทดสอบ%%'
               )
-            )
-            -- ✅ กรองข้อมูลวันนี้ (เวลาไทย)
-            AND (
-                (user_registered IS NOT NULL AND user_registered >= :start AND user_registered < :end)
-                OR
-                (date_active   IS NOT NULL AND date_active   >= :start AND date_active   < :end)
-            )
     """)
 
     df_main = pd.read_sql(query_main, source_engine, params={"start": start, "end": end})
