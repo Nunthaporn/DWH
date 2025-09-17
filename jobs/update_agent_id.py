@@ -41,15 +41,16 @@ def normalize_str_col(s: pd.Series) -> pd.Series:
     s = s.mask(s.str.lower().isin(NULL_TOKENS))
     return s
 
-def base_id(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.strip().str.replace(r"-defect$", "", regex=True)
-
 # =========================
 # 🧲 EXTRACT + TRANSFORM
 # =========================
 @op
 def extract_agent_mapping() -> pd.DataFrame:
-    """สร้าง mapping [quotation_num, agent_id] จาก MySQL + Postgres โดย normalize ตาม dim_agent"""
+    """
+    สร้าง mapping [quotation_num, agent_id] โดย join แบบ 'ตรง ๆ' กับ dim_agent
+    ไม่ใช้ base_id / ไม่จัดการ defect/non-defect — ใช้ agent_id จากแหล่งข้อมูลเป็นหลัก
+    และถ้าพบใน dim_agent จะยกตัวสะกด (casing) ให้ตรงตาม dim_agent
+    """
     # source: fin_system_pay
     with source_engine.begin() as sconn:
         df_career = pd.read_sql(text("SELECT quo_num, id_cus FROM fin_system_pay"), sconn)
@@ -63,35 +64,25 @@ def extract_agent_mapping() -> pd.DataFrame:
     # คง quotation ทั้งหมด
     df_m1 = pd.merge(df_career, df_fact, on="quotation_num", how="right")
 
-    # dim_agent เพื่อทำ standardization (prefer defect ถ้ามีทั้งคู่)
+    # dim_agent เพื่อปรับ casing (join ตรง ๆ ตาม agent_id แบบ case-insensitive)
     with target_engine.begin() as tconn:
         df_main = pd.read_sql(text(f"SELECT agent_id FROM {PG_SCHEMA}.dim_agent"), tconn)
     df_main["agent_id"] = normalize_str_col(df_main["agent_id"]).dropna()
 
-    dfm = df_main.copy()
-    dfm["__base"] = base_id(dfm["agent_id"])
-    dfm["__is_defect"] = dfm["agent_id"].str.contains(r"-defect$", case=False, na=False)
+    # เตรียม key ช่วยสำหรับ merge แบบไม่สนใจตัวใหญ่เล็ก
+    df_m1["agent_id_l"]   = normalize_str_col(df_m1.get("agent_id", pd.Series(dtype="string"))).str.lower()
+    df_main["agent_id_l"] = df_main["agent_id"].str.lower()
 
-    dup_mask = dfm["__base"].duplicated(keep=False)
-    main_single = dfm[~dup_mask].copy()
-    main_dups = (
-        dfm[dup_mask]
-        .sort_values(["__base", "__is_defect"])
-        .drop_duplicates("__base", keep="last")
-    )
-    df_main_norm = pd.concat([main_single, main_dups], ignore_index=True)
-
-    # join ด้วย base_id
-    df_m1["__base"] = base_id(df_m1["agent_id"])
-    df_main_norm["__base"] = base_id(df_main_norm["agent_id"])
-
+    # join แบบตรง ๆ (ไม่ใช้ base_id)
     df_join = pd.merge(
         df_m1,
-        df_main_norm.drop(columns=["__is_defect"], errors="ignore"),
-        on="__base", how="left", suffixes=("_m1", "_main")
+        df_main[["agent_id_l", "agent_id"]].rename(columns={"agent_id": "agent_id_main"}),
+        on="agent_id_l",
+        how="left",
+        suffixes=("_m1", "_main")
     )
 
-    # เลือก agent_id_final (main ถ้ามี ไม่งั้นใช้ของเดิม)
+    # เลือก agent_id_final = ถ้าเจอใน dim_agent ใช้ของ dim_agent (คง casing) ไม่เจอใช้ของเดิม
     if "agent_id_m1" not in df_join.columns:  df_join["agent_id_m1"] = pd.NA
     if "agent_id_main" not in df_join.columns: df_join["agent_id_main"] = pd.NA
 
@@ -99,8 +90,11 @@ def extract_agent_mapping() -> pd.DataFrame:
         df_join["agent_id_main"].notna(), df_join["agent_id_main"], df_join["agent_id_m1"]
     )
 
+    # ส่งออกเฉพาะคอลัมน์ที่ต้องใช้
     df_out = df_join[["quotation_num", "agent_id_final"]].rename(columns={"agent_id_final": "agent_id"})
     df_out["agent_id"] = normalize_str_col(df_out["agent_id"])
+
+    # เลือกหนึ่งแถวต่อ quotation_num (ให้แถวที่มี agent_id มาก่อน)
     df_out["__has_agent"] = df_out["agent_id"].notna().astype(int)
     df_out = (
         df_out.sort_values(["quotation_num", "__has_agent"], ascending=[True, False])
@@ -154,7 +148,7 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
     else:
         print(f"⚠️ no rows to stage, created empty table → {full_tbl}")
 
-    # normalize casing ให้ตรง dim_agent
+    # normalize casing ให้ตรง dim_agent (คงไว้ เผื่อ source ส่ง casing ไม่ตรง)
     with target_engine.begin() as conn:
         res = conn.execute(text(f"""
             UPDATE {full_tbl} t
@@ -214,8 +208,8 @@ def drop_dim_agent_temp(temp_table_name: str, updated_count: int) -> None:  # no
 def update_agent_id_on_fact():
     df = extract_agent_mapping()
     temp_full = stage_dim_agent_temp(df)
-    updated = update_fact_from_temp(temp_full)      
-    drop_dim_agent_temp(temp_full, updated)         
+    updated = update_fact_from_temp(temp_full)
+    drop_dim_agent_temp(temp_full, updated)
 
 if __name__ == "__main__":
     df = extract_agent_mapping()
