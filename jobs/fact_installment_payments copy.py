@@ -212,7 +212,7 @@ def build_conditional_upsert(table, pk_cols: List[str], update_allow_cols: List[
 # =======================================
 @op
 def extract_installment_data():
-    d1, d2 = "2025-09-12", "2025-09-15"
+    d1, d2 = "2025-01-01", "2025-09-31"
 
     print("📊 Load target quo_num ...")
     df_plan = read_df("""
