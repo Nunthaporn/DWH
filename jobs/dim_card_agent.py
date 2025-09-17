@@ -94,28 +94,28 @@ def clean_card_agent_data(df: pd.DataFrame) -> pd.DataFrame:
             s = s.str.replace(r'\D+', '', regex=True).replace('', None)
             df[c] = s
 
-    # --------- จับคู่ด้วย key ที่ normalize เพื่อกัน space/case ---------
-    # agent_id ที่ตัด space รอบ ๆ (แต่ยังคงรูปเดิมไว้ใน df['agent_id'])
-    df['agent_id_stripped'] = df['agent_id'].astype(str).str.strip()
-    # ใช้ lower สำหรับการตรวจสอบเท่านั้น
-    aid_norm = df['agent_id_stripped'].str.lower()
+    # # --------- จับคู่ด้วย key ที่ normalize เพื่อกัน space/case ---------
+    # # agent_id ที่ตัด space รอบ ๆ (แต่ยังคงรูปเดิมไว้ใน df['agent_id'])
+    # df['agent_id_stripped'] = df['agent_id'].astype(str).str.strip()
+    # # ใช้ lower สำหรับการตรวจสอบเท่านั้น
+    # aid_norm = df['agent_id_stripped'].str.lower()
 
-    df['has_defect'] = aid_norm.str.endswith('-defect').astype(int)
-    df['base_key']  = aid_norm.str.replace(r'-defect$', '', regex=True)
-    # base_id ที่ “สวย” สำหรับสร้างชื่อผลลัพธ์ (ไม่ lower)
-    df['base_pretty'] = df['agent_id_stripped'].str.replace(r'-defect$', '', regex=True)
+    # df['has_defect'] = aid_norm.str.endswith('-defect').astype(int)
+    # df['base_key']  = aid_norm.str.replace(r'-defect$', '', regex=True)
+    # # base_id ที่ “สวย” สำหรับสร้างชื่อผลลัพธ์ (ไม่ lower)
+    # df['base_pretty'] = df['agent_id_stripped'].str.replace(r'-defect$', '', regex=True)
 
-    # คอลัมน์ที่ใช้คำนวณความสมบูรณ์
-    exclude_for_score = {'agent_id', 'agent_id_stripped', 'has_defect', 'base_key', 'base_pretty'}
-    score_cols = [c for c in df.columns if c not in exclude_for_score]
+    # # คอลัมน์ที่ใช้คำนวณความสมบูรณ์
+    # exclude_for_score = {'agent_id', 'agent_id_stripped', 'has_defect', 'base_key', 'base_pretty'}
+    # score_cols = [c for c in df.columns if c not in exclude_for_score]
 
-    def _is_present(x):
-        if x is None: return False
-        if isinstance(x, float) and pd.isna(x): return False
-        if isinstance(x, str) and x.strip() == '': return False
-        return True
+    # def _is_present(x):
+    #     if x is None: return False
+    #     if isinstance(x, float) and pd.isna(x): return False
+    #     if isinstance(x, str) and x.strip() == '': return False
+    #     return True
 
-    df['completeness_score'] = df[score_cols].apply(lambda s: sum(_is_present(v) for v in s.values), axis=1)
+    # df['completeness_score'] = df[score_cols].apply(lambda s: sum(_is_present(v) for v in s.values), axis=1)
 
     # --- เลือกข้อมูลตามกฎ ---
     out_rows = []

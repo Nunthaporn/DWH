@@ -131,11 +131,8 @@ def clean_agent_data(df: pd.DataFrame):
             df[col] = None
     df["cuscode"] = df["cuscode"].astype(str).str.strip()
 
-    # ------- defect status (fix .str.strip()) -------
+    # # ------- defect status (fix .str.strip()) -------
     status_s = df["status"].astype(str).str.strip().str.lower()
-    had_suffix = df["cuscode"].str.contains(r"-defect$", case=False, na=False)
-    base_id = df["cuscode"].str.replace(r"-defect$", "", regex=True)
-    df["cuscode"] = np.where(had_suffix, base_id + "-defect", base_id)
 
     is_defect_after = df["cuscode"].str.contains(r"-defect$", case=False, na=False) | status_s.eq("defect")
     df["defect_status"] = np.where(is_defect_after, "defect", None)
@@ -152,7 +149,7 @@ def clean_agent_data(df: pd.DataFrame):
     df = df[~df["agent_region"].str.contains("TEST", case=False, na=False)]
 
     # ------- filter TEST EXACT only (both group & mem == TEST) with whitelist -------
-    whitelist = {"WEB-T2R", "WEB-T2R-DEFECT", "Admin-VIF"}  # เพิ่ม Admin-VIF
+    whitelist = {"WEB-T2R", "WEB-T2R-DEFECT", "Admin-VIF"}
     cus_up = df["cuscode"].str.upper()
     g = df["fin_new_group"].astype(str).str.strip().str.upper()
     m = df["fin_new_mem"].astype(str).str.strip().str.upper()
@@ -163,16 +160,12 @@ def clean_agent_data(df: pd.DataFrame):
     def clean_region(region_str: str) -> str:
         if not isinstance(region_str, str):
             return ""
-        # แยกด้วย '+'
         parts = [p.strip() for p in region_str.split('+')]
-        # ลบตัวเลขท้ายออก
         cleaned = [re.sub(r"\d+$", "", p).strip() for p in parts]
-        # เก็บ unique ตามลำดับที่เจอ
         unique = []
         for c in cleaned:
             if c not in unique:
                 unique.append(c)
-        # รวมกลับด้วย " + "
         return " + ".join(unique)
 
     df["agent_main_region"] = df["agent_region"].apply(clean_region)
@@ -348,19 +341,6 @@ def clean_agent_data(df: pd.DataFrame):
         ]
 
     df = df.replace(["None", "none", "nan", "NaN", "NaT", ""], np.nan)
-
-    # ===== ✅ NEW: keep only -defect row when both exist =====
-    # สร้าง base_id (ตัด -defect ที่ท้าย) และ flag แถวที่เป็น defect
-    df["base_id"] = df["agent_id"].str.replace(r"-defect$", "", regex=True)
-    df["is_defect"] = df["agent_id"].str.contains(r"-defect$", case=False, na=False) | df["defect_status"].eq("defect")
-
-    # จัดเรียงให้ non-defect มาก่อน defect แล้ว drop duplicates โดยเก็บตัวท้าย (defect) ไว้
-    df = (
-        df.sort_values(["base_id", "is_defect"])
-          .drop_duplicates(subset=["base_id"], keep="last")
-          .drop(columns=["base_id", "is_defect"])
-    )
-    # ================================================
 
     print("✅ cleaned rows:", len(df))
     return df
