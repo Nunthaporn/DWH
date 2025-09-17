@@ -17,61 +17,61 @@ from jobs.update_order_type_id import update_order_type_id_on_fact
 
 dim_company_schedule = ScheduleDefinition(
     job=dim_company_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 dim_agent_schedule = ScheduleDefinition(
     job=dim_agent_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 dim_car_schedule = ScheduleDefinition(
     job=dim_car_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 # dim_customer_schedule = ScheduleDefinition(
 #     job=dim_customer_etl,
-#     cron_schedule="*/15 * * * *", 
+#     cron_schedule="*/10 * * * *", 
 # )
 fact_check_price_schedule = ScheduleDefinition(
     job=fact_check_price_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 fact_installment_payments_schedule = ScheduleDefinition(
     job=fact_installment_payments_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 fact_sales_quotation_schedule = ScheduleDefinition(
     job=fact_sales_quotation_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 fact_commission_schedule = ScheduleDefinition(
     job=fact_commission_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 dim_card_agent_schedule = ScheduleDefinition(
     job=dim_card_agent_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 fact_insurance_motor_schedule = ScheduleDefinition(
     job=fact_insurance_motor_etl,
-    cron_schedule="*/15 * * * *", 
+    cron_schedule="*/10 * * * *", 
 )
 update_agent_id_schedule = ScheduleDefinition(
     job=update_agent_id_on_fact,
-    cron_schedule="1/15 * * * *", 
+    cron_schedule="1/10 * * * *", 
 )
 update_car_id_schedule = ScheduleDefinition(
     job=update_car_id_on_fact,
-    cron_schedule="1/15 * * * *", 
+    cron_schedule="1/10 * * * *", 
 )
 update_company_id_schedule = ScheduleDefinition(
     job=update_company_id_job,
-    cron_schedule="1/15 * * * *", 
+    cron_schedule="1/10 * * * *", 
 )
 update_payment_plan_id_schedule = ScheduleDefinition(
     job=update_payment_plan_id_on_fact,
-    cron_schedule="1/15 * * * *", 
+    cron_schedule="1/10 * * * *", 
 )
 update_order_type_id_schedule = ScheduleDefinition(
     job=update_order_type_id_on_fact,
-    cron_schedule="1/15 * * * *", 
+    cron_schedule="1/10 * * * *", 
 )

@@ -208,9 +208,9 @@ def update_car_id_on_fact():
 # =========================
 # ▶️ LOCAL RUN (optional)
 # =========================
-# if __name__ == "__main__":
-#     k = extract_and_clean_vin_keys()
-#     d = fetch_dim_car_min()
-#     m = build_car_mapping(k, d)
-#     updated = upsert_car_ids(m)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    k = extract_and_clean_vin_keys()
+    d = fetch_dim_car_min()
+    m = build_car_mapping(k, d)
+    updated = upsert_car_ids(m)
+    print(f"🎉 done. updated rows = {updated}")

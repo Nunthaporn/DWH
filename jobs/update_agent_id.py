@@ -214,5 +214,12 @@ def drop_dim_agent_temp(temp_table_name: str, updated_count: int) -> None:  # no
 def update_agent_id_on_fact():
     df = extract_agent_mapping()
     temp_full = stage_dim_agent_temp(df)
-    updated = update_fact_from_temp(temp_full)      # <- ต้องเสร็จก่อน
-    drop_dim_agent_temp(temp_full, updated)         # <- แล้วค่อย drop (dependency ผูกด้วย updated)
+    updated = update_fact_from_temp(temp_full)      
+    drop_dim_agent_temp(temp_full, updated)         
+
+if __name__ == "__main__":
+    df = extract_agent_mapping()
+    temp_full = stage_dim_agent_temp(df)
+    updated = update_fact_from_temp(temp_full)
+    drop_dim_agent_temp(temp_full, updated)
+    print(f"🎉 done. updated rows = {updated}")

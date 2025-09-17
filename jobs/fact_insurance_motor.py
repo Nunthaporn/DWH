@@ -104,7 +104,7 @@ def remove_commas_from_numeric(value):
     return value
 
 def is_numeric_like_series(s: pd.Series) -> pd.Series:
-    s_str = s.astype(str).str.replace(',', '', regex=False).str.trim()
+    s_str = s.astype(str).str.replace(',', '', regex=False).str.strip()
     return s_str.str.match(r'^-?\d+(\.\d+)?$', na=False)
 
 def clean_numeric_commas_for_series(col: pd.Series) -> pd.Series:
@@ -214,15 +214,18 @@ def parse_amount(value):
 
 @op
 def extract_motor_data():
-    # ⏱️ คำนวณช่วง "วันนี้" (Asia/Bangkok)
+
+    # start_dt = '2024-01-01 00:00:00'
+    # end_dt = '2024-12-31 25:59:59'
+
     start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
 
     # ดึงจาก fin_system_select_plan เฉพาะวันนี้ด้วยพารามิเตอร์
     plan_query = text("""
-        SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type
+        SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type, prb
         FROM fin_system_select_plan
-        WHERE update_at >= :start_dt AND update_at < :end_dt
+        WHERE datestart >= :start_dt AND datestart < :end_dt
           AND type_insure = 'ประกันรถ'
     """)
     df_plan = execute_query_with_retry(source_engine, plan_query, params={"start_dt": start_dt, "end_dt": end_dt})
@@ -385,7 +388,20 @@ def clean_motor_data(data_tuple):
         df['repair_type'] = df['repair_type'].apply(clean_repair_type)
         print(f"🧹 Cleaned repair_type - filtered {before - df['repair_type'].notna().sum()} invalid")
 
-    # ✅ numeric columns (known list - ชั้นที่ 1)
+    # ---------- NEW: fill type column from prb ----------
+    def fill_type_from_prb(row):
+        if pd.notnull(row.get('insurance_class')) and str(row['insurance_class']).strip() != "":
+            return row['insurance_class']
+        prb_val = str(row.get('prb')).lower() if row.get('prb') is not None else ""
+        if "yes" in prb_val:  
+            return "พรบ"
+        return row.get('insurance_class')
+
+    if 'insurance_class' in df.columns and 'prb' in df.columns:
+        df['insurance_class'] = df.apply(fill_type_from_prb, axis=1)
+
+    df = df.drop(columns=["prb"], errors="ignore")
+
     numeric_columns = [
         "sum_insured","human_coverage_person","human_coverage_atime","property_coverage",
         "deductible","vehicle_damage","deductible_amount","vehicle_theft_fire",
@@ -535,30 +551,30 @@ def fact_insurance_motor_etl():
 # ▶️ Main (standalone run)
 # -------------------------
 
-# if __name__ == "__main__":
-#     try:
-#         print("🚀 Starting fact_insurance_motor ETL process...")
-#         print("📥 Extracting data from source databases...")
-#         data_tuple = extract_motor_data()
-#         print("✅ Data extraction completed")
+if __name__ == "__main__":
+    try:
+        print("🚀 Starting fact_insurance_motor ETL process...")
+        print("📥 Extracting data from source databases...")
+        data_tuple = extract_motor_data()
+        print("✅ Data extraction completed")
 
-#         print("🧹 Cleaning and transforming data...")
-#         df_clean = clean_motor_data(data_tuple)
-#         print("✅ Data cleaning completed")
-#         print("✅ Cleaned columns:", df_clean.columns)
+        print("🧹 Cleaning and transforming data...")
+        df_clean = clean_motor_data(data_tuple)
+        print("✅ Data cleaning completed")
+        print("✅ Cleaned columns:", df_clean.columns)
 
-#         # output_path = "fact_insurance_motor.xlsx"
-#         # df_export = purge_na_tokens(df_clean.copy())
-#         # df_export.to_excel(output_path, index=False, engine='openpyxl')
-#         # print(f"💾 Saved to {output_path}")
+        # output_path = "fact_insurance_motor.xlsx"
+        # df_export = purge_na_tokens(df_clean.copy())
+        # df_export.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-#         # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
-#         print("📤 Loading data to target database...")
-#         load_motor_data(df_clean)
-#         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
+        # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
+        print("📤 Loading data to target database...")
+        load_motor_data(df_clean)
+        print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
 
-#     except Exception as e:
-#         print(f"❌ ETL process failed: {str(e)}")
-#         raise
-#     finally:
-#         close_engines()
+    except Exception as e:
+        print(f"❌ ETL process failed: {str(e)}")
+        raise
+    finally:
+        close_engines()

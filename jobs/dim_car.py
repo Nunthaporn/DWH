@@ -82,8 +82,11 @@ def _today_range_th():
 
 @op
 def extract_car_data():
-    # ดึงเฉพาะ "วันนี้" เวลาไทย
-    start_dt, end_dt = _today_range_th()
+
+    start_dt = '2024-01-01 00:00:00'
+    end_dt = '2024-12-31 25:59:59'
+
+    # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
 
     # ใช้พารามิเตอร์ ปลอดภัยกว่า
@@ -469,23 +472,23 @@ def load_car_data(df: pd.DataFrame):
 def dim_car_etl():
     load_car_data(clean_car_data(extract_car_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_car_data()
-#     print("✅ Extracted data shape:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_car_data()
+    print("✅ Extracted data shape:", df_raw.shape)
 
-#     if not df_raw.empty:
-#         df_clean = clean_car_data(df_raw)
-#         print("✅ Cleaned data shape:", df_clean.shape)
-#         print("✅ Cleaned columns:", list(df_clean.columns))
+    if not df_raw.empty:
+        df_clean = clean_car_data(df_raw)
+        print("✅ Cleaned data shape:", df_clean.shape)
+        print("✅ Cleaned columns:", list(df_clean.columns))
 
-#         # output_path = "dim_car.csv"
-#         # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#         # print(f"💾 Saved to {output_path}")
+        # output_path = "dim_car.csv"
+        # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+        # print(f"💾 Saved to {output_path}")
 
-#         # df_clean.to_excel("dim_car1.xlsx", index=False)
-#         # print("💾 Saved to dim_car.xlsx")
+        df_clean.to_excel("dim_car1.xlsx", index=False)
+        print("💾 Saved to dim_car.xlsx")
 
-#         load_car_data(df_clean)
-#         print("🎉 completed! Data to dim_car.")
-#     else:
-#         print("❌ No data extracted, skipping cleaning and saving")
+        load_car_data(df_clean)
+        print("🎉 completed! Data to dim_car.")
+    else:
+        print("❌ No data extracted, skipping cleaning and saving")

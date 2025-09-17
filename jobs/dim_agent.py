@@ -569,20 +569,20 @@ def dim_agent_etl():
     load_to_wh(df_clean)
     backfill_date_active(df_clean)
 
-# if __name__ == "__main__":
-#     df_raw = extract_agent_data()
-#     print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_agent_data()
+    print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_agent_data(df_raw)
-#     print("✅ Cleaned rows:", len(df_clean))
+    df_clean = clean_agent_data(df_raw)
+    print("✅ Cleaned rows:", len(df_clean))
 
-#     df_clean = clean_null_values_op(df_clean)
+    df_clean = clean_null_values_op(df_clean)
 
-#     df_clean.to_excel("dim_agent1.xlsx", index=False)
-#     print("💾 Saved to dim_agent.xlsx")
+    # df_clean.to_excel("dim_agent1.xlsx", index=False)
+    # print("💾 Saved to dim_agent.xlsx")
 
-#     # load_to_wh(df_clean)
-#     # backfill_date_active(df_clean)
-#     print("🎉 completed!")
+    load_to_wh(df_clean)
+    backfill_date_active(df_clean)
+    print("🎉 completed!")
 
 
