@@ -105,10 +105,10 @@ target_engine = create_engine(
 @op
 def extract_commission_data():
 
-    # start_dt = '2025-01-01 00:00:00'
-    # end_dt = '2025-09-31 23:59:59'
+    start_dt = '2025-01-01 00:00:00'
+    end_dt = '2025-09-31 23:59:59'
 
-    start_dt, end_dt = _today_range_th()
+    # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Time window (TH): {start_dt} → {end_dt}")
 
     q_select_plan = text("""
@@ -427,52 +427,52 @@ def fact_commission_etl():
     load_commission_data(clean_commission_data(extract_commission_data()))
 
 
-# if __name__ == "__main__":
-#     df_raw = extract_commission_data()
+if __name__ == "__main__":
+    df_raw = extract_commission_data()
 
-#     df_clean = clean_commission_data((df_raw))
-#     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_commission_data((df_raw))
+    print("✅ Cleaned columns:", df_clean.columns)
 
-#     # 🔍 Final check before loading to database
-#     final_nan_check = df_clean.isnull().sum()
-#     if final_nan_check.sum() > 0:
-#         print("\n⚠️ Final NaN check before database loading:")
-#         for col, count in final_nan_check[final_nan_check > 0].items():
-#             print(f"  - {col}: {count} NaN values")
-#     else:
-#         print("\n✅ No NaN values found before database loading")
+    # 🔍 Final check before loading to database
+    final_nan_check = df_clean.isnull().sum()
+    if final_nan_check.sum() > 0:
+        print("\n⚠️ Final NaN check before database loading:")
+        for col, count in final_nan_check[final_nan_check > 0].items():
+            print(f"  - {col}: {count} NaN values")
+    else:
+        print("\n✅ No NaN values found before database loading")
     
-#     # 🔍 Final comma check before loading to database
-#     numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
-#                         'after_tax_commission', 'paid_commission', 'commission_addon',
-#                         'commission', 'com_invite', 'com_rank']
+    # 🔍 Final comma check before loading to database
+    numeric_cols_main = ['total_commission', 'ins_commission', 'prb_commission',
+                        'after_tax_commission', 'paid_commission', 'commission_addon',
+                        'commission', 'com_invite', 'com_rank']
     
-#     print("\n🔍 Final comma check before database loading:")
-#     for col in numeric_cols_main:
-#         if col in df_clean.columns:
-#             comma_count = df_clean[col].astype(str).str.contains(',').sum()
-#             if comma_count > 0:
-#                 print(f"  - ⚠️ {col}: {comma_count} values still have commas")
-#                 # Show remaining examples
-#                 examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
-#                 print(f"    Remaining examples: {examples.tolist()}")
-#             else:
-#                 print(f"  - ✅ {col}: No comma values found")
+    print("\n🔍 Final comma check before database loading:")
+    for col in numeric_cols_main:
+        if col in df_clean.columns:
+            comma_count = df_clean[col].astype(str).str.contains(',').sum()
+            if comma_count > 0:
+                print(f"  - ⚠️ {col}: {comma_count} values still have commas")
+                # Show remaining examples
+                examples = df_clean[df_clean[col].astype(str).str.contains(',', na=False)][col].head(3)
+                print(f"    Remaining examples: {examples.tolist()}")
+            else:
+                print(f"  - ✅ {col}: No comma values found")
     
-#     # Show sample of cleaned numeric data
-#     print("\n📊 Sample of cleaned numeric data:")
-#     for col in numeric_cols_main[:3]:  # Show first 3 columns
-#         if col in df_clean.columns:
-#             sample_values = df_clean[col].dropna().head(3)
-#             print(f"  - {col}: {sample_values.tolist()}")
+    # Show sample of cleaned numeric data
+    print("\n📊 Sample of cleaned numeric data:")
+    for col in numeric_cols_main[:3]:  # Show first 3 columns
+        if col in df_clean.columns:
+            sample_values = df_clean[col].dropna().head(3)
+            print(f"  - {col}: {sample_values.tolist()}")
 
-#     # output_path = "fact_commission.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_commission.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "fact_commission.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_commission.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_commission_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_commission.")
+    load_commission_data(df_clean)
+    print("🎉 completed! Data upserted to fact_commission.")
