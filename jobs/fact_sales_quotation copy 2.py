@@ -110,8 +110,8 @@ def extract_sales_quotation_data():
     try:
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
 
-        start_dt = '2055-01-01 00:00:00'
-        end_dt = '2025-03-31 23:59:59'
+        start_dt = '2025-09-01 00:00:00'
+        end_dt = '2025-09-31 23:59:59'
 
         # ⏱️ ช่วงเวลา "วันนี้" ตามเวลาไทย
         # start_dt, end_dt = today_range_th()
@@ -795,11 +795,11 @@ if __name__ == "__main__":
         df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
         df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
 
-        output_path = "fact_sales_quotation.xlsx"
-        df_clean.to_excel(output_path, index=False, engine='openpyxl')
-        print(f"💾 Saved to {output_path}")
+        # output_path = "fact_sales_quotation.xlsx"
+        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-        # load_sales_quotation_data(df_clean)
+        load_sales_quotation_data(df_clean)
         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
     except Exception as e:
         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
