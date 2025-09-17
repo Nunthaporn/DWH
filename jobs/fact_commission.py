@@ -328,10 +328,10 @@ def load_commission_data(df: pd.DataFrame):
     from sqlalchemy.exc import OperationalError
     import time
 
-    table_name = 'fact_commission_temp'
+    table_name = 'fact_commission'
     pk_column = 'quotation_num'
     MAX_RETRIES = 3
-    RETRY_DELAY = 2  # seconds
+    RETRY_DELAY = 2  
     BATCH_SIZE = 1000
 
     # --- ตรวจสอบก่อนเขียน DB (ยังคง dtype แบบ nullable ใน pandas) ---
