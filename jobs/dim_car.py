@@ -83,10 +83,10 @@ def _today_range_th():
 @op
 def extract_car_data():
 
-    start_dt = '2024-01-01 00:00:00'
-    end_dt = '2024-12-31 25:59:59'
+    # start_dt = '2024-01-01 00:00:00'
+    # end_dt = '2024-12-31 25:59:59'
 
-    # start_dt, end_dt = _today_range_th()
+    start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
 
     # ใช้พารามิเตอร์ ปลอดภัยกว่า
