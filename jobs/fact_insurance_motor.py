@@ -215,10 +215,10 @@ def parse_amount(value):
 @op
 def extract_motor_data():
 
-    # start_dt = '2024-01-01 00:00:00'
-    # end_dt = '2024-12-31 25:59:59'
+    start_dt = '2025-09-01 00:00:00'
+    end_dt = '2025-09-31 25:59:59'
 
-    start_dt, end_dt = _today_range_th()
+    # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
 
     # ดึงจาก fin_system_select_plan เฉพาะวันนี้ด้วยพารามิเตอร์

@@ -1,6 +1,5 @@
 from dagster import op, job
 import os
-import re
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -37,11 +36,39 @@ tgt_engine = create_engine(
     pool_pre_ping=True, pool_recycle=3600
 )
 
+# =========================
+# 🔠 Helpers
+# =========================
 NULL_TOKENS = {"", "nan", "none", "null", "undefined", "nat"}
 
-def norm_str(s: pd.Series) -> pd.Series:
-    s = s.astype("string").str.strip()
-    return s.mask(s.str.lower().isin(NULL_TOKENS))
+def normalize_text(s: pd.Series) -> pd.Series:
+    """lower + trim + nullize common tokens"""
+    s = s.astype(str).str.strip()
+    s = s.mask(s.str.lower().isin(NULL_TOKENS))
+    return s.str.lower()
+
+# ปรับคำพ้อง/สะกด (แก้ให้ตรงกับค่าที่มีใน dim ของจริง)
+RECEIVER_SYNONYMS = {
+    "เข้าประกัน1": "เข้าประกัน",
+    "เข้าฟินลิป": "เข้าฟิลลิป",
+    "ผ่อนบัตร": "เข้าฟิน",  # ตาม rule เดิมที่ normalize
+}
+PAYTYPE_SYNONYMS = {
+    # เติม/แก้ให้ตรงกับ dim
+    "ชำระเต็มจำนวน": "full",
+    "ผ่อนชำระ": "installment",
+    "ผ่อน": "installment",
+    "โอน": "transfer",
+    "โอนเงิน": "transfer",
+    "บัตรเครดิต": "credit",
+}
+CHANNEL_SYNONYMS = {
+    # ให้สะกด/ตัวพิมพ์เหมือน dim
+    "qr code": "qr code",
+    "2c2p": "2c2p",
+    "ตัดบัตรกับฟิน": "ตัดบัตรกับฟิน",
+    "โอนเงิน": "โอนเงิน",
+}
 
 # =========================
 # 🧲 EXTRACT (MariaDB)
@@ -146,13 +173,13 @@ def _determine_payment_channel(row) -> str:
 def transform_payment_rows(df_src: pd.DataFrame) -> pd.DataFrame:
     df = df_src.copy()
 
-    # แปลงสตริง 'nan' → NaN
-    df = df.applymap(lambda x: np.nan if isinstance(x, str) and x.strip().lower() == "nan" else x)
+    # แทน 'nan' (ตัวหนังสือ) → NaN โดยไม่ใช้ applymap (เลิกเตือน FutureWarning)
+    df = df.replace({'nan': np.nan, 'NaN': np.nan})
 
     # trim text fields
     for col in ["chanel", "chanel_main", "clickbank"]:
         if col in df.columns:
-            df[col] = df[col].fillna("").astype(str).str.strip()
+            df[col] = df[col].astype(str).str.strip()
 
     # มาตรฐานผู้รับเงิน (payment_reciever)
     df["chanel"] = df.apply(_standardize_receiver, axis=1)
@@ -172,17 +199,20 @@ def transform_payment_rows(df_src: pd.DataFrame) -> pd.DataFrame:
         "numpay": "installment_number"
     }, inplace=True)
 
-    # clean ค่า/กรณีพิเศษ
-    df["payment_reciever"] = df["payment_reciever"].replace({
-        "เข้าประกัน1": "เข้าประกัน",
-        "เข้าฟินลิป": "เข้าฟิลลิป"
-    })
+    # ทำความสะอาด/คำพ้อง
+    df["payment_reciever"] = df["payment_reciever"].replace(RECEIVER_SYNONYMS)
+    df["payment_type"] = df["payment_type"].replace(PAYTYPE_SYNONYMS)
 
     # installment_number → int (0 → 1)
     df["installment_number"] = pd.to_numeric(df["installment_number"], errors="coerce").fillna(0).astype(int)
     df["installment_number"] = df["installment_number"].replace({0: 1})
 
-    # คอลัมน์ที่ต้องใช้ downstream
+    # normalize เป็น lower-case เพื่อ merge ให้ติด และ map channel synonyms
+    for k in ["payment_reciever", "payment_type", "payment_channel"]:
+        if k in df.columns:
+            df[k] = normalize_text(df[k])
+    df["payment_channel"] = df["payment_channel"].replace(CHANNEL_SYNONYMS)
+
     need_cols = ["quotation_num", "type_insurance", "payment_reciever", "payment_type",
                  "installment_number", "payment_channel"]
     return df[need_cols]
@@ -193,7 +223,7 @@ def transform_payment_rows(df_src: pd.DataFrame) -> pd.DataFrame:
 @op
 def fetch_dim_payment_plan() -> pd.DataFrame:
     with tgt_engine.begin() as conn:
-        return pd.read_sql(
+        dim = pd.read_sql(
             text("""
                 SELECT payment_plan_id, payment_channel, payment_reciever, payment_type, installment_number
                 FROM dim_payment_plan
@@ -201,47 +231,81 @@ def fetch_dim_payment_plan() -> pd.DataFrame:
             conn
         )
 
+    # normalize columns ให้เป็นมาตรฐานเดียวกับฝั่ง keys
+    for k in ["payment_reciever", "payment_type", "payment_channel"]:
+        if k in dim.columns:
+            dim[k] = normalize_text(dim[k])
+    dim["payment_channel"] = dim["payment_channel"].replace(CHANNEL_SYNONYMS)
+
+    if "installment_number" in dim.columns:
+        dim["installment_number"] = pd.to_numeric(dim["installment_number"], errors="coerce").astype("Int64")
+
+    return dim
+
 # =========================
-# 🔗 JOIN → get payment_plan_id
+# 🔗 JOIN → get payment_plan_id (with debug)
 # =========================
 @op
 def map_to_payment_plan_id(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
-    df = pd.merge(
-        df_keys,
-        df_dim,
-        on=["payment_channel", "payment_reciever", "payment_type", "installment_number"],
-        how="inner"
+    keys = ["payment_channel", "payment_reciever", "payment_type", "installment_number"]
+    missing = [k for k in keys if k not in df_keys.columns or k not in df_dim.columns]
+    if missing:
+        raise RuntimeError(f"Missing join keys: {missing}")
+
+    merged = pd.merge(
+        df_keys, df_dim,
+        on=keys,
+        how="left",
+        suffixes=("", "_dim")
     )
-    return df[["quotation_num", "payment_plan_id"]].drop_duplicates("quotation_num")
+
+    # --- DEBUG: แถวที่ไม่เจอใน dim ---
+    miss = merged[merged["payment_plan_id"].isna()].copy()
+    if not miss.empty:
+        print(f"🔍 Unmatched rows: {len(miss):,}")
+        for k in keys:
+            print(f"\n[UNMATCHED] {k} value_counts():")
+            print(miss[k].value_counts(dropna=False).head(20))
+
+        combo = (
+            miss.groupby(keys).size()
+            .reset_index(name="cnt")
+            .sort_values("cnt", ascending=False)
+            .head(20)
+        )
+        print("\n[UNMATCHED] Top combos:")
+        print(combo.to_string(index=False))
+
+    ok = merged.dropna(subset=["payment_plan_id"])
+    return ok[["quotation_num", "payment_plan_id"]].drop_duplicates("quotation_num")
 
 # =========================
-# 🚀 Restrict + Stage + Update + Drop (รวมใน op เดียว)
+# 🚀 Restrict + Stage + Update + Drop
 # =========================
 @op
 def upsert_payment_plan_ids(df_pairs: pd.DataFrame) -> int:
-    # 1) ดึงเฉพาะ quotation ที่ fact ยังว่างจาก DB
-    with tgt_engine.begin() as conn:
-        df_missing = pd.read_sql(
-            text("SELECT quotation_num FROM fact_sales_quotation WHERE payment_plan_id IS NULL"),
-            conn
-        )
+    need = (
+        df_pairs
+        .dropna(subset=["payment_plan_id"])
+        .drop_duplicates(subset=["quotation_num"])
+        .copy()
+    )
 
-    need = pd.merge(df_pairs, df_missing, on="quotation_num", how="inner")
     if need.empty:
-        print("⚠️ No rows to update.")
+        print("⚠️ No rows to update (no matches to dim).")
         return 0
 
     # sanitize types
-    need["quotation_num"] = norm_str(need["quotation_num"])
+    need["quotation_num"] = normalize_text(need["quotation_num"])
     need["payment_plan_id"] = pd.to_numeric(need["payment_plan_id"], errors="coerce").astype("Int64")
-    need = need[need["payment_plan_id"].notna()].drop_duplicates(subset=["quotation_num"])
+    need = need[need["payment_plan_id"].notna()]
 
     if need.empty:
-        print("⚠️ No resolvable rows after cleaning.")
+        print("⚠️ No resolvable rows after cleaning (payment_plan_id all NaN).")
         return 0
 
-    # 2) Stage temp + 3) Update + 4) Drop ใน transaction เดียว
     with tgt_engine.begin() as conn:
+        # stage temp
         need.to_sql(
             "dim_payment_plan_temp",
             con=conn,
@@ -250,14 +314,16 @@ def upsert_payment_plan_ids(df_pairs: pd.DataFrame) -> int:
             method="multi",
             chunksize=20000
         )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_payment_plan_temp_q ON dim_payment_plan_temp(quotation_num)"))
         print(f"✅ staged dim_payment_plan_temp: {len(need):,} rows")
 
+        # update ทั้งกรณี null และค่าต่าง
         updated = conn.execute(text("""
-            UPDATE fact_sales_quotation fsq
+            UPDATE fact_sales_quotation AS fsq
             SET payment_plan_id = t.payment_plan_id
-            FROM dim_payment_plan_temp t
+            FROM dim_payment_plan_temp AS t
             WHERE fsq.quotation_num = t.quotation_num
-                AND fsq.payment_plan_id IS DISTINCT FROM dc.payment_plan_id;
+              AND fsq.payment_plan_id IS DISTINCT FROM t.payment_plan_id;
         """)).rowcount or 0
 
         conn.execute(text("DROP TABLE IF EXISTS dim_payment_plan_temp"))
@@ -280,10 +346,10 @@ def update_payment_plan_id_on_fact():
 # =========================
 # ▶️ Local run (optional)
 # =========================
-# if __name__ == "__main__":
-#     s = extract_payment_sources()
-#     r = transform_payment_rows(s)
-#     d = fetch_dim_payment_plan()
-#     p = map_to_payment_plan_id(r, d)
-#     updated = upsert_payment_plan_ids(p)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    s = extract_payment_sources()
+    r = transform_payment_rows(s)
+    d = fetch_dim_payment_plan()
+    p = map_to_payment_plan_id(r, d)
+    updated = upsert_payment_plan_ids(p)
+    print(f"🎉 done. updated rows = {updated}")

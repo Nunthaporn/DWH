@@ -83,8 +83,8 @@ def _today_range_th():
 @op
 def extract_car_data():
 
-    start_dt = '2024-01-01 00:00:00'
-    end_dt = '2024-12-31 25:59:59'
+    start_dt = '2025-09-01 00:00:00'
+    end_dt = '2025-09-31 25:59:59'
 
     # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")
@@ -475,31 +475,28 @@ def clean_car_data(df: pd.DataFrame):
     print(f"📊 Final records after removing car_vin duplicates: {len(df_cleaned)}")
     return df_cleaned
 
-# ---------- UPSERT helper (no forcing) ----------
+# ---------- UPSERT helper (เพิ่ม debug log) ----------
 def upsert_batches(table, rows, key_col, update_cols, batch_size=10000):
-    """
-    UPSERT แบบมีเงื่อนไข: จะ UPDATE เฉพาะแถวที่ค่าจริง ๆ เปลี่ยน
-    - ไม่เขียนทับด้วย NULL (ใช้ COALESCE)
-    - update_at = now() จะเซ็ตเฉพาะเมื่อมีการเปลี่ยนแปลงจริง
-    """
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i+batch_size]
         try:
+            print(f"🔎 Preparing batch {i//batch_size + 1}: {len(batch)} rows | update_cols={update_cols}")
+            if not update_cols:
+                print("⚠️ No update_cols found, skipping batch!")
+                continue
+
             with target_engine.begin() as conn:
                 ins = pg_insert(table).values(batch)
-                excluded = ins.excluded  # EXCLUDED.<col>
+                excluded = ins.excluded  
 
-                # map ค่าที่จะอัปเดต: ไม่ทับด้วย NULL
                 set_map = {
                     c: func.coalesce(getattr(excluded, c), getattr(table.c, c))
                     for c in update_cols
                 }
 
-                # อัปเดต update_at เฉพาะเมื่อมีการเปลี่ยนแปลงจริง (ถ้ามีคอลัมน์นี้)
                 if 'update_at' in table.c:
                     set_map['update_at'] = func.now()
 
-                # เงื่อนไข UPDATE เฉพาะเมื่อ "ค่าหลัง COALESCE" แตกต่างจากค่าปัจจุบัน
                 change_conditions = [
                     func.coalesce(getattr(excluded, c), getattr(table.c, c)).is_distinct_from(getattr(table.c, c))
                     for c in update_cols
@@ -508,7 +505,7 @@ def upsert_batches(table, rows, key_col, update_cols, batch_size=10000):
                 stmt = ins.on_conflict_do_update(
                     index_elements=[table.c[key_col]],
                     set_=set_map,
-                    where=or_(*change_conditions)  # << สำคัญ: ไม่ต่าง = ไม่ UPDATE
+                    where=or_(*change_conditions)
                 )
                 conn.execute(stmt)
 
@@ -529,25 +526,44 @@ def load_car_data(df: pd.DataFrame):
         print(f"⚠️ WARNING: Column '{pk_column}' not found in DataFrame! Skipping DB ops")
         return
 
-    # ✅ เตรียมข้อมูลสำหรับ upsert
     df = df[~df[pk_column].duplicated(keep='first')].copy()
     df = df[df[pk_column].notna()].copy()
 
-    # โหลด metadata
+    print(f"🔎 Data prepared for upsert: {len(df)} rows")
+    print("🔎 Sample car_vin:", df[pk_column].head(5).tolist())
+
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=target_engine)
 
     exclude_cols = {pk_column, 'car_id', 'create_at', 'datestart', 'update_at'}
     update_cols = [c for c in df.columns if c not in exclude_cols]
 
+    print("🔎 Final update_cols:", update_cols)
+
     rows_to_upsert = df.replace({np.nan: None}).to_dict(orient='records')
+
     if rows_to_upsert:
-        print(f"🔄 Upsert total rows: {len(rows_to_upsert)}")
+        # ✅ นับ insert/update ล่วงหน้า
+        with target_engine.connect() as conn:
+            existing_keys = set(
+                r[0] for r in conn.execute(
+                    text(f"SELECT {pk_column} FROM {table_name} WHERE {pk_column} = ANY(:vals)"),
+                    {"vals": list(df[pk_column].unique())}
+                ).fetchall()
+            )
+        total = len(df)
+        inserts = total - len(existing_keys)
+        updates = len(existing_keys)
+
+        print(f"📊 Pre-check → total: {total}, new inserts: {inserts}, possible updates: {updates}")
+
+        # ✅ ดำเนินการ upsert
         upsert_batches(table, rows_to_upsert, pk_column, update_cols, batch_size=10000)
+
+        print(f"✅ Insert/Update completed (UPSERT only — no forcing) → "
+              f"Inserted {inserts}, Updated {updates} (if changed)")
     else:
         print("ℹ️ Nothing to upsert")
-
-    print("✅ Insert/Update completed (UPSERT only — no forcing)")
 
 @job
 def dim_car_etl():

@@ -15,10 +15,10 @@ from jobs.update_company_id import update_company_id_job
 from jobs.update_payment_plan_id import update_payment_plan_id_on_fact
 from jobs.update_order_type_id import update_order_type_id_on_fact
 
-# ทุก 10 นาที ระหว่าง 08:00–22:59
-_EVERY_10M_8_TO_22 = "*/10 8-22 * * *"
-# ทุก 10 นาที (เริ่มที่นาที 1) ระหว่าง 08:00–22:59
-_EVERY_10M_FROM1_8_TO_22 = "1-59/10 8-22 * * *"
+# ทุก 10 นาที ระหว่าง 08:00–21:59
+_EVERY_10M_8_TO_22 = "*/10 8-21 * * *"
+# ทุก 10 นาที (เริ่มที่นาที 1) ระหว่าง 08:00–21:59
+_EVERY_10M_FROM1_8_TO_22 = "1-59/10 8-21 * * *"
 _TZ = "Asia/Bangkok"
 
 dim_company_schedule = ScheduleDefinition(

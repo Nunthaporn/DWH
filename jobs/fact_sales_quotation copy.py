@@ -5,7 +5,7 @@ import os
 import re
 from dotenv import load_dotenv
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import create_engine, MetaData, Table, inspect, text, func
+from sqlalchemy import create_engine, MetaData, Table, inspect, text, func, or_
 import datetime
 import time
 from pymysql.cursors import SSCursor
@@ -24,20 +24,6 @@ try:
 except Exception:
     ZoneInfo = None
 
-def today_range_th():
-    """คืนค่า (start_dt, end_dt) เป็น naive datetime ของช่วง 'วันนี้' ตาม Asia/Bangkok"""
-    if ZoneInfo:
-        tz = ZoneInfo("Asia/Bangkok")
-        now_th = datetime.datetime.now(tz)
-        start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_th = start_th + datetime.timedelta(days=1)
-        return start_th.replace(tzinfo=None), end_th.replace(tzinfo=None)
-    # fallback UTC+7
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + datetime.timedelta(days=1)
-    return start, end
-
 # ===== TUNE ENGINES (เพิ่ม pre_ping + server-side cursor) =====
 source_engine = create_engine(
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
@@ -45,12 +31,12 @@ source_engine = create_engine(
     max_overflow=20,
     pool_timeout=30,
     pool_recycle=3600,
-    pool_pre_ping=True,  # ✅ ป้องกัน stale connection
+    pool_pre_ping=True,
     connect_args={
         'connect_timeout': 60,
         'read_timeout': 600,
         'write_timeout': 600,
-        'cursorclass': SSCursor,  # ✅ server-side cursor (streaming)
+        'cursorclass': SSCursor,
     }
 )
 source_engine_task = create_engine(
@@ -109,11 +95,11 @@ def extract_sales_quotation_data():
     try:
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
 
-        # ⏱️ ช่วงเวลา "วันนี้" ตามเวลาไทย
-        start_dt, end_dt = today_range_th()
+        start_dt = '2025-09-20 00:00:00'
+        end_dt   = '2025-09-30 00:00:00'  # ✅ ใช้ < end_dt (exclusive)
+
         logger.info(f"⏱️ Window (TH): {start_dt} → {end_dt}")
 
-        # เงื่อนไขกรอง plan — เปลี่ยนมาใช้พารามิเตอร์วันแทน hardcode
         where_plan = """
             WHERE datestart >= :start_dt AND datestart < :end_dt
                 AND id_cus NOT IN ('FIN-TestApp','FIN-TestApp3','FIN-TestApp2','FIN-TestApp-2025',
@@ -121,12 +107,10 @@ def extract_sales_quotation_data():
                                 'fintest-01','fpc25-9999','bkk1_Hutsabodin','bkk1_Siraprapa',
                                 'FNG22-072450','FNG23-087046','upc2_Siraprapa','THAI25-12345',
                                 'FQ2408-24075','B2C-000000','123123')
-
                 AND name NOT IN ('ทดสอบ','tes','test','เทสระบบ','Tes ระบบ','ทด่ท','ทด สอบ',
                                 'ปัญญวัฒน์ โพธิ์ศรีทอง','เอกศิษฎ์ เจริญธันยบูรณ์','ทดสอย',
                                 'ทดสิบ','ทดสอล','ทด','ทดมแ','ทดดสอบ','ทดลอง','ทดลอง ทิพย',
                                 'ทดลองคีย์งาน','ทดวสอบ','ทอสอบ','ทเสอบ','ทบสอบ')
-
                 AND lastname NOT IN ('ทดสด','ทดสอบ','ทดสอบ2','ทดสอบบบ','ททดสอบสอน',
                                     'โวยวาย ทดสอบ','โวยวายทดสอบ','test')
                 AND COALESCE(company, '') NOT LIKE '%%Testing%%'
@@ -141,7 +125,6 @@ def extract_sales_quotation_data():
         """
         df_plan = read_sql_stream_with_retry(sql_plan, source_engine, params={"start_dt": start_dt, "end_dt": end_dt})
 
-        # ✅ ORDER: เลือกแถวล่าสุดต่อใบเสนอราคา ด้วย ROW_NUMBER() — ใช้ซับคิวรีที่อ้าง where_plan เหมือนกัน
         sql_order = f"""
             WITH latest_order AS (
             SELECT 
@@ -154,27 +137,15 @@ def extract_sales_quotation_data():
                 o.prb         AS show_price_prb,
                 o.totalprice  AS show_price_total,
                 o.newinsurance AS newinsurance,
-
+                CASE WHEN COALESCE(TRIM(o.status_paybill), '') = 'จ่ายปกติ' THEN 'เติมเงิน' ELSE 'ไม่เติมเงิน' END AS is_paybill,
                 CASE
-                WHEN COALESCE(TRIM(o.status_paybill), '') = 'จ่ายปกติ'
-                THEN 'เติมเงิน'
-                ELSE 'ไม่เติมเงิน'
-                END AS is_paybill,
-
-                CASE
-                WHEN o.viriyha = 'ดวงเจริญ'
-                    AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง', 'เมืองไทยประกันภัย', 'ทิพยประกันภัย')
-                THEN 'ส่งผ่าน'
-                ELSE 'ไม่ส่งผ่าน'
+                    WHEN o.viriyha = 'ดวงเจริญ'
+                         AND o.newinsurance IN ('แอกซ่าประกันภัย','ฟอลคอนประกันภัย','เออร์โกประกันภัย','บริษัทกลาง', 'เมืองไทยประกันภัย', 'ทิพยประกันภัย')
+                    THEN 'ส่งผ่าน' ELSE 'ไม่ส่งผ่าน'
                 END AS is_duangcharoen,
-
                 CONCAT(IFNULL(o.title,''),' ',IFNULL(o.firstname,''),' ',IFNULL(o.lastname,'')) AS customer_name,
                 o.tel,
-
-                ROW_NUMBER() OVER (
-                PARTITION BY o.quo_num
-                ORDER BY o.datekey DESC, o.order_number DESC
-                ) AS rn
+                ROW_NUMBER() OVER (PARTITION BY o.quo_num ORDER BY o.datekey DESC, o.order_number DESC) AS rn
             FROM fin_order o
             INNER JOIN (
                 SELECT quo_num
@@ -195,7 +166,7 @@ def extract_sales_quotation_data():
                    show_price_check, show_price_service, show_price_taxcar, show_price_fine,
                    show_price_addon, show_price_payment, distax, show_ems_price, show_discount_ins,
                    discount_mkt, discount_government, discount_government_fin, discount_government_ins, 
-                    coupon_addon, status AS status_fsp, status_detail, id_cus as id_cus_pay, clickbank
+                   coupon_addon, status AS status_fsp, status_detail, id_cus as id_cus_pay, clickbank
             FROM fin_system_pay
         """, source_engine, chunksize=200_000)
 
@@ -235,7 +206,6 @@ def extract_sales_quotation_data():
               AND cuscode NOT LIKE '%%FIN-Tester2%%'
         """, source_engine, chunksize=100_000)
 
-        # 🆕 NEW: ดึงรายชื่อ cuscode จาก fin_dna_log
         df_dna = read_sql_stream_with_retry("""
             SELECT cuscode
             FROM fininsurance.fin_dna_log
@@ -245,10 +215,7 @@ def extract_sales_quotation_data():
         df_flag = read_sql_stream_with_retry("""
             SELECT 
                 quo_num,
-                CASE 
-                    WHEN status_big_agent = '1' THEN 'Big Agent'
-                    ELSE NULL
-                END AS big_agent
+                CASE WHEN status_big_agent = '1' THEN 'Big Agent' ELSE NULL END AS big_agent
             FROM fininsurance.fin_quo_num_flag
             WHERE status_big_agent
         """, source_engine, chunksize=100_000)
@@ -267,11 +234,10 @@ def extract_sales_quotation_data():
 @op
 def clean_sales_quotation_data(inputs):
     try:
-        # 🆕 NEW: รับ df_dna เพิ่มมา
         df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = inputs
         logger.info("🧹 เริ่มทำความสะอาดข้อมูล...")
 
-        # ========= merge เดิม =========
+        # ========= merge =========
         df_merged = df_plan.merge(df_order, on='quo_num', how='left')
         df_merged = df_merged.merge(df_pay, on='quo_num', how='left', suffixes=('', '_pay'))
         df_merged = df_merged.merge(df_risk, on='quo_num', how='left', suffixes=('', '_risk'))
@@ -279,101 +245,56 @@ def clean_sales_quotation_data(inputs):
         df_merged = df_merged.merge(df_health, on='quo_num', how='left', suffixes=('', '_health'))
         df_merged = df_merged.merge(df_wp, on='id_cus', how='left')
         df_merged = df_merged.merge(df_flag, on='quo_num', how='left')
+        df_merged = df_merged.merge(df_dna, left_on='id_cus', right_on='cuscode', how='left')
 
-        # 🆕 NEW: merge กับ DNA (id_cus จากฝั่งงาน เทียบกับ cuscode ใน dna_log)
-        df_merged = df_merged.merge(
-            df_dna, left_on='id_cus', right_on='cuscode', how='left'
-        )
-
-        # 🆕 NEW: คำนวณ dna_fin ตาม COALESCE(CASE WHEN dna.cuscode IS NOT NULL THEN 'ตัวแทน DNA' END,'ตัวแทนทั่วไป')
-        df_merged['dna_fin'] = np.where(
-            df_merged['cuscode'].notna(), 'ตัวแทน DNA', 'ตัวแทนทั่วไป'
-        )
+        df_merged['dna_fin'] = np.where(df_merged['cuscode'].notna(), 'ตัวแทน DNA', 'ตัวแทนทั่วไป')
 
         df_merged['customer_name'] = df_merged['customer_name'].replace(
-            to_replace=r'.*- สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด$',
-            value='สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด',
+            {
+                r'.*- สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด$': 'สหกรณ์อิสลาม อิบนูอัฟฟาน จำกัด',
+                r'.*- สหกรณ์ออมทรัพย์สุริยพงษ์ จำกัด$': 'สหกรณ์ออมทรัพย์สุริยพงษ์ จำกัด',
+                r'.*- สหกรณ์อัล-อามีน สตูล จำกัด$': 'สหกรณ์อัล-อามีน สตูล จำกัด',
+                r'.*- สหกรณ์อิสลามบารอกะฮฺ จำกัด$': 'สหกรณ์อิสลามบารอกะฮฺ จำกัด',
+                r'.*- สหกรณ์อัล-อามีนสตูล จำกัด$': 'สหกรณ์อัล-อามีน สตูล จำกัด',
+                r'.*- สหกรณ์เครดิตยูเนี่ยนต้นรุงก้าวไกล$': 'สหกรณ์เครดิตยูเนี่ยนต้นรุงก้าวไกล',
+            },
             regex=True
         )
 
-        # ===== DEBUG + ROBUST NORMALIZATION FOR goverment_type_text =====
+        df_merged['clickbank'] = df_merged['clickbank'].replace(to_replace=r'.*undefined', value='', regex=True)
 
-        # 0) ยืนยันคอลัมน์สำคัญมีอยู่จริง
-        required_cols = [
-            'isGovernmentOfficer', 'status_gpf', 'is_special_campaign',
-            'current_campaign', 'newinsurance'
-        ]
-        for col in required_cols:
-            if col not in df_merged.columns:
-                logger.warning(f"⚠️ missing column: {col}")
-
-        # ใช้ id_cus จาก pay ก่อน (sp.id_cus) ถ้าไม่มี fallback เป็นของ plan
-        if 'id_cus_pay' in df_merged.columns:
-            idcus_series = df_merged['id_cus_pay']
-        else:
-            idcus_series = df_merged.get('id_cus')
-            logger.warning("⚠️ id_cus_pay not found; falling back to id_cus from plan")
-
-        # 1) ฟังก์ชัน normalize ที่ทนทาน
-        def to_str(s):
-            return s.astype(str).str.strip()
-
-        def norm_lower(s):
-            return to_str(s).str.lower()
-
-        # true-ish: รองรับหลายรูปแบบ + ตัวเลขทุกค่าที่ > 0 จะถือเป็น True
+        # ===== goverment_type_text normalization (ย่อ) =====
+        def to_str(s): return s.astype(str).str.strip()
+        def norm_lower(s): return to_str(s).str.lower()
         def to_bool(s: pd.Series) -> pd.Series:
             s_str = norm_lower(s)
             truthy = {'1','y','yes','true','t','ใช่','true-ish','ok'}
             falsy  = {'0','n','no','false','f','ไม่','none','null','na',''}
-            # ลองตีความตัวเลข > 0 เป็น True
             as_num = pd.to_numeric(s_str, errors='coerce')
             num_truth = as_num.fillna(0) > 0
             cat_truth = s_str.isin(truthy)
             cat_false = s_str.isin(falsy)
-            # True ถ้าเป็น truthy หรือเป็นตัวเลข > 0
-            # False ถ้าเป็น falsy ชัดเจน
-            # ที่เหลือใช้ num_truth เป็นหลัก
             out = num_truth | cat_truth
             out = out & (~cat_false)
             return out.fillna(False)
 
-        # 2) เตรียมซีรีส์
-        is_go_raw = df_merged.get('isGovernmentOfficer', '')
-        gpf_raw   = df_merged.get('status_gpf', '')
-        is_sp_raw = df_merged.get('is_special_campaign', '')
-        camp_raw  = df_merged.get('current_campaign', '')
-        newin_raw = df_merged.get('newinsurance', '')
-        idcus_raw = idcus_series if idcus_series is not None else pd.Series('', index=df_merged.index)
-
-        is_go_f = to_bool(is_go_raw)
-        is_sp_f = to_bool(is_sp_raw)
-
-        gpf_l   = norm_lower(gpf_raw)
-        # นับว่าเป็น "yes" ถ้าเข้ากลุ่มเหล่านี้ (เพิ่มคำไทย/รูปแบบอื่น ๆ ที่พบ)
-        gpf_yes = gpf_l.isin({'yes','y','true','t','1','ใช่','gpf','กบข'})
-        # (กันเคสอื่น ๆ ที่เป็นบวกด้วย)
-        gpf_yes = gpf_yes | (pd.to_numeric(gpf_l, errors='coerce').fillna(0) > 0)
-
-        camp_l  = norm_lower(camp_raw)
-        newin_s = to_str(newin_raw)
-        idcus_s = to_str(idcus_raw)
-
-        # ธนชาตประกันภัย: ใช้ contains แบบหยวน (กันเว้นวรรค/ตัวสะกด)
-        # ถ้าในระบบมีสะกดอื่น ๆ เพิ่มเติม เช่น "ธนชาต ประกันภัย", "ธนชาต-ประกันภัย" ให้เติม pattern ตรงนี้ได้
-        is_tnc = newin_s.str.contains('ธนชาต', na=False)
-
+        is_go_f = to_bool(df_merged.get('isGovernmentOfficer', ''))
+        is_sp_f = to_bool(df_merged.get('is_special_campaign', ''))
+        gpf_l   = norm_lower(df_merged.get('status_gpf', ''))
+        gpf_yes = gpf_l.isin({'yes','y','true','t','1','ใช่','gpf','กบข'}) | (pd.to_numeric(gpf_l, errors='coerce').fillna(0) > 0)
+        camp_l  = norm_lower(df_merged.get('current_campaign', ''))
+        newin_s = to_str(df_merged.get('newinsurance', ''))
+        idcus_s = to_str(df_merged.get('id_cus', pd.Series('', index=df_merged.index)))
+        is_tnc  = newin_s.str.contains('ธนชาต', na=False)
         is_lady = camp_l.eq('lady')
         is_fng  = idcus_s.str.startswith('FNG', na=False)
 
-        # 3) สร้าง mask ตามกติกา
-        m1 = is_go_f & gpf_yes & (~is_sp_f)        # 'กบข'
-        m2 = is_go_f & (~gpf_yes) & (~is_sp_f)     # 'กบข(ฟิน)'
-        m3 = is_sp_f & is_tnc & is_fng             # 'customize_tnc'
-        m4 = is_tnc & is_lady                      # 'lady'
-        m5 = is_sp_f                                # 'สู้สุดใจ'
+        m1 = is_go_f & gpf_yes & (~is_sp_f)
+        m2 = is_go_f & (~gpf_yes) & (~is_sp_f)
+        m3 = is_sp_f & is_tnc & is_fng
+        m4 = is_tnc & is_lady
+        m5 = is_sp_f
 
-        # 4) สร้างคอลัมน์ผลลัพธ์
         df_merged['goverment_type_text'] = ''
         df_merged.loc[m1, 'goverment_type_text'] = 'กบข'
         df_merged.loc[m2, 'goverment_type_text'] = 'กบข(ฟิน)'
@@ -381,81 +302,59 @@ def clean_sales_quotation_data(inputs):
         df_merged.loc[m4, 'goverment_type_text'] = 'lady'
         df_merged.loc[m5 & (df_merged['goverment_type_text'] == ''), 'goverment_type_text'] = 'สู้สุดใจ'
 
-        # 5) DEBUG: เช็คจำนวนที่เข้าเงื่อนไข + ตัวอย่างแถว
-        print("m1 กบข", m1.sum(), "rows")
-        print("m2 กบข(ฟิน)", m2.sum(), "rows")
-        print("m3 customize_tnc", m3.sum(), "rows")
-        print("m4 lady", m4.sum(), "rows")
-        print("m5 สู้สุดใจ", m5.sum(), "rows")
+        # ====== ใช้ราคา: มี order_number -> ใช้ order, ถ้าไม่มี -> ใช้ pay ======
+        def _normalize_digits(s: str) -> str:
+            # แปลงเลขไทยเป็นอารบิก + ตัดอักขระที่ไม่ใช่ 0-9 . -
+            if s is None:
+                return ''
+            s = str(s)
+            s = s.translate(str.maketrans('๐๑๒๓๔๕๖๗๘๙', '0123456789'))
+            s = s.replace(',', '').strip()
+            s = re.sub(r'[^0-9.\-]', '', s)
+            return s
 
-        # ถ้าเงื่อนไขไหนยัง 0 ให้พิมพ์ distribution ของค่าที่เกี่ยว
-        if m1.sum() == 0 or m2.sum() == 0 or m5.sum() == 0:
-            print("📊 isGovernmentOfficer (top):")
-            print("📊 status_gpf (top):")
-            print("📊 is_special_campaign (top):")
+        def _to_num(series: pd.Series) -> pd.Series:
+            return pd.to_numeric(series.astype(str).map(_normalize_digits), errors='coerce')
 
-        if m3.sum() == 0 or m4.sum() == 0:
-            print("📊 newinsurance (top):")
-            print("📊 current_campaign (top):")
-            if 'id_cus_pay' in df_merged.columns:
-                print("📊 id_cus_pay prefix (top):")
+        has_order = (
+            df_merged['order_number'].astype(str).str.strip().replace({'': np.nan, '0': np.nan}).notna()
+            if 'order_number' in df_merged.columns else pd.Series(False, index=df_merged.index)
+        )
 
-        # แสดงตัวอย่าง 5 แถวที่ "เกือบ" เข้า (ช่วยไล่ดูค่าจริง)
-        near_tnc = df_merged[newin_s.str.contains('ธนชาต', na=False)].head(5)
-        print("🔎 sample rows with newinsurance contains 'ธนชาต':\n", near_tnc[['quo_num','newinsurance','current_campaign','is_special_campaign','id_cus','id_cus_pay']].head(5))
+        # ตัวเลขจากฝั่ง order / pay
+        ord_ins = _to_num(df_merged.get('show_price_ins'))
+        ord_prb = _to_num(df_merged.get('show_price_prb'))
+        ord_tot = _to_num(df_merged.get('show_price_total'))
 
+        pay_ins = _to_num(df_merged.get('show_price_ins_pay'))
+        pay_prb = _to_num(df_merged.get('show_price_prb_pay'))
+        pay_tot = _to_num(df_merged.get('show_price_total_pay'))
 
-        # ===== (2) ล้างคอมม่า/ช่องว่างก่อนแปลงตัวเลข (เฉพาะคอลัมน์เงิน) =====
-        money_cols = [
-            'show_price_ins','show_price_prb','show_price_total',
-            'show_price_check','show_price_service','show_price_taxcar','show_price_fine',
-            'show_price_addon','show_price_payment','distax','show_ems_price','show_discount_ins',
-            'discount_mkt','discount_government','discount_government_fin','discount_government_ins',
-            'coupon_addon'
-        ]
-        for c in money_cols:
-            if c in df_merged.columns:
-                df_merged[c] = (
-                    df_merged[c]
-                    .astype(str)
-                    .str.replace(',', '', regex=False)
-                    .str.strip()
-                    .replace({'': np.nan, 'nan': np.nan, 'None': np.nan, 'null': np.nan})
-                )
+        df_merged['ins_amount']   = np.where(has_order, ord_ins, pay_ins)
+        df_merged['prb_amount']   = np.where(has_order, ord_prb, pay_prb)
+        df_merged['total_amount'] = np.where(has_order, ord_tot, pay_tot)
 
-        # override จาก order ก่อน pay
-        override_pairs = [
-            ("show_price_ins","show_price_ins_pay"),
-            ("show_price_prb", "show_price_prb_pay"),
-            ("show_price_total", "show_price_total_pay"),
-        ]
-        for base_col, pay_col in override_pairs:
-            base_exists = base_col in df_merged.columns
-            pay_exists = pay_col in df_merged.columns
-            if base_exists and pay_exists:
-                df_merged[base_col] = pd.to_numeric(df_merged[base_col], errors='coerce').combine_first(
-                    pd.to_numeric(df_merged[pay_col], errors='coerce')
-                )
-                df_merged.drop(columns=[pay_col], inplace=True)
-            elif (not base_exists) and pay_exists:
-                df_merged[base_col] = pd.to_numeric(df_merged[pay_col], errors='coerce')
-                df_merged.drop(columns=[pay_col], inplace=True)
+        # Debug: แถวที่มี order แต่ค่าเป็น NaN (ช่วยไล่ NULL)
+        try:
+            anom = df_merged[has_order & (df_merged['ins_amount'].isna() | df_merged['prb_amount'].isna() | df_merged['total_amount'].isna())]
+            if len(anom):
+                logger.warning("⚠️ มี order_number แต่บาง amount เป็น NaN: %d แถว (ตัวอย่าง 5)", len(anom))
+                logger.warning("%s", anom[['quo_num','order_number','show_price_ins','show_price_prb','show_price_total']].head(5).to_dict('records'))
+        except Exception as _e:
+            logger.debug("skip anom debug: %s", _e)
 
+        # ทำความสะอาดเบอร์โทร
         if 'tel' in df_merged.columns:
             df_merged['tel'] = (
-                df_merged['tel']
-                .astype(str)              # แปลงเป็น string
-                .str.strip()              # ตัด space หน้า-หลัง
-                .str.replace(r'\D+', '', regex=True)  # ลบทุกตัวที่ไม่ใช่ตัวเลข
-                .replace({'': None})      # ถ้าไม่มีตัวเลขเลย -> None
+                df_merged['tel'].astype(str).str.strip().str.replace(r'\D+', '', regex=True).replace({'': None})
             )
 
-        # ทำความสะอาดทั่วไป
+        # ล้างค่าว่างทั่วไป
         df_merged = df_merged.replace(['nan', 'NaN', 'null', ''], np.nan)
         df_merged = df_merged.replace(r'^\s*$', np.nan, regex=True)
         df_merged = df_merged.where(pd.notnull(df_merged), None)
 
-        # rename
+        # ตั้งชื่อคอลัมน์ปลายทาง (ไม่ map show_price_* → เพราะคำนวณแล้วข้างบน)
         column_mapping = {
             "quo_num": "quotation_num",
             "datestart": "quotation_date",
@@ -466,9 +365,6 @@ def clean_sales_quotation_data(inputs):
             "status_gpf": "goverment_type",
             "quo_num_old": "quotation_num_old",
             "numpay": "installment_number",
-            "show_price_ins": "ins_amount",
-            "show_price_prb": "prb_amount",
-            "show_price_total": "total_amount",
             "show_price_check": "show_price_check",
             "show_price_service": "service_price",
             "show_price_taxcar": "tax_car_price",
@@ -491,23 +387,27 @@ def clean_sales_quotation_data(inputs):
 
         df_merged['local_broker'] = np.where(
             df_merged['chanel_key'].astype(str).str.strip().eq('WEB-LOCAL'),
-            'Local Broker',
-            ''
+            'Local Broker', ''
         )
 
-        # ===== (4) กันพลาดกรณี merge แล้วมีหลายบรรทัด (ควรเหลือน้อยจาก SQL แล้ว) =====
-        # จัดลำดับให้บรรทัดที่ "ตัวเลขครบ" และ "order_time ล่าสุด" มาก่อน จากนั้นค่อย drop_duplicates
+        # เตรียมคอลัมน์จำนวนเงินอื่น ๆ ให้ครบ
         amt_cols_after = ['ins_amount','prb_amount','total_amount','service_price','tax_car_price',
                           'overdue_fine_price','price_addon','payment_amount','tax_amount','ems_amount']
         for c in amt_cols_after:
             if c not in df_merged.columns:
                 df_merged[c] = np.nan
-        df_merged['_nonnull_amt'] = pd.DataFrame({c: pd.to_numeric(df_merged[c], errors='coerce') for c in amt_cols_after}).notna().sum(axis=1)
 
-        sort_key = pd.to_datetime(df_merged.get('order_time'), errors='coerce')
-        df_merged['_sort_key'] = sort_key
-        df_merged.sort_values(by=['quotation_num','_nonnull_amt','_sort_key'], ascending=[True, False, False], inplace=True)
-        df_merged = df_merged.drop_duplicates(subset=['quotation_num'], keep='first').drop(columns=['_nonnull_amt','_sort_key'])
+        # จัดลำดับและ dedup PK
+        df_merged['_nonnull_amt'] = pd.DataFrame({c: pd.to_numeric(df_merged[c], errors='coerce')
+                                                  for c in amt_cols_after}).notna().sum(axis=1)
+        df_merged['_sort_plan'] = pd.to_datetime(df_merged.get('quotation_date') if 'quotation_date' in df_merged.columns else df_merged.get('datestart'), errors='coerce')
+        df_merged['_sort_pay']  = pd.to_datetime(df_merged.get('transaction_date') if 'transaction_date' in df_merged.columns else df_merged.get('datestart_pay'), errors='coerce')
+        df_merged['_sort_ord']  = pd.to_datetime(df_merged.get('order_time') if 'order_time' in df_merged.columns else df_merged.get('datekey'), errors='coerce')
+
+        df_merged.sort_values(by=['quotation_num','_nonnull_amt','_sort_plan','_sort_pay','_sort_ord'],
+                              ascending=[True, False, False, False, False], inplace=True)
+        df_merged = df_merged.drop_duplicates(subset=['quotation_num'], keep='first') \
+                             .drop(columns=['_nonnull_amt','_sort_plan','_sort_pay','_sort_ord'])
 
         # sale_team
         def assign_sale_team(row):
@@ -555,23 +455,21 @@ def clean_sales_quotation_data(inputs):
 
         cols_to_drop = [
             'id_cus','type_car','chanel_key','special_package','special_package_health','type',
-            'display_permission', 'name', 'lastname', 'company', 'type_insurance', 'fin_new_group', 
-            'current_campaign', 'newinsurance','cuscode', 'id_cus_pay'
+            'display_permission','name','lastname','company','type_insurance','fin_new_group',
+            'current_campaign','newinsurance','cuscode','id_cus_pay'
         ]
         df_merged.drop(columns=[c for c in cols_to_drop if c in df_merged.columns], inplace=True)
 
-        # ✅ แปลงวันที่ (เก็บเป็น yyyymmdd string แล้วค่อย cast Int64 ได้)
-        date_columns = ['transaction_date', 'order_time', 'quotation_date']
-        for col in date_columns:
+        # ✅ แปลงวันที่เก็บเป็น yyyymmdd แล้วค่อย cast Int64
+        for col in ['transaction_date','order_time','quotation_date']:
             if col in df_merged.columns:
                 df_merged[col] = pd.to_datetime(df_merged[col], errors='coerce').dt.strftime('%Y%m%d')
 
         # ✅ installment_number map
         if 'installment_number' in df_merged.columns:
-            installment_mapping = {'0': '1', '03': '3', '06': '6', '08': '8'}
-            df_merged['installment_number'] = df_merged['installment_number'].replace(installment_mapping)
+            df_merged['installment_number'] = df_merged['installment_number'].replace({'0':'1','03':'3','06':'6','08':'8'})
 
-        # ✅ สร้าง status
+        # ✅ สร้าง status (เหมือนเดิม)
         def create_status_mapping():
             return {
                 ('wait', ''): '1',
@@ -599,10 +497,7 @@ def clean_sales_quotation_data(inputs):
         status_mapping = create_status_mapping()
 
         df_merged['status_key'] = df_merged.apply(
-            lambda row: (
-                str(row.get('status_fssp') or '').strip(),
-                str(row.get('status_fsp') or '').strip()
-            ), axis=1
+            lambda row: (str(row.get('status_fssp') or '').strip(), str(row.get('status_fsp') or '').strip()), axis=1
         )
         df_merged['status'] = df_merged['status_key'].map(status_mapping)
         df_merged.loc[df_merged['status_key'].apply(lambda x: 'cancel' in x), 'status'] = 'cancel'
@@ -610,19 +505,17 @@ def clean_sales_quotation_data(inputs):
 
         if 'status_fo' in df_merged.columns:
             fo_mask = df_merged['status_fo'].notna()
-            df_merged.loc[fo_mask, 'status'] = df_merged.loc[fo_mask, 'status_fo'].apply(
-                lambda x: 'cancel' if x == '88' else x
-            )
+            df_merged.loc[fo_mask, 'status'] = df_merged.loc[fo_mask, 'status_fo'].apply(lambda x: 'cancel' if x == '88' else x)
             df_merged.drop(columns=['status_fo'], inplace=True)
 
         for c in ['status_fssp', 'status_fsp', 'status_key']:
             if c in df_merged.columns:
                 df_merged.drop(columns=[c], inplace=True)
 
-        # ✅ ลบข้อมูลซ้ำ (เหลือน้อยลงมากจากการจัด sort แล้ว)
+        # ✅ ลบข้อมูลซ้ำ
         df_merged.drop_duplicates(subset=['quotation_num'], keep='first', inplace=True)
 
-        # ✅ แปลงคอลัมน์ตัวเลข (เงินเป็น float; อย่าแคสต์เป็น Int64)
+        # ✅ แปลง numeric
         numeric_columns = [
             'installment_number', 'show_price_check', 'ems_amount', 'service_price',
             'ins_amount', 'prb_amount', 'total_amount', 'tax_car_price', 'overdue_fine_price',
@@ -631,21 +524,12 @@ def clean_sales_quotation_data(inputs):
         ]
         for col in numeric_columns:
             if col in df_merged.columns:
-                df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce')
-                df_merged[col] = df_merged[col].replace([np.inf, -np.inf], None)
+                df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce').replace([np.inf, -np.inf], None)
 
-        # ✅ แคสต์ Int64 เฉพาะคอลัมน์ "วันที่/ตัวนับ" จริงๆ
-        int8_cols = [
-            'transaction_date', 'order_time', 'installment_number', 'show_price_check', 'quotation_date'
-        ]
-        for col in int8_cols:
+        # ✅ cast Int64 เฉพาะคอลัมน์วันที่/ตัวนับ
+        for col in ['transaction_date','order_time','installment_number','show_price_check','quotation_date']:
             if col in df_merged.columns:
                 df_merged[col] = pd.to_numeric(df_merged[col], errors='coerce').astype('Int64')
-
-        # if 'status_detail' in df_merged.columns:
-        #     df_merged = df_merged[
-        #         ~df_merged['status_detail'].astype(str).str.contains(r'(ทดสอบระบบ|เทสระบบ)', na=False)
-        #     ]
 
         if 'status_detail' in df_merged.columns:
             before = len(df_merged)
@@ -653,6 +537,12 @@ def clean_sales_quotation_data(inputs):
             df_merged = df_merged.loc[~mask_test].copy()
             removed = before - len(df_merged)
             logger.info(f"🧪 ตัดแถว test (ทดสอบระบบ/เทสระบบ) ออก {removed:,} แถว")
+
+        # 🧼 เก็บบ้าน: ไม่ใช้คอลัมน์ต้นทางราคาแล้ว ลบทิ้ง (ถ้ายังเหลือ)
+        for c in ['show_price_ins','show_price_prb','show_price_total',
+                  'show_price_ins_pay','show_price_prb_pay','show_price_total_pay']:
+            if c in df_merged.columns:
+                df_merged.drop(columns=c, inplace=True)
 
         logger.info("✅ การทำความสะอาดข้อมูลเสร็จสิ้น")
         return df_merged
@@ -662,12 +552,13 @@ def clean_sales_quotation_data(inputs):
         raise
 
 @op
-def load_sales_quotation_data(df: pd.DataFrame):
+def load_sales_quotation_data(df: pd.DataFrame, batch_size: int = 10_000):
     table_name = 'fact_sales_quotation'
     pk_column = 'quotation_num'
 
-    df = df[~df[pk_column].duplicated(keep='first')].copy()
+    # --- prepare dataframe ---
     df = df[df[pk_column].notna()].copy()
+    df = df[~df[pk_column].duplicated(keep='last')].copy()
     if df.empty:
         print("⚠️ No valid data to process")
         return
@@ -675,50 +566,89 @@ def load_sales_quotation_data(df: pd.DataFrame):
     table = Table(table_name, MetaData(), autoload_with=target_engine)
     table_cols = [c.name for c in table.columns]
 
+    # ✅ ตรวจ schema ว่ามีคอลัมน์จำนวนเงินปลายทางครบ
+    must_have = {'ins_amount','prb_amount','total_amount'}
+    missing = must_have - set(table_cols)
+    if missing:
+        raise RuntimeError(f"Target table missing columns: {missing} (ตรวจ schema ของ {table_name})")
+
+    if pk_column not in df.columns:
+        raise ValueError(f"Primary key '{pk_column}' missing in dataframe")
+
     valid_cols = [c for c in df.columns if c in table_cols]
-    if pk_column not in valid_cols:
-        raise ValueError(f"Primary key '{pk_column}' not present in dataframe columns: {valid_cols}")
-
     df = df[valid_cols].copy()
-
-    print(f"📊 Upserting rows: {len(df)}")
-    print(f"🔍 Columns used: {valid_cols}")
 
     def to_db_value(v):
         if pd.isna(v) or v is pd.NaT or v == '':
             return None
         return v
 
-    now_ts = pd.Timestamp.now()
-    records = []
-    for _, row in df.iterrows():
-        rec = {col: to_db_value(row.get(col)) for col in valid_cols}
-        if 'create_at' in table_cols and 'create_at' not in rec:
-            rec['create_at'] = now_ts
-        if 'update_at' in table_cols and 'update_at' not in rec:
-            rec['update_at'] = now_ts
-        records.append(rec)
+    # plan vs coalesce cols
+    plan_columns = {
+        'quotation_num','quotation_date','rights_government','goverment_type',
+        'quotation_num_old','type_insurance','plan_type','is_government_officer',
+        'sale_team','goverment_type_text','local_broker','status','customer_name',
+        'tel','big_agent','dna_fin'
+    }
 
     insert_stmt = pg_insert(table)
+
     update_columns = {}
-    for c in table.columns:
-        col = c.name
+    for col in table_cols:
         if col in [pk_column, 'create_at', 'update_at']:
             continue
-        update_columns[col] = func.coalesce(insert_stmt.excluded[col], getattr(table.c, col))
+        if col in plan_columns:
+            update_columns[col] = insert_stmt.excluded[col]  # overwrite (แม้จะ NULL)
+        else:
+            update_columns[col] = func.coalesce(insert_stmt.excluded[col], getattr(table.c, col))
 
     if 'update_at' in table_cols:
         update_columns['update_at'] = func.now()
 
-    upsert_stmt = insert_stmt.on_conflict_do_update(
-        index_elements=[pk_column],
-        set_=update_columns
+    # อัปเดตเฉพาะเมื่อค่าเปลี่ยนจริง ๆ เพื่อลด write load
+    comparable_cols = [c for c in update_columns.keys() if c in table_cols]
+    distinct_checks = [getattr(table.c, c).is_distinct_from(insert_stmt.excluded[c]) for c in comparable_cols]
+    where_changed = or_(*distinct_checks) if distinct_checks else None
+
+    # ใช้ RETURNING (xmax = 0) AS inserted เพื่อนับ insert vs update
+    upsert_stmt = (
+        insert_stmt.on_conflict_do_update(
+            index_elements=[pk_column],
+            set_=update_columns,
+            where=where_changed
+        )
+        .returning(table.c[pk_column], text("(xmax = 0) AS inserted"))
     )
 
-    with target_engine.begin() as conn:
-        conn.execute(upsert_stmt, records)
+    total = len(df)
+    print(f"📦 Preparing to upsert {total:,} rows (batch_size={batch_size})")
 
-    print("✅ Upsert (insert/update) completed.")
+    insert_count = 0
+    update_count = 0
+
+    with target_engine.begin() as conn:
+        rows_iter = (df.iloc[i:i+batch_size] for i in range(0, total, batch_size))
+        for i, chunk in enumerate(rows_iter, start=1):
+            now_ts = pd.Timestamp.now()
+            records = []
+            for _, row in chunk.iterrows():
+                rec = {col: to_db_value(row.get(col)) for col in chunk.columns}
+                if 'create_at' in table_cols and 'create_at' not in rec:
+                    rec['create_at'] = now_ts
+                if 'update_at' in table_cols and 'update_at' not in rec:
+                    rec['update_at'] = now_ts
+                records.append(rec)
+
+            res = conn.execute(upsert_stmt, records)
+            returned = res.fetchall()
+            ins = sum(1 for _, inserted in returned if inserted)
+            upd = len(returned) - ins
+            insert_count += ins
+            update_count += upd
+
+            print(f"✅ Batch {i}: upserted={len(returned):,} (insert={ins:,}, update={upd:,})")
+
+    print(f"🎯 Done. Total = {insert_count+update_count:,} | insert={insert_count:,} | update={update_count:,}")
 
 @job
 def fact_sales_quotation_etl():
@@ -726,21 +656,20 @@ def fact_sales_quotation_etl():
     df_clean = clean_sales_quotation_data(data)
     load_sales_quotation_data(df_clean)
 
-# if __name__ == "__main__":
-#     try:
-#         logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
-#         df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
+if __name__ == "__main__":
+    try:
+        logger.info("🚀 เริ่มการประมวลผล fact_sales_quotation...")
+        df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag = extract_sales_quotation_data()
+        df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
 
-#         df_clean = clean_sales_quotation_data((df_plan, df_order, df_pay, df_risk, df_pa, df_health, df_wp, df_dna, df_flag))
+        # output_path = "fact_sales_quotation.xlsx"
+        # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+        # print(f"💾 Saved to {output_path}")
 
-#         # output_path = "fact_sales_quotation.xlsx"
-#         # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#         # print(f"💾 Saved to {output_path}")
-
-#         load_sales_quotation_data(df_clean)
-#         logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
-#     except Exception as e:
-#         logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
-#         import traceback
-#         traceback.print_exc()
-#         raise
+        load_sales_quotation_data(df_clean)
+        logger.info("🎉 completed! Data upserted to fact_sales_quotation.")
+    except Exception as e:
+        logger.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
+        import traceback
+        traceback.print_exc()
+        raise

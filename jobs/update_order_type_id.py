@@ -279,22 +279,20 @@ def join_to_dim_order_type(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.Da
 # =========================
 @op
 def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
-    # 1) ดึงเฉพาะ quotation ที่ fact ยังว่างจาก DB
-    with target_engine.begin() as tconn:
-        facts = pd.read_sql(
-            text("SELECT quotation_num FROM fact_sales_quotation WHERE order_type_id IS NULL"),
-            tconn
-        )
-
-    need = pd.merge(df_pairs, facts, on="quotation_num", how="inner")
-    need = need[need["order_type_id"].notna()].drop_duplicates(subset=["quotation_num"])
+    # ใช้ผล join ทั้งหมดที่มี order_type_id (ไม่จำกัดเฉพาะ NULL)
+    need = (
+        df_pairs
+        .dropna(subset=["order_type_id"])
+        .drop_duplicates(subset=["quotation_num"])
+        .copy()
+    )
 
     if need.empty:
         print("⚠️ No rows to update.")
         return 0
 
-    # 2) Stage temp + 3) Update + 4) Drop ใน transaction เดียว
     with target_engine.begin() as conn:
+        # 1) Stage temp
         need.to_sql(
             "dim_order_type_temp",
             con=conn,
@@ -303,16 +301,21 @@ def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
             method="multi",
             chunksize=20000
         )
+        # ดัชนีช่วยเร่ง JOIN/UPDATE
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_order_type_temp_q ON dim_order_type_temp(quotation_num)"))
+
         print(f"✅ staged dim_order_type_temp: {len(need):,} rows")
 
+        # 2) Update ทั้งกรณี NULL และกรณีมีค่าแต่ต่างจากค่าใหม่
         updated = conn.execute(text("""
-            UPDATE fact_sales_quotation fsq
+            UPDATE fact_sales_quotation AS fsq
             SET order_type_id = dc.order_type_id
-            FROM dim_order_type_temp dc
+            FROM dim_order_type_temp AS dc
             WHERE fsq.quotation_num = dc.quotation_num
-                AND fsq.order_type_id IS DISTINCT FROM dc.order_type_id;
+              AND fsq.order_type_id IS DISTINCT FROM dc.order_type_id;
         """)).rowcount or 0
 
+        # 3) Drop temp
         conn.execute(text("DROP TABLE IF EXISTS dim_order_type_temp"))
         print("🗑️ dropped dim_order_type_temp")
 
@@ -333,10 +336,10 @@ def update_order_type_id_on_fact():
 # =========================
 # ▶️ Local run (optional)
 # =========================
-# if __name__ == "__main__":
-#     m = extract_merge_sources()
-#     k = transform_build_keys(m)
-#     d = fetch_dim_order_type()
-#     p = join_to_dim_order_type(k, d)
-#     updated = upsert_order_type_ids(p)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    m = extract_merge_sources()
+    k = transform_build_keys(m)
+    d = fetch_dim_order_type()
+    p = join_to_dim_order_type(k, d)
+    updated = upsert_order_type_ids(p)
+    print(f"🎉 done. updated rows = {updated}")

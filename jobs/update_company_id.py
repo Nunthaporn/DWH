@@ -118,8 +118,8 @@ def update_company_id_job():
 
 
 # ============== OPTIONAL LOCAL RUN ==============
-# if __name__ == "__main__":
-#     dfs = extract_company_sources()
-#     temp = build_company_temp(dfs)
-#     update_fact_company_id(temp)
-#     print("🎉 completed! Updated company_id in fact_sales_quotation.")
+if __name__ == "__main__":
+    dfs = extract_company_sources()
+    temp = build_company_temp(dfs)
+    update_fact_company_id(temp)
+    print("🎉 completed! Updated company_id in fact_sales_quotation.")

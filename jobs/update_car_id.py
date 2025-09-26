@@ -147,17 +147,20 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
         print("⚠️ No mappings to upsert.")
         return 0
 
-    # คัดเฉพาะ quotation ที่มีอยู่จริงใน fact
+    # คัดเฉพาะ quotation ที่มีอยู่จริงใน fact (ไม่จำกัดเฉพาะ NULL → อัปเดตทับได้)
     with target_engine.begin() as conn:
         df_fact = pd.read_sql(text("SELECT quotation_num FROM fact_sales_quotation"), conn)
 
-    need = pd.merge(df_map, df_fact, on="quotation_num", how="inner").drop_duplicates(subset=["quotation_num"])
+    need = (
+        pd.merge(df_map, df_fact, on="quotation_num", how="inner")
+        .drop_duplicates(subset=["quotation_num"])
+        .copy()
+    )
     if need.empty:
         print("⚠️ No rows matched existing facts.")
         return 0
 
-    # sanitize types
-    need = need.copy()
+    # sanitize
     need["quotation_num"] = normalize_str(need["quotation_num"])
     need["car_id"] = pd.to_numeric(need["car_id"], errors="coerce").astype("Int64")
     need = need.dropna(subset=["quotation_num", "car_id"])
@@ -166,8 +169,8 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
         print("⚠️ No rows after cleaning.")
         return 0
 
-    # Stage → Update → Drop
     with target_engine.begin() as conn:
+        # Stage temp
         need.to_sql(
             "dim_car_temp",
             con=conn,
@@ -176,24 +179,26 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
             method="multi",
             chunksize=20000
         )
-        # index ช่วยเร่งความเร็ว
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_car_temp_quo ON dim_car_temp(quotation_num)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_car_temp_carid ON dim_car_temp(car_id)"))
         print(f"✅ staged dim_car_temp: {len(need):,} rows")
 
+        # อัปเดตทั้งกรณี NULL และกรณีมีค่าแต่ต่างจากค่าใหม่
         updated = conn.execute(text("""
-            UPDATE fact_sales_quotation fsq
+            UPDATE fact_sales_quotation AS fsq
             SET car_id = t.car_id
-            FROM dim_car_temp t
+            FROM dim_car_temp AS t
             WHERE fsq.quotation_num = t.quotation_num
-              AND fsq.car_id IS DISTINCT FROM t.car_id
+              AND fsq.car_id IS DISTINCT FROM t.car_id;
         """)).rowcount or 0
 
+        # Drop temp
         conn.execute(text("DROP TABLE IF EXISTS dim_car_temp"))
         print("🗑️ dropped dim_car_temp")
 
     print(f"✅ fact_sales_quotation updated: {updated} rows")
     return updated
+
 
 # =========================
 # 🧱 DAGSTER JOB
@@ -208,9 +213,9 @@ def update_car_id_on_fact():
 # =========================
 # ▶️ LOCAL RUN (optional)
 # =========================
-# if __name__ == "__main__":
-#     k = extract_and_clean_vin_keys()
-#     d = fetch_dim_car_min()
-#     m = build_car_mapping(k, d)
-#     updated = upsert_car_ids(m)
-#     print(f"🎉 done. updated rows = {updated}")
+if __name__ == "__main__":
+    k = extract_and_clean_vin_keys()
+    d = fetch_dim_car_min()
+    m = build_car_mapping(k, d)
+    updated = upsert_car_ids(m)
+    print(f"🎉 done. updated rows = {updated}")
