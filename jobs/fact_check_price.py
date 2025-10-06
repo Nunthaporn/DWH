@@ -161,6 +161,9 @@ def _bkk_today_range():
 def extract_check_price_data() -> pd.DataFrame:
     start, end = _bkk_today_range()
 
+    # start = '2025-01-01 00:00:00'
+    # end = '2025-10-31 25:59:59'
+
     q_logs = text("""
         SELECT cuscode, brand, series, subseries, year, no_car, type, repair_type,
                assured_insurance_capital1, camera, addon, quo_num, create_at,
@@ -367,8 +370,17 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
     df_combined['yearcar'] = pd.to_numeric(df_combined['yearcar'], errors='coerce').astype('Int64')
     df_combined['id_cus'] = df_combined['id_cus'].astype(str)
 
-    # แปลง NaN -> None อีกครั้งเพื่อความชัวร์ก่อนคืนค่า
+    # --- แปลง NaN -> None อีกครั้งเพื่อความชัวร์ก่อนคืนค่า ---
     df_combined = df_combined.replace({np.nan: None})
+
+    # --- ลบคอลัมน์ที่ไม่ต้องการก่อนส่งออก ---
+    drop_cols = ['results', 'selected']
+    for c in drop_cols:
+        if c in df_combined.columns:
+            df_combined.drop(columns=[c], inplace=True)
+
+    # --- ตรวจสอบคอลัมน์สุดท้ายก่อนส่งออก ---
+    print("🧾 Columns before load:", df_combined.columns.tolist())
 
     return df_combined
 
@@ -376,45 +388,24 @@ def clean_check_price_data(raw: pd.DataFrame) -> pd.DataFrame:
 def load_check_price_data(df: pd.DataFrame):
     try:
         table_name = 'fact_check_price'
-        conflict_cols = ['check_price_id']
-
-        # เตรียมตาราง
         tbl = Table(table_name, MetaData(), autoload_with=target_engine)
 
-        # ทำความสะอาดก่อน insert
+        # ✅ ลบคอลัมน์ที่ไม่มีในตาราง
+        valid_cols = set(tbl.columns.keys())
+        df = df[[c for c in df.columns if c in valid_cols]]
+
         df = df.replace({np.nan: None})
         records = df.to_dict(orient='records')
 
-        updatable_cols = [
-            c.name for c in tbl.columns
-            if c.name not in conflict_cols + ['create_at', 'update_at']
-        ]
-
         if not records:
-            print("ℹ️ No records to upsert.")
+            print("ℹ️ No records to insert.")
             return
 
         with target_engine.begin() as conn:
-            # สร้าง insert statement
-            stmt = pg_insert(tbl).values(records)
-
-            # SET ส่วนที่ต้องอัปเดต (จาก EXCLUDED)
-            set_mapping = {c: getattr(stmt.excluded, c) for c in updatable_cols}
-            set_mapping['update_at'] = func.now()
-
-            # WHERE เฉพาะเมื่อค่า “ต่างจริง”
-            left_tuple = tuple_(*(getattr(tbl.c, c) for c in updatable_cols))
-            right_tuple = tuple_(*(getattr(stmt.excluded, c) for c in updatable_cols))
-
-            stmt = stmt.on_conflict_do_update(
-                index_elements=conflict_cols,
-                set_=set_mapping,
-                where=left_tuple.is_distinct_from(right_tuple)
-            )
-
+            stmt = tbl.insert().values(records)
             conn.execute(stmt)
 
-        print("✅ Upsert completed (update_at เฉพาะแถวที่เปลี่ยนจริง)")
+        print(f"✅ Insert completed: {len(records)} rows inserted (duplicates allowed).")
     except Exception as e:
         print(f"❌ Error in load_check_price_data: {e}")
         raise
@@ -423,20 +414,20 @@ def load_check_price_data(df: pd.DataFrame):
 def fact_check_price_etl():
     load_check_price_data(clean_check_price_data(extract_check_price_data()))
 
-# if __name__ == "__main__":
-#     df_raw = extract_check_price_data()
-#     # print("✅ Extracted logs:", df_raw.shape)
+if __name__ == "__main__":
+    df_raw = extract_check_price_data()
+    # print("✅ Extracted logs:", df_raw.shape)
 
-#     df_clean = clean_check_price_data(df_raw)
-# #     print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_check_price_data(df_raw)
+#     print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "fact_check_price.csv"
-#     # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_check_price.csv"
+    # df_clean.to_csv(output_path, index=False, encoding='utf-8-sig')
+    # print(f"💾 Saved to {output_path}")
 
-#     # output_path = "fact_check_price1.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "fact_check_price1.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_check_price_data(df_clean)
-#     print("🎉 completed! Data upserted to fact_check_price.")
+    load_check_price_data(df_clean)
+    print("🎉 completed! Data upserted to fact_check_price.")

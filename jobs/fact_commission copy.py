@@ -105,8 +105,8 @@ target_engine = create_engine(
 @op
 def extract_commission_data():
 
-    start_dt = '2025-01-01 00:00:00'
-    end_dt = '2025-09-31 23:59:59'
+    start_dt = '2025-09-01 00:00:00'
+    end_dt = '2025-10-31 23:59:59'
 
     # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Time window (TH): {start_dt} → {end_dt}")
@@ -328,7 +328,7 @@ def load_commission_data(df: pd.DataFrame):
     from sqlalchemy.exc import OperationalError
     import time
 
-    table_name = 'fact_commission_temp'
+    table_name = 'fact_commission'
     pk_column = 'quotation_num'
     MAX_RETRIES = 3
     RETRY_DELAY = 2  # seconds

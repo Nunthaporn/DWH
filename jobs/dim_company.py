@@ -275,16 +275,16 @@ def load_to_company(df: pd.DataFrame):
 def dim_company_etl():
     load_to_company(clean_company_data(extract_company_data()))
 
-# if __name__ == "__main__":
-#     df_row = extract_company_data()
-#     # print("✅ Extracted logs:", df_row.shape)
+if __name__ == "__main__":
+    df_row = extract_company_data()
+    # print("✅ Extracted logs:", df_row.shape)
 
-#     df_clean = clean_company_data((df_row))
-#     # print("✅ Cleaned columns:", df_clean.columns)
+    df_clean = clean_company_data((df_row))
+    # print("✅ Cleaned columns:", df_clean.columns)
 
-#     # output_path = "dim_company.xlsx"
-#     # df_clean.to_excel(output_path, index=False, engine='openpyxl')
-#     # print(f"💾 Saved to {output_path}")
+    # output_path = "dim_company.xlsx"
+    # df_clean.to_excel(output_path, index=False, engine='openpyxl')
+    # print(f"💾 Saved to {output_path}")
 
-#     load_to_company(df_clean)
-#     print("🎉 completed! Data upserted to dim_company.")
+    load_to_company(df_clean)
+    print("🎉 completed! Data upserted to dim_company.")

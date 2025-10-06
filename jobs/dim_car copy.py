@@ -84,7 +84,7 @@ def _today_range_th():
 def extract_car_data():
 
     start_dt = '2025-09-01 00:00:00'
-    end_dt = '2025-09-31 25:59:59'
+    end_dt = '2025-10-31 25:59:59'
 
     # start_dt, end_dt = _today_range_th()
     print(f"⏱️ Extract window (TH): {start_dt} → {end_dt}")

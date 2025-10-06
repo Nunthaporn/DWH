@@ -96,7 +96,7 @@ def extract_sales_quotation_data():
         logger.info("📦 เริ่มดึงข้อมูลจาก source databases...")
 
         start_dt = '2025-09-20 00:00:00'
-        end_dt   = '2025-09-30 00:00:00'  # ✅ ใช้ < end_dt (exclusive)
+        end_dt   = '2025-10-02 00:00:00'  # ✅ ใช้ < end_dt (exclusive)
 
         logger.info(f"⏱️ Window (TH): {start_dt} → {end_dt}")
 
