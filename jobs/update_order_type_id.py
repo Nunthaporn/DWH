@@ -163,7 +163,7 @@ def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
                 if_exists="replace",
                 index=False,
                 method="multi",
-                chunksize=20000
+                chunksize=100_000
             )
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_order_type_temp_q ON dim_order_type_temp(quotation_num)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_sales_quotation_q ON fact_sales_quotation(quotation_num)"))

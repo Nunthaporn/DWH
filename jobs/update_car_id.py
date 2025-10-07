@@ -201,7 +201,7 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
             if_exists="replace",
             index=False,
             method="multi",
-            chunksize=20000
+            chunksize=100_000
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_car_temp_quo ON dim_car_temp(quotation_num)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_car_temp_carid ON dim_car_temp(car_id)"))
