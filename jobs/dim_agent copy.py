@@ -50,21 +50,6 @@ except Exception:
 # ============ EXTRACT (today only) ============
 @op
 def extract_agent_data():
-    # คำนวณช่วงเวลา "วันนี้" ตามเวลาไทย
-    # if ZoneInfo:
-    #     tz = ZoneInfo("Asia/Bangkok")
-    #     now_th = datetime.now(tz)
-    #     start_th = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
-    #     end_th = start_th + timedelta(days=1)
-    #     start = start_th.replace(tzinfo=None)  # ตัด timezone ก่อนส่งไป DB
-    #     end = end_th.replace(tzinfo=None)
-    # else:
-    #     # fallback: สมมติ UTC+7
-    #     now = datetime.utcnow() + timedelta(hours=7)
-    #     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    #     end = start + timedelta(days=1)
-
-    # print(f"⏱️ Querying between {start} and {end}")
 
     query_main = text("""
         SELECT
