@@ -461,7 +461,7 @@ def load_installment_data(df: pd.DataFrame):
 
     total = len(df_clean)
     done = 0
-    batch_size = 20000  # ปรับได้ตามสเปค
+    batch_size = 30000  # ปรับได้ตามสเปค
 
     # ตั้งค่า session 一ครั้ง
     with target_engine.begin() as conn:

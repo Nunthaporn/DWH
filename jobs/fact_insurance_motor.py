@@ -468,7 +468,7 @@ def clean_motor_data(data_tuple):
 # -------------------------
 # 🚚 Load
 # -------------------------
-def chunker(df, size=5000):
+def chunker(df, size=10000):
     for i in range(0, len(df), size):
         yield df.iloc[i:i+size]
 
@@ -521,7 +521,7 @@ def load_motor_data(df: pd.DataFrame):
         with target_engine.begin() as conn:
             total = len(df)
             done = 0
-            for batch in chunker(df, size=5000):
+            for batch in chunker(df, size=10000):
                 records = batch.to_dict(orient="records")
 
                 # ถ้าตารางไม่มี default ของ create_at ใน DB ให้เติมเองตอน INSERT

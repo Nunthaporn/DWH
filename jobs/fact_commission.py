@@ -332,7 +332,7 @@ def load_commission_data(df: pd.DataFrame):
     pk_column = 'quotation_num'
     MAX_RETRIES = 3
     RETRY_DELAY = 2  
-    BATCH_SIZE = 1000
+    BATCH_SIZE = 10000
 
     # --- ตรวจสอบก่อนเขียน DB (ยังคง dtype แบบ nullable ใน pandas) ---
     final_nan_counts = df.isna().sum()

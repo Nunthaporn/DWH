@@ -312,7 +312,7 @@ def upsert_payment_plan_ids(df_pairs: pd.DataFrame) -> int:
             if_exists="replace",
             index=False,
             method="multi",
-            chunksize=100_000
+            chunksize=200_000
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_payment_plan_temp_q ON dim_payment_plan_temp(quotation_num)"))
         print(f"✅ staged dim_payment_plan_temp: {len(need):,} rows")
