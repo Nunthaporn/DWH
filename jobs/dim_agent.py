@@ -306,7 +306,7 @@ def load_to_wh(df: pd.DataFrame):
 
     metadata_table = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    def chunk_dataframe(dfx, chunk_size=5000):
+    def chunk_dataframe(dfx, chunk_size=10000):
         for i in range(0, len(dfx), chunk_size):
             yield dfx.iloc[i:i + chunk_size]
 
@@ -441,7 +441,7 @@ def backfill_date_active(df: pd.DataFrame):
 
     metadata_table = Table(table_name, MetaData(), autoload_with=target_engine)
 
-    def chunk(dfx, n=5000):
+    def chunk(dfx, n=10000):
         for i in range(0, len(dfx), n):
             yield dfx.iloc[i:i+n]
 
