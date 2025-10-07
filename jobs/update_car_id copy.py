@@ -54,12 +54,15 @@ def has_thai_chars(v):
         return False
     return bool(re.search(r"[ก-๙]", str(v)))
 
-
 # =========================
-# 🧲 EXTRACT & CLEAN
+# 🧲 EXTRACT & CLEAN (จาก MariaDB)
 # =========================
 @op
 def extract_and_clean_vin_keys() -> pd.DataFrame:
+    """
+    ดึง quo_num, id_motor1(เครื่อง), id_motor2(VIN) แล้วทำความสะอาด
+    คืน DataFrame: [quotation_num, car_vin, engine_number]
+    """
     with source_engine.begin() as conn:
         df_pay = pd.read_sql(
             text("""
@@ -84,14 +87,17 @@ def extract_and_clean_vin_keys() -> pd.DataFrame:
         "id_motor1": "engine_number",
     })
 
+    if "car_vin" not in df.columns:
+        df["car_vin"] = None
+    if "engine_number" not in df.columns:
+        df["engine_number"] = None
+
     df["car_vin"] = normalize_str(df["car_vin"]).str.upper()
     df["engine_number"] = df["engine_number"].apply(clean_engine_number)
 
-    # ตัด VIN ที่มีภาษาไทยหรือว่าง
     df = df[df["car_vin"].notna()]
     df = df[~df["car_vin"].apply(has_thai_chars)]
 
-    # เลือก car_vin ล่าสุดถ้าซ้ำ
     df["_nonnull"] = df[["car_vin", "engine_number", "quotation_num"]].notna().sum(axis=1)
     df = df.sort_values("_nonnull", ascending=False).drop_duplicates(subset=["car_vin"], keep="first")
     df = df.drop(columns=["_nonnull"])
@@ -100,9 +106,8 @@ def extract_and_clean_vin_keys() -> pd.DataFrame:
     print(f"✅ keys cleaned: {len(df):,} rows")
     return df
 
-
 # =========================
-# 🏭 LOAD dim_car
+# 🏭 LOAD dim_car (จาก PostgreSQL)
 # =========================
 @op
 def fetch_dim_car_min() -> pd.DataFrame:
@@ -118,37 +123,23 @@ def fetch_dim_car_min() -> pd.DataFrame:
     print(f"✅ dim_car loaded: {len(df_car):,} rows")
     return df_car
 
-
 # =========================
-# 🔗 BUILD MAPPING (with fallback)
+# 🔗 BUILD MAPPING (VIN+ENGINE -> car_id)
 # =========================
 @op
 def build_car_mapping(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
     """
-    1️⃣ join แบบ strict (VIN + ENGINE)
-    2️⃣ ถ้าไม่เจอเลย fallback เป็น join VIN-only
+    join แบบ strict ด้วย (car_vin, engine_number)
+    คืน DataFrame: [quotation_num, car_id]
     """
-    df_strict = pd.merge(df_keys, df_dim, on=["car_vin", "engine_number"], how="inner")
-
-    if df_strict.empty:
-        print("⚠️ No strict matches (VIN+ENGINE). Trying VIN-only matching...")
-        df_relaxed = pd.merge(df_keys, df_dim, on="car_vin", how="inner")
-        print(f"✅ VIN-only matches: {len(df_relaxed):,} rows")
-
-        if df_relaxed.empty:
-            print("❌ No VIN-only matches found either.")
-            return pd.DataFrame(columns=["quotation_num", "car_id"])
-
-        df_relaxed = df_relaxed[["quotation_num", "car_id"]].drop_duplicates()
-        return df_relaxed
-
-    print(f"✅ mapping built (strict VIN+ENGINE): {len(df_strict):,} rows")
-    df_strict = df_strict[["quotation_num", "car_id"]].drop_duplicates()
-    return df_strict
-
+    df_map = pd.merge(df_keys, df_dim, on=["car_vin", "engine_number"], how="inner")
+    df_map = df_map[["quotation_num", "car_id"]].copy()
+    df_map = df_map.drop_duplicates(subset=["quotation_num"], keep="first")
+    print(f"✅ mapping built (strict VIN+ENGINE): {len(df_map):,} rows")
+    return df_map
 
 # =========================
-# 🚀 UPSERT INTO fact_sales_quotation
+# 🚀 Restrict + Stage + Update + Drop (รวมใน op เดียว)
 # =========================
 @op
 def upsert_car_ids(df_map: pd.DataFrame) -> int:
@@ -156,6 +147,7 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
         print("⚠️ No mappings to upsert.")
         return 0
 
+    # คัดเฉพาะ quotation ที่มีอยู่จริงใน fact (ไม่จำกัดเฉพาะ NULL → อัปเดตทับได้)
     with target_engine.begin() as conn:
         df_fact = pd.read_sql(text("SELECT quotation_num FROM fact_sales_quotation"), conn)
 
@@ -164,37 +156,21 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
         .drop_duplicates(subset=["quotation_num"])
         .copy()
     )
-
     if need.empty:
         print("⚠️ No rows matched existing facts.")
         return 0
 
-    # 🧭 Debug ก่อน clean
-    print(f"🔍 Raw before clean: {len(need):,} rows")
-    print(need.head(5))
-    print(need.dtypes)
-
-    # 🧹 Clean
-    need["quotation_num"] = need["quotation_num"].astype(str).str.strip()
-    need["quotation_num"] = need["quotation_num"].replace(NULL_TOKENS, np.nan)
-
-    # ✅ เปลี่ยนตรงนี้ให้รองรับ UUID string
-    need["car_id"] = need["car_id"].astype(str).str.strip()
-    need["car_id"] = need["car_id"].replace(NULL_TOKENS, np.nan)
-
-    # 🧭 Debug หลัง clean
-    print(f"🧾 Rows before dropna: {len(need):,}")
-    print(need.isna().sum())
-
+    # sanitize
+    need["quotation_num"] = normalize_str(need["quotation_num"])
+    need["car_id"] = pd.to_numeric(need["car_id"], errors="coerce").astype("Int64")
     need = need.dropna(subset=["quotation_num", "car_id"])
-    print(f"✅ Rows after dropna: {len(need):,}")
 
     if need.empty:
         print("⚠️ No rows after cleaning.")
         return 0
 
-    # ✅ Upsert
     with target_engine.begin() as conn:
+        # Stage temp
         need.to_sql(
             "dim_car_temp",
             con=conn,
@@ -207,6 +183,7 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_car_temp_carid ON dim_car_temp(car_id)"))
         print(f"✅ staged dim_car_temp: {len(need):,} rows")
 
+        # อัปเดตทั้งกรณี NULL และกรณีมีค่าแต่ต่างจากค่าใหม่
         updated = conn.execute(text("""
             UPDATE fact_sales_quotation AS fsq
             SET car_id = t.car_id
@@ -215,25 +192,26 @@ def upsert_car_ids(df_map: pd.DataFrame) -> int:
               AND fsq.car_id IS DISTINCT FROM t.car_id;
         """)).rowcount or 0
 
+        # Drop temp
         conn.execute(text("DROP TABLE IF EXISTS dim_car_temp"))
         print("🗑️ dropped dim_car_temp")
 
     print(f"✅ fact_sales_quotation updated: {updated} rows")
     return updated
 
+
 # =========================
 # 🧱 DAGSTER JOB
 # =========================
 @job
 def update_car_id_on_fact():
-    keys = extract_and_clean_vin_keys()
-    dimc = fetch_dim_car_min()
+    keys  = extract_and_clean_vin_keys()
+    dimc  = fetch_dim_car_min()
     mapdf = build_car_mapping(keys, dimc)
-    _ = upsert_car_ids(mapdf)
-
+    _     = upsert_car_ids(mapdf)
 
 # =========================
-# ▶️ LOCAL RUN
+# ▶️ LOCAL RUN (optional)
 # =========================
 if __name__ == "__main__":
     k = extract_and_clean_vin_keys()
@@ -241,5 +219,3 @@ if __name__ == "__main__":
     m = build_car_mapping(k, d)
     updated = upsert_car_ids(m)
     print(f"🎉 done. updated rows = {updated}")
-
-
