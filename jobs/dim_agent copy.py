@@ -6,98 +6,58 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, MetaData, Table, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ============ ENV & ENGINES ============
 load_dotenv()
 
-# MariaDB (source)
 source_engine = create_engine(
-    "mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}".format(
-        user=os.getenv("DB_USER"),
-        pwd=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        db="fininsurance",
-    ),
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/fininsurance",
     pool_pre_ping=True,
 )
 
-# PostgreSQL (target)
 target_engine = create_engine(
-    "postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}".format(
-        user=os.getenv("DB_USER_test"),
-        pwd=os.getenv("DB_PASSWORD_test"),
-        host=os.getenv("DB_HOST_test"),
-        port=os.getenv("DB_PORT_test"),
-        db="fininsurance",
-    ),
-    connect_args={
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
-        "options": "-c statement_timeout=300000",
-    },
+    f"postgresql+psycopg2://{os.getenv('DB_USER_test')}:{os.getenv('DB_PASSWORD_test')}@"
+    f"{os.getenv('DB_HOST_test')}:{os.getenv('DB_PORT_test')}/fininsurance",
+    connect_args={"options": "-c statement_timeout=300000"},
     pool_pre_ping=True,
 )
 
-try:
-    from zoneinfo import ZoneInfo  # Python 3.9+
-except Exception:
-    ZoneInfo = None
 
-# ============ EXTRACT (today only) ============
+# ============ EXTRACT ============
 @op
 def extract_agent_data():
-
-    query_main = text("""
+    query_main = """
         SELECT
-            cuscode, name, rank,
-            user_registered,
-            status, fin_new_group, fin_new_mem,
-            type_agent, typebuy, user_email, name_store, address, city, district,
-            province, province_cur, area_cur, postcode, tel, date_active, 'display_name',
-            headteam, status_vip
+            cuscode, name, rank, user_registered, status,
+            fin_new_group, fin_new_mem, type_agent, typebuy,
+            user_email, name_store, address, city, district,
+            province, province_cur, area_cur, postcode, tel,
+            date_active, display_name, headteam, status_vip
         FROM wp_users
-        WHERE
-            (
-              (cuscode = 'WEB-T2R')  -- ✅ whitelist
-              OR (
-                user_login NOT IN ('FINTEST-01', 'FIN-TestApp', 'adminmag_fin', 'FNG00-00001')
-                AND name NOT LIKE '%%ทดสอบ%%'
-                AND name NOT LIKE '%%tes%%'
-                AND name NOT LIKE '%%test%%'
-                AND name NOT LIKE '%%เทสระบบ%%'
-                AND name NOT LIKE '%%Tes ระบบ%%'
-                AND name NOT LIKE '%%ทด่ท%%'
-                AND name NOT LIKE '%%ทด สอบ%%'
-                AND name NOT LIKE '%%ปัญญวัฒน์ โพธิ์ศรีทอง%%'
-                AND name NOT LIKE '%%เอกศิษฎ์ เจริญธันยบูรณ์%%'
-                AND cuscode NOT LIKE '%%FIN-TestApp%%'
-                AND cuscode NOT LIKE '%%FIN-Tester1%%'
-                AND cuscode NOT LIKE '%%FIN-Tester2%%'
-                AND display_name NOT LIKE '%%ทดสอบ%%'
-              )
+        WHERE (
+            cuscode = 'WEB-T2R'
+            OR (
+                user_login NOT IN ('FINTEST-01','FIN-TestApp','adminmag_fin','FNG00-00001')
+                AND name NOT LIKE '%%ทดสอบ%%' AND name NOT LIKE '%%test%%'
+                AND cuscode NOT LIKE '%%Tester%%'
             )
-    """)
+        )
+    """
 
-    df_main = pd.read_sql(query_main, source_engine)
+    # ✅ อ่านแบบ chunksize เพื่อลด memory load
+    chunks = pd.read_sql(text(query_main), source_engine, chunksize=30000)
+    df_main = pd.concat(chunks, ignore_index=True)
+    print(f"📦 df_main: {len(df_main):,}")
 
-    # career (left join)
-    query_career = text("SELECT cuscode, career FROM policy_register")
-    df_career = pd.read_sql(query_career, source_engine)
+    # ✅ career -> dict แล้ว map แทน merge (เร็วขึ้นมาก)
+    df_career = pd.read_sql("SELECT cuscode, career FROM policy_register", source_engine)
+    career_map = dict(zip(df_career["cuscode"], df_career["career"]))
+    df_main["career"] = df_main["cuscode"].map(career_map)
+    print(f"✅ merged career in {len(df_main):,} rows")
 
-    print("📦 df_main:", df_main.shape)
-    print("📦 df_career:", df_career.shape)
-
-    df = pd.merge(df_main, df_career, on="cuscode", how="left")
-    print("🔎 After merge: rows =", len(df))
-
-    if "career" in df.columns:
-        df["career"] = df["career"].astype(str).str.strip()
-
-    return df
+    return df_main
 
 # ============ CLEAN ============
 @op
