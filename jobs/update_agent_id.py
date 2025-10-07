@@ -143,7 +143,7 @@ def stage_dim_agent_temp(df_map: pd.DataFrame) -> str:
     if not to_append.empty:
         with target_engine.begin() as conn:
             to_append.to_sql("dim_agent_temp", con=conn, schema=PG_SCHEMA,
-                             if_exists="append", index=False, method="multi", chunksize=100_000)
+                             if_exists="append", index=False, method="multi", chunksize=200_000)
         print(f"✅ staged → {len(to_append):,} rows into {full_tbl}")
     else:
         print(f"⚠️ no rows to stage, created empty table → {full_tbl}")
