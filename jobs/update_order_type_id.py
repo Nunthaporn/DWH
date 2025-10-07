@@ -1,6 +1,5 @@
 from dagster import op, job
 import os
-import re
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -38,189 +37,66 @@ target_engine = create_engine(
 )
 
 # =========================
-# 🔧 HELPERS
-# =========================
-NULL_TOKENS = {"", "nan", "none", "null", "undefined", "nat"}
-
-def _norm(s):
-    if pd.isna(s):
-        return ""
-    return str(s).strip()
-
-def _lower(s):
-    return _norm(s).lower()
-
-BASE_MAP = [
-    (r"\bapp\b|application|mobile|แอป", "APP"),
-    (r"\bweb\b|website|เวบ|เว็บไซต์", "WEB"),
-]
-SUBTYPE_SET = {"B2B", "B2C", "TELE", "THAIPOST", "THAICARE"}
-
-DEFAULT_SUBTYPE_APP = {
-    "ประกันโควิด": "B2B",
-    "ประกันชีวิต": "B2B",
-    "ประกันเบ็ดเตล็ด": "B2B",
-    "ประกันโรคร้ายแรง": "B2B",
-    "ประกันสุขภาพกลุ่ม": "B2B",
-    "ประกันอัคคีภัยsme": "B2B",
-    "ประกันอัคคีภัยทั่วไป": "B2B",
-    "ประกันอุบัติเหตุกลุ่ม": "B2B",
-}
-DEFAULT_SUBTYPE_WEB = {
-    "ประกันโควิด": "B2B",
-    "ประกันชีวิต": "B2B",
-}
-
-def normalize_str(s: pd.Series) -> pd.Series:
-    s = s.astype("string").str.strip()
-    return s.mask(s.str.lower().isin(NULL_TOKENS))
-
-def base_from_type_key(text_in: str) -> str | None:
-    low = _lower(text_in)
-    for pat, label in BASE_MAP:
-        if re.search(pat, low):
-            return label
-    return None
-
-def normalize_special_subtype(raw: str) -> str:
-    s = _norm(raw).upper()
-    return s.replace("WEB-AFF", "AFF").replace("WEB AFF", "AFF")
-
-def extract_subtype(raw: str) -> str | None:
-    s = normalize_special_subtype(raw)
-    if not s:
-        return None
-    tokens = re.split(r"[ \-_/]+", s.upper())
-    for tok in tokens:
-        t = tok.strip()
-        if t in SUBTYPE_SET:
-            return t
-    s_up = s.upper()
-    for _, base_label in BASE_MAP:
-        s_up = re.sub(rf"\b{re.escape(base_label)}\b", "", s_up, flags=re.IGNORECASE)
-    s_up = re.sub(r"\s+", " ", s_up).strip()
-    return s_up if s_up else None
-
-def derive_base(row) -> str | None:
-    return base_from_type_key(row.get("type_key", ""))
-
-def default_subtype_by_product(base: str | None, type_insure: str | None) -> str | None:
-    if not base:
-        return None
-    name = _lower(type_insure)
-    if base == "APP":
-        for k, v in DEFAULT_SUBTYPE_APP.items():
-            if _lower(k) == name:
-                return v
-    if base == "WEB":
-        for k, v in DEFAULT_SUBTYPE_WEB.items():
-            if _lower(k) == name:
-                return v
-    return None
-
-def derive_subtype(row) -> str | None:
-    ch_val = row.get("chanel_key", "")
-    app_val = row.get("app_type", "")
-    sub = extract_subtype(ch_val) or extract_subtype(app_val)
-    if sub:
-        return sub
-    blob = " ".join([
-        _lower(ch_val), _lower(app_val),
-        _lower(row.get("type_key", "")),
-        _lower(row.get("type_insure", "")),
-        _lower(row.get("worksend", "")),
-    ])
-    if ("vif" in blob) or ("ตรอ" in blob):
-        return "VIF" if "VIF" in SUBTYPE_SET else None
-    return None
-
-def parse_key_channel(row):
-    base = derive_base(row)
-    subtype = derive_subtype(row)
-    if not subtype:
-        subtype = default_subtype_by_product(base, row.get("type_insure", ""))
-    if not base and subtype == "VIF":
-        base = "WEB"
-    # normalize aliases from the original rules
-    if subtype:
-        s = subtype.strip().upper()
-        if s == "TELE":
-            return f"APP TELE"
-        if s == "B2B":
-            return f"APP B2B" if base in (None, "APP") else f"{base} B2B"
-        if s == "WEB AFF":
-            return "WEB B2C"
-        if s == "THAICARE":
-            return "WEB THAICARE"
-    if base in {"APP", "WEB"} and subtype:
-        return f"{base} {subtype}"
-    if base and not subtype:
-        return base
-    if subtype and not base:
-        return subtype
-    return ""
-
-# =========================
-# 🧲 EXTRACT (from MariaDB)
+# 🧲 EXTRACT
 # =========================
 @op
 def extract_merge_sources() -> pd.DataFrame:
     with source_engine_main.begin() as conn_main, source_engine_task.begin() as conn_task:
         df = pd.read_sql(text("""
-            SELECT quo_num, type_insure, type_work, type_status, type_key, app_type, chanel_key, token, in_advance, check_tax
+            SELECT quo_num, type_insure, type_work, type_status, type_key, 
+                   app_type, chanel_key, token, in_advance, check_tax
             FROM fin_system_select_plan
+            WHERE quo_num >= 'FQ2400'  -- ✅ filter ให้เร็วขึ้น (ปรับได้ตามช่วง)
         """), conn_main)
         df1 = pd.read_sql(text("""
             SELECT quo_num, worksend
             FROM fin_order
         """), conn_task)
-    out = pd.merge(df, df1, on="quo_num", how="left")
-    return out
+    return pd.merge(df, df1, on="quo_num", how="left")
 
 # =========================
-# 🧼 TRANSFORM → Keys for dim_order_type
+# 🧼 TRANSFORM (Vectorized)
 # =========================
 @op
 def transform_build_keys(df_merged: pd.DataFrame) -> pd.DataFrame:
     df = df_merged.copy()
 
-    # key_channel
-    if "worksend" not in df.columns:
-        df["worksend"] = None
-    if "token" not in df.columns:
-        df["token"] = None
+    # normalize lowercase
+    df["type_key_norm"] = df["type_key"].fillna("").str.lower()
 
-    df["key_channel"] = df.apply(parse_key_channel, axis=1)
-
-    # post normalize
-    df["key_channel"] = (
-        df["key_channel"].astype(str)
-        .str.replace("-", " ", regex=False)
-        .str.replace(r"\s+", " ", regex=True)
-        .str.strip()
+    # ✅ vectorized base extraction
+    df["base"] = np.select(
+        [
+            df["type_key_norm"].str.contains(r"app|application|mobile|แอป", regex=True, na=False),
+            df["type_key_norm"].str.contains(r"web|website|เวบ|เว็บไซต์", regex=True, na=False),
+        ],
+        ["APP", "WEB"],
+        default=None
     )
 
-    # fill from token if key_channel empty
-    key_null = df["key_channel"].isna() | (df["key_channel"].astype(str).str.strip() == "")
-    token_has = df["token"].notna() & (df["token"].astype(str).str.strip() != "")
-    df.loc[key_null & token_has, "key_channel"] = "WEB"
-    df.loc[key_null & ~token_has, "key_channel"] = "APP"
+    # ✅ vectorized subtype extraction
+    df["subtype"] = (
+        df["chanel_key"].fillna("").str.upper()
+        .str.extract(r"(B2B|B2C|TELE|THAIPOST|THAICARE)", expand=False)
+    )
 
-    # rename columns to match dim_order_type keys
-    df.rename(columns={
-        "quo_num": "quotation_num",
-        "type_insure": "type_insurance",
-        "type_work": "order_type",
-        "type_status": "check_type",
-        "worksend": "work_type",
-    }, inplace=True)
+    # combine base + subtype
+    df["key_channel"] = np.where(
+        df["subtype"].notna(),
+        (df["base"].fillna("") + " " + df["subtype"].fillna("")).str.strip(),
+        df["base"]
+    )
 
-    # rule: if order_type == 1 → NULL (handle both str/int)
-    with np.errstate(all='ignore'):
-        as_num = pd.to_numeric(df["order_type"], errors="coerce")
-    df.loc[as_num == 1, "order_type"] = np.nan
+    # ✅ fallback จาก token
+    df["key_channel"] = np.where(
+        df["key_channel"].isna() | (df["key_channel"].astype(str).str.strip() == ""),
+        np.where(
+            df["token"].notna() & (df["token"].astype(str).str.strip() != ""), "WEB", "APP"
+        ),
+        df["key_channel"]
+    )
 
-    # override order_type by in_advance / check_tax
+    # ✅ override order_type ด้วย in_advance/check_tax
     df["order_type"] = np.select(
         [
             df["in_advance"] == 1,
@@ -230,24 +106,22 @@ def transform_build_keys(df_merged: pd.DataFrame) -> pd.DataFrame:
             "งานต่ออายุล่วงหน้า",
             "งานต่อภาษี"
         ],
-        default=df["order_type"]
+        default=df["type_work"]
     )
 
-    # tidy
-    df.drop(columns=["type_key", "app_type", "token", "chanel_key"], inplace=True, errors="ignore")
-    obj_cols = df.select_dtypes(include=["object"]).columns
-    df[obj_cols] = df[obj_cols].apply(
-        lambda s: s.replace(r"^\s*$", np.nan, regex=True).replace(r"^\s*(nan|NaN)\s*$", np.nan, regex=True)
-    )
-    df = df.where(pd.notnull(df), None)
+    # ✅ rename columns
+    df.rename(columns={
+        "quo_num": "quotation_num",
+        "type_insure": "type_insurance",
+        "type_status": "check_type",
+        "worksend": "work_type",
+    }, inplace=True)
 
-    if "quotation_num" not in df.columns:
-        raise ValueError("missing 'quotation_num' for upsert pipeline")
+    # ✅ clean empty text
+    df = df.replace(r"^\s*$", np.nan, regex=True)
     df = df.drop_duplicates(subset=["quotation_num"], keep="first")
 
-    # keep only keys needed to join with dim_order_type
-    cols = ["quotation_num", "type_insurance", "order_type", "check_type", "work_type", "key_channel"]
-    return df[cols]
+    return df[["quotation_num", "type_insurance", "order_type", "check_type", "work_type", "key_channel"]]
 
 # =========================
 # 📖 Load dim_order_type
@@ -255,14 +129,13 @@ def transform_build_keys(df_merged: pd.DataFrame) -> pd.DataFrame:
 @op
 def fetch_dim_order_type() -> pd.DataFrame:
     with target_engine.begin() as conn:
-        df = pd.read_sql(
+        return pd.read_sql(
             text("SELECT order_type_id, type_insurance, order_type, check_type, work_type, key_channel FROM dim_order_type"),
             conn
         )
-    return df
 
 # =========================
-# 🔗 Join → get order_type_id per quotation
+# 🔗 JOIN
 # =========================
 @op
 def join_to_dim_order_type(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
@@ -271,56 +144,55 @@ def join_to_dim_order_type(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.Da
         on=["type_insurance", "order_type", "check_type", "work_type", "key_channel"],
         how="left"
     )
-    out = df[["quotation_num", "order_type_id"]].copy()
-    return out
+    return df[["quotation_num", "order_type_id"]].dropna(subset=["order_type_id"])
 
 # =========================
-# 🚀 Stage + Update + Drop (รวมใน op เดียว)
+# 🚀 UPSERT (optimized)
 # =========================
 @op
 def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
-    # ใช้ผล join ทั้งหมดที่มี order_type_id (ไม่จำกัดเฉพาะ NULL)
-    need = (
-        df_pairs
-        .dropna(subset=["order_type_id"])
-        .drop_duplicates(subset=["quotation_num"])
-        .copy()
-    )
-
-    if need.empty:
+    if df_pairs.empty:
         print("⚠️ No rows to update.")
         return 0
 
-    with target_engine.begin() as conn:
-        # 1) Stage temp
-        need.to_sql(
-            "dim_order_type_temp",
-            con=conn,
-            if_exists="replace",
-            index=False,
-            method="multi",
-            chunksize=20000
-        )
-        # ดัชนีช่วยเร่ง JOIN/UPDATE
-        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_order_type_temp_q ON dim_order_type_temp(quotation_num)"))
+    with target_engine.connect() as conn:
+        with conn.begin():
+            df_pairs.to_sql(
+                "dim_order_type_temp",
+                con=conn,
+                if_exists="replace",
+                index=False,
+                method="multi",
+                chunksize=20000
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_order_type_temp_q ON dim_order_type_temp(quotation_num)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_sales_quotation_q ON fact_sales_quotation(quotation_num)"))
 
-        print(f"✅ staged dim_order_type_temp: {len(need):,} rows")
+            print(f"✅ staged dim_order_type_temp: {len(df_pairs):,} rows")
 
-        # 2) Update ทั้งกรณี NULL และกรณีมีค่าแต่ต่างจากค่าใหม่
-        updated = conn.execute(text("""
-            UPDATE fact_sales_quotation AS fsq
-            SET order_type_id = dc.order_type_id
-            FROM dim_order_type_temp AS dc
-            WHERE fsq.quotation_num = dc.quotation_num
-              AND fsq.order_type_id IS DISTINCT FROM dc.order_type_id;
-        """)).rowcount or 0
+            # ✅ batch update (ลด lock time)
+            quotation_list = df_pairs["quotation_num"].tolist()
+            chunk_size = 50000
+            updated_total = 0
 
-        # 3) Drop temp
-        conn.execute(text("DROP TABLE IF EXISTS dim_order_type_temp"))
-        print("🗑️ dropped dim_order_type_temp")
+            for i in range(0, len(quotation_list), chunk_size):
+                sub = quotation_list[i:i + chunk_size]
+                updated = conn.execute(text("""
+                    UPDATE fact_sales_quotation AS fsq
+                    SET order_type_id = dc.order_type_id
+                    FROM dim_order_type_temp AS dc
+                    WHERE fsq.quotation_num = dc.quotation_num
+                      AND fsq.order_type_id IS DISTINCT FROM dc.order_type_id
+                      AND fsq.quotation_num = ANY(:sublist);
+                """), {"sublist": sub}).rowcount or 0
+                updated_total += updated
+                print(f"  🔸 batch {i//chunk_size+1}: {updated:,} rows")
 
-    print(f"✅ fact_sales_quotation updated: {updated} rows")
-    return updated
+            conn.execute(text("DROP TABLE IF EXISTS dim_order_type_temp"))
+            print("🗑️ dropped dim_order_type_temp")
+
+    print(f"✅ fact_sales_quotation updated: {updated_total:,} rows")
+    return updated_total
 
 # =========================
 # 🧱 DAGSTER JOB
@@ -337,9 +209,9 @@ def update_order_type_id_on_fact():
 # ▶️ Local run (optional)
 # =========================
 if __name__ == "__main__":
-    m = extract_merge_sources()
-    k = transform_build_keys(m)
-    d = fetch_dim_order_type()
-    p = join_to_dim_order_type(k, d)
-    updated = upsert_order_type_ids(p)
-    print(f"🎉 done. updated rows = {updated}")
+    merged = extract_merge_sources()
+    keys   = transform_build_keys(merged)
+    dim    = fetch_dim_order_type()
+    pairs  = join_to_dim_order_type(keys, dim)
+    updated = upsert_order_type_ids(pairs)
+    print(f"🎉 done. updated rows = {updated:,}")
