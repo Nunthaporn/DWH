@@ -40,7 +40,7 @@ target_engine = create_engine(
 # 🧲 EXTRACT
 # =========================
 @op
-def extract_merge_sources_fast() -> pd.DataFrame:
+def extract_merge_sources() -> pd.DataFrame:
     query = text("""
         SELECT 
             fsp.quo_num, fsp.type_insure, fsp.type_work, fsp.type_status,
@@ -58,7 +58,7 @@ def extract_merge_sources_fast() -> pd.DataFrame:
 # ⚙️ TRANSFORM (vectorized)
 # =========================
 @op
-def transform_build_keys_fast(df: pd.DataFrame) -> pd.DataFrame:
+def transform_build_keys(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["key_channel"] = np.select(
         [
@@ -104,7 +104,7 @@ def transform_build_keys_fast(df: pd.DataFrame) -> pd.DataFrame:
 # 📖 LOAD DIM
 # =========================
 @op
-def fetch_dim_order_type_fast() -> pd.DataFrame:
+def fetch_dim_order_type() -> pd.DataFrame:
     with target_engine.begin() as conn:
         df = pd.read_sql(
             text("SELECT order_type_id, type_insurance, order_type, check_type, work_type, key_channel FROM dim_order_type"),
@@ -117,7 +117,7 @@ def fetch_dim_order_type_fast() -> pd.DataFrame:
 # 🔗 JOIN
 # =========================
 @op
-def join_to_dim_order_type_fast(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
+def join_to_dim_order_type(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> pd.DataFrame:
     df = pd.merge(
         df_keys, df_dim,
         on=["type_insurance", "order_type", "check_type", "work_type", "key_channel"],
@@ -131,7 +131,7 @@ def join_to_dim_order_type_fast(df_keys: pd.DataFrame, df_dim: pd.DataFrame) -> 
 # 🚀 UPSERT (optimized COPY)
 # =========================
 @op
-def upsert_order_type_ids_fast(df_pairs: pd.DataFrame) -> int:
+def upsert_order_type_ids(df_pairs: pd.DataFrame) -> int:
     if df_pairs.empty:
         print("⚠️ No rows to update.")
         return 0
@@ -175,20 +175,20 @@ def upsert_order_type_ids_fast(df_pairs: pd.DataFrame) -> int:
 # 🧱 DAGSTER JOB
 # =========================
 @job
-def update_order_type_id_on_fact_fast():
-    merged = extract_merge_sources_fast()
-    keys   = transform_build_keys_fast(merged)
-    dim    = fetch_dim_order_type_fast()
-    pairs  = join_to_dim_order_type_fast(keys, dim)
-    _      = upsert_order_type_ids_fast(pairs)
+def update_order_type_id_on_fact():
+    merged = extract_merge_sources()
+    keys   = transform_build_keys(merged)
+    dim    = fetch_dim_order_type()
+    pairs  = join_to_dim_order_type(keys, dim)
+    _      = upsert_order_type_ids(pairs)
 
 # =========================
 # ▶️ LOCAL RUN
 # =========================
 if __name__ == "__main__":
-    m = extract_merge_sources_fast()
-    k = transform_build_keys_fast(m)
-    d = fetch_dim_order_type_fast()
-    p = join_to_dim_order_type_fast(k, d)
-    updated = upsert_order_type_ids_fast(p)
+    m = extract_merge_sources()
+    k = transform_build_keys(m)
+    d = fetch_dim_order_type()
+    p = join_to_dim_order_type(k, d)
+    updated = upsert_order_type_ids(p)
     print(f"🎉 done. updated rows = {updated}")

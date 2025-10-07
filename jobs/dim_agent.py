@@ -32,7 +32,7 @@ target_engine = create_engine(
 
 # ============ EXTRACT ============
 @op
-def extract_agent_data_fast():
+def extract_agent_data():
     query = text("""
     SELECT 
         u.cuscode, u.name, u.rank, u.user_registered, u.status,
@@ -57,7 +57,7 @@ def extract_agent_data_fast():
 
 # ============ CLEAN ============
 @op
-def clean_agent_data_fast(df: pd.DataFrame) -> pd.DataFrame:
+def clean_agent_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["cuscode"] = df["cuscode"].astype(str).str.strip()
 
@@ -119,7 +119,7 @@ def clean_agent_data_fast(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============ LOAD (BULK UPSERT) ============
 @op
-def load_to_wh_fast(df: pd.DataFrame):
+def load_to_wh(df: pd.DataFrame):
     table_name = "dim_agent"
     pk = "agent_id"
 
@@ -146,7 +146,7 @@ def load_to_wh_fast(df: pd.DataFrame):
 
 # ============ BACKFILL DATE_ACTIVE ============
 @op
-def backfill_date_active_fast(df: pd.DataFrame):
+def backfill_date_active(df: pd.DataFrame):
     df = df[[ "agent_id", "date_active" ]].dropna(subset=["agent_id"])
     df["date_active"] = pd.to_datetime(df["date_active"], errors="coerce")
 
@@ -176,15 +176,17 @@ def backfill_date_active_fast(df: pd.DataFrame):
 
 # ============ JOB ============
 @job
-def dim_agent_etl_fast():
-    df = extract_agent_data_fast()
-    df_clean = clean_agent_data_fast(df)
-    load_to_wh_fast(df_clean)
-    backfill_date_active_fast(df_clean)
+def dim_agent_etl():
+    df = extract_agent_data()
+    df_clean = clean_agent_data(df)
+    load_to_wh(df_clean)
+    backfill_date_active(df_clean)
 
 if __name__ == "__main__":
-    df = extract_agent_data_fast()
-    df_clean = clean_agent_data_fast(df)
-    load_to_wh_fast(df_clean)
-    backfill_date_active_fast(df_clean)
+    df = extract_agent_data()
+    df_clean = clean_agent_data(df)
+    load_to_wh(df_clean)
+    backfill_date_active(df_clean)
     print("🎉 Completed fast ETL")
+
+
