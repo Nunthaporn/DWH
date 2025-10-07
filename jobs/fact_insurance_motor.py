@@ -575,14 +575,14 @@ if __name__ == "__main__":
         print("✅ Data cleaning completed")
         print("✅ Cleaned columns:", df_clean.columns)
 
-        # output_path = "fact_insurance_motor.xlsx"
-        # df_export = purge_na_tokens(df_clean.copy())
-        # df_export.to_excel(output_path, index=False, engine='openpyxl')
-        # print(f"💾 Saved to {output_path}")
+        output_path = "fact_insurance_motor.xlsx"
+        df_export = purge_na_tokens(df_clean.copy())
+        df_export.to_excel(output_path, index=False, engine='openpyxl')
+        print(f"💾 Saved to {output_path}")
 
         # โหลดเข้าฐาน (เปิดใช้เมื่อพร้อม)
         print("📤 Loading data to target database...")
-        load_motor_data(df_clean)
+        # load_motor_data(df_clean)
         print("🎉 ETL process completed! Data upserted to fact_insurance_motor.")
 
     except Exception as e:
