@@ -226,7 +226,19 @@ def extract_motor_data():
         SELECT quo_num, company, company_prb, assured_insurance_capital1, is_addon, type, repair_type, prb
         FROM fin_system_select_plan
         WHERE datestart >= :start_dt AND datestart < :end_dt
-          AND type_insure = 'ประกันรถ'
+            AND type_insure = 'ประกันรถ'
+            AND id_cus NOT IN ('FIN-TestApp','FIN-TestApp3','FIN-TestApp2','FIN-TestApp-2025',
+                            'FIN-Tester1','FIN-Tester2','FTR22-9999','FIN19090009',
+                            'fintest-01','fpc25-9999','bkk1_Hutsabodin','bkk1_Siraprapa',
+                            'FNG22-072450','FNG23-087046','upc2_Siraprapa','THAI25-12345',
+                            'FQ2408-24075','B2C-000000','123123')
+            AND name NOT IN ('ทดสอบ','tes','test','เทสระบบ','Tes ระบบ','ทด่ท','ทด สอบ',
+                            'ปัญญวัฒน์ โพธิ์ศรีทอง','เอกศิษฎ์ เจริญธันยบูรณ์','ทดสอย',
+                            'ทดสิบ','ทดสอล','ทด','ทดมแ','ทดดสอบ','ทดลอง','ทดลอง ทิพย',
+                            'ทดลองคีย์งาน','ทดวสอบ','ทอสอบ','ทเสอบ','ทบสอบ', 'เทส')
+            AND lastname NOT IN ('ทดสด','ทดสอบ','ทดสอบ2','ทดสอบบบ','ททดสอบสอน',
+                                'โวยวาย ทดสอบ','โวยวายทดสอบ','test', 'เทส')
+            AND COALESCE(company, '') NOT LIKE '%%Testing%%'
     """)
     df_plan = execute_query_with_retry(source_engine, plan_query, params={"start_dt": start_dt, "end_dt": end_dt})
 
